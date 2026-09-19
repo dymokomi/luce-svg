@@ -1,0 +1,686 @@
+#==============================================================================================
+#
+#   svg - A small SVG parser and flattener
+#
+#   DESCRIPTION:
+#       Reads an SVG string — paths, rects, circles, and nested group transforms — and flattens
+#       its curves and arcs into polylines. The result is a Drawing: the viewBox size plus a set
+#       of contours (each fill/stroke/closed) over one flat point buffer, in viewBox coordinates.
+#       Rendering is the caller's job, so this depends only on the standard library. Enough of
+#       the SVG grammar is covered for icon artwork (M L H V C S Q T A Z, rect, circle, g).
+#
+#==============================================================================================
+
+import memory
+import interop
+import math
+import strings
+
+## An SVG the parser could not read.
+pub let invalid: ErrorCode = ErrorCode.package(320)
+
+pub struct Point:
+    pub var x: f64 = 0.0
+    pub var y: f64 = 0.0
+
+## An affine transform mapping (x, y) to (a·x + c·y + e, b·x + d·y + f).
+struct Matrix:
+    var a: f64 = 1.0
+    var b: f64 = 0.0
+    var c: f64 = 0.0
+    var d: f64 = 1.0
+    var e: f64 = 0.0
+    var f: f64 = 0.0
+
+func identity() -> Matrix:
+    return Matrix()
+
+func apply(transform: Matrix, x: f64, y: f64) -> Point:
+    return Point(transform.a * x + transform.c * y + transform.e, transform.b * x + transform.d * y + transform.f)
+
+## `outer` composed with `inner`: a point is transformed by `inner`, then `outer`.
+func multiply(outer: Matrix, inner: Matrix) -> Matrix:
+    return Matrix(a = outer.a * inner.a + outer.c * inner.b,
+                  b = outer.b * inner.a + outer.d * inner.b,
+                  c = outer.a * inner.c + outer.c * inner.d,
+                  d = outer.b * inner.c + outer.d * inner.d,
+                  e = outer.a * inner.e + outer.c * inner.f + outer.e,
+                  f = outer.b * inner.e + outer.d * inner.f + outer.f)
+
+## One flattened outline: a run of points plus how it should be drawn.
+struct Contour:
+    var start: usize = 0
+    var length: usize = 0
+    var filled: bool = false
+    var stroked: bool = false
+    var closed: bool = false
+
+# mark: The drawing ===========================================================================
+
+## A parsed drawing: the viewBox size and its contours over a shared point buffer. Every point
+## is in viewBox space; a renderer scales them into its target and tints `currentColor` itself.
+pub struct Drawing:
+    var view_w: f64 = 0.0
+    var view_h: f64 = 0.0
+    var points: Point[]
+    var point_used: usize = 0
+    var contours: Contour[]
+    var contour_used: usize = 0
+
+    static func own(native: Drawing*) -> interop.Reference[Drawing]!:
+        return try interop.Reference[Drawing].adopt(native, drawing_type)
+
+    mutating func add_point(value: Point) -> !:
+        if self.point_used >= self.points.length:
+            let capacity: usize = 64 if self.points.length == 0 else self.points.length * 2
+            let grown = try alloc Point[capacity] in memory.heap
+            var index: usize = 0
+            while index < self.point_used:
+                grown[index] = self.points[index]
+                index += 1
+            if self.points.length > 0:
+                free(self.points) in memory.heap
+            self.points = grown
+        self.points[self.point_used] = value
+        self.point_used += 1
+
+    mutating func add_contour(value: Contour) -> !:
+        if self.contour_used >= self.contours.length:
+            let capacity: usize = 16 if self.contours.length == 0 else self.contours.length * 2
+            let grown = try alloc Contour[capacity] in memory.heap
+            var index: usize = 0
+            while index < self.contour_used:
+                grown[index] = self.contours[index]
+                index += 1
+            if self.contours.length > 0:
+                free(self.contours) in memory.heap
+            self.contours = grown
+        self.contours[self.contour_used] = value
+        self.contour_used += 1
+
+    ## Close an open outline that has at least one point.
+    mutating func flush(start: usize, filled: bool, stroked: bool, closed: bool) -> !:
+        let length = self.point_used - start
+        if length == 0:
+            return
+        try self.add_contour(Contour(start = start, length = length, filled = filled, stroked = stroked, closed = closed))
+
+    pub func view_width() -> f64:
+        return self.view_w
+
+    pub func view_height() -> f64:
+        return self.view_h
+
+    pub func contour_count() -> usize:
+        return self.contour_used
+
+    pub func contour_start(index: usize) -> usize:
+        return self.contours[index].start
+
+    pub func contour_size(index: usize) -> usize:
+        return self.contours[index].length
+
+    pub func contour_filled(index: usize) -> bool:
+        return self.contours[index].filled
+
+    pub func contour_stroked(index: usize) -> bool:
+        return self.contours[index].stroked
+
+    pub func contour_closed(index: usize) -> bool:
+        return self.contours[index].closed
+
+    pub func point(index: usize) -> Point:
+        return self.points[index]
+
+    pub mutating func close():
+        if self.points.length > 0:
+            free(self.points) in memory.heap
+        if self.contours.length > 0:
+            free(self.contours) in memory.heap
+        var empty_points: Point[]
+        var empty_contours: Contour[]
+        self.points = empty_points
+        self.contours = empty_contours
+        self.point_used = 0
+        self.contour_used = 0
+
+pub let drawing_type: interop.Type[Drawing] = interop.Type[Drawing]("SVG drawing", Drawing.close, closeable = true)
+
+# mark: Number and byte scanning ==============================================================
+
+func is_alpha(byte: u8) -> bool:
+    return (byte >= 'A' and byte <= 'Z') or (byte >= 'a' and byte <= 'z')
+
+func is_digit(byte: u8) -> bool:
+    return byte >= '0' and byte <= '9'
+
+func skip_separators(data: const u8[], pos: usize*):
+    while *pos < data.length:
+        let byte = data[*pos]
+        if byte == ' ' or byte == '\t' or byte == '\n' or byte == '\r' or byte == ',':
+            *pos += 1
+        else:
+            break
+
+func at_number(data: const u8[], pos: usize) -> bool:
+    if pos >= data.length:
+        return false
+    let byte = data[pos]
+    return byte == '+' or byte == '-' or byte == '.' or is_digit(byte)
+
+## Read one SVG number token (sign, digits, fraction, exponent) and parse it.
+func read_number(data: const u8[], pos: usize*) -> f64!:
+    skip_separators(data, pos)
+    let start = *pos
+    if *pos < data.length and (data[*pos] == '+' or data[*pos] == '-'):
+        *pos += 1
+    while *pos < data.length and is_digit(data[*pos]):
+        *pos += 1
+    if *pos < data.length and data[*pos] == '.':
+        *pos += 1
+        while *pos < data.length and is_digit(data[*pos]):
+            *pos += 1
+    if *pos < data.length and (data[*pos] == 'e' or data[*pos] == 'E'):
+        *pos += 1
+        if *pos < data.length and (data[*pos] == '+' or data[*pos] == '-'):
+            *pos += 1
+        while *pos < data.length and is_digit(data[*pos]):
+            *pos += 1
+    if *pos == start:
+        error(invalid, "expected a number in path data")
+    return try strings.parse_f64((str)data[start..<*pos])
+
+## Arc flags are a single 0 or 1 with no separator required.
+func read_flag(data: const u8[], pos: usize*) -> f64!:
+    skip_separators(data, pos)
+    if *pos >= data.length or (data[*pos] != '0' and data[*pos] != '1'):
+        error(invalid, "expected an arc flag")
+    let value = 1.0 if data[*pos] == '1' else 0.0
+    *pos += 1
+    return value
+
+# mark: Curve and arc flattening ==============================================================
+
+let segments: i64 = 16
+
+func cubic(drawing: Drawing*, transform: Matrix, x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) -> !:
+    for step in 1..<segments + 1:
+        let t = (f64)step / (f64)segments
+        let u = 1.0 - t
+        let bx = u * u * u * x0 + 3.0 * u * u * t * x1 + 3.0 * u * t * t * x2 + t * t * t * x3
+        let by = u * u * u * y0 + 3.0 * u * u * t * y1 + 3.0 * u * t * t * y2 + t * t * t * y3
+        try drawing.add_point(apply(transform, bx, by))
+
+func quadratic(drawing: Drawing*, transform: Matrix, x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> !:
+    for step in 1..<segments + 1:
+        let t = (f64)step / (f64)segments
+        let u = 1.0 - t
+        let bx = u * u * x0 + 2.0 * u * t * x1 + t * t * x2
+        let by = u * u * y0 + 2.0 * u * t * y1 + t * t * y2
+        try drawing.add_point(apply(transform, bx, by))
+
+## Endpoint-parameterised elliptical arc from (x0,y0) to (x2,y2), flattened to points.
+func arc(drawing: Drawing*, transform: Matrix, x0: f64, y0: f64, rx_in: f64, ry_in: f64,
+         rotation: f64, large: bool, sweep: bool, x2: f64, y2: f64) -> !:
+    var rx = math.abs(rx_in)
+    var ry = math.abs(ry_in)
+    if rx == 0.0 or ry == 0.0:
+        try drawing.add_point(apply(transform, x2, y2))
+        return
+    let phi = rotation * math.pi / 180.0
+    let cos_phi = math.cos(phi)
+    let sin_phi = math.sin(phi)
+    let dx = (x0 - x2) * 0.5
+    let dy = (y0 - y2) * 0.5
+    let x1p = cos_phi * dx + sin_phi * dy
+    let y1p = -sin_phi * dx + cos_phi * dy
+    # Grow the radii if they are too small to span the endpoints.
+    let lambda = x1p * x1p / (rx * rx) + y1p * y1p / (ry * ry)
+    if lambda > 1.0:
+        let scale = math.sqrt(lambda)
+        rx *= scale
+        ry *= scale
+    let numerator = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p
+    let denominator = rx * rx * y1p * y1p + ry * ry * x1p * x1p
+    var factor = math.sqrt(numerator / denominator) if numerator > 0.0 and denominator > 0.0 else 0.0
+    if large == sweep:
+        factor = -factor
+    let cxp = factor * rx * y1p / ry
+    let cyp = -factor * ry * x1p / rx
+    let cx = cos_phi * cxp - sin_phi * cyp + (x0 + x2) * 0.5
+    let cy = sin_phi * cxp + cos_phi * cyp + (y0 + y2) * 0.5
+    let start = math.atan2((y1p - cyp) / ry, (x1p - cxp) / rx)
+    var delta = math.atan2((-y1p - cyp) / ry, (-x1p - cxp) / rx) - start
+    if sweep and delta < 0.0:
+        delta += math.tau
+    elif not sweep and delta > 0.0:
+        delta -= math.tau
+    let steps = (i64)math.ceil(math.abs(delta) / (math.tau / (f64)(segments * 2))) + 1
+    for step in 1..<steps + 1:
+        let angle = start + delta * (f64)step / (f64)steps
+        let ex = cx + rx * math.cos(angle) * cos_phi - ry * math.sin(angle) * sin_phi
+        let ey = cy + rx * math.cos(angle) * sin_phi + ry * math.sin(angle) * cos_phi
+        try drawing.add_point(apply(transform, ex, ey))
+
+# mark: Path data =============================================================================
+
+func reflect(current: f64, control: f64) -> f64:
+    return 2.0 * current - control
+
+func parse_path(drawing: Drawing*, d: str, transform: Matrix, filled: bool, stroked: bool) -> !:
+    let data = d.bytes
+    var pos: usize = 0
+    var command: u8 = 0
+    var previous: u8 = 0
+    var cx: f64 = 0.0
+    var cy: f64 = 0.0
+    var sx: f64 = 0.0
+    var sy: f64 = 0.0
+    var control_x: f64 = 0.0
+    var control_y: f64 = 0.0
+    var open = false
+    var sub_start: usize = 0
+    while true:
+        skip_separators(data, &pos)
+        if pos >= data.length:
+            break
+        if is_alpha(data[pos]):
+            command = data[pos]
+            pos += 1
+        elif command == 0:
+            error(invalid, "path data must begin with a command")
+        let relative = command >= 'a' and command <= 'z'
+        if command == 'M' or command == 'm':
+            if open:
+                try drawing.flush(sub_start, filled, stroked, false)
+            let nx = try read_number(data, &pos)
+            let ny = try read_number(data, &pos)
+            cx = (cx + nx) if relative else nx
+            cy = (cy + ny) if relative else ny
+            sx = cx
+            sy = cy
+            sub_start = drawing.point_used
+            try drawing.add_point(apply(transform, cx, cy))
+            open = true
+            command = 'l' if relative else 'L'
+        elif command == 'L' or command == 'l':
+            let nx = try read_number(data, &pos)
+            let ny = try read_number(data, &pos)
+            cx = (cx + nx) if relative else nx
+            cy = (cy + ny) if relative else ny
+            try drawing.add_point(apply(transform, cx, cy))
+        elif command == 'H' or command == 'h':
+            let nx = try read_number(data, &pos)
+            cx = (cx + nx) if relative else nx
+            try drawing.add_point(apply(transform, cx, cy))
+        elif command == 'V' or command == 'v':
+            let ny = try read_number(data, &pos)
+            cy = (cy + ny) if relative else ny
+            try drawing.add_point(apply(transform, cx, cy))
+        elif command == 'C' or command == 'c':
+            var x1 = try read_number(data, &pos)
+            var y1 = try read_number(data, &pos)
+            var x2 = try read_number(data, &pos)
+            var y2 = try read_number(data, &pos)
+            var x3 = try read_number(data, &pos)
+            var y3 = try read_number(data, &pos)
+            if relative:
+                x1 += cx
+                y1 += cy
+                x2 += cx
+                y2 += cy
+                x3 += cx
+                y3 += cy
+            try cubic(drawing, transform, cx, cy, x1, y1, x2, y2, x3, y3)
+            control_x = x2
+            control_y = y2
+            cx = x3
+            cy = y3
+        elif command == 'S' or command == 's':
+            var x2 = try read_number(data, &pos)
+            var y2 = try read_number(data, &pos)
+            var x3 = try read_number(data, &pos)
+            var y3 = try read_number(data, &pos)
+            if relative:
+                x2 += cx
+                y2 += cy
+                x3 += cx
+                y3 += cy
+            var x1 = cx
+            var y1 = cy
+            if previous == 'C' or previous == 'c' or previous == 'S' or previous == 's':
+                x1 = reflect(cx, control_x)
+                y1 = reflect(cy, control_y)
+            try cubic(drawing, transform, cx, cy, x1, y1, x2, y2, x3, y3)
+            control_x = x2
+            control_y = y2
+            cx = x3
+            cy = y3
+        elif command == 'Q' or command == 'q':
+            var x1 = try read_number(data, &pos)
+            var y1 = try read_number(data, &pos)
+            var x2 = try read_number(data, &pos)
+            var y2 = try read_number(data, &pos)
+            if relative:
+                x1 += cx
+                y1 += cy
+                x2 += cx
+                y2 += cy
+            try quadratic(drawing, transform, cx, cy, x1, y1, x2, y2)
+            control_x = x1
+            control_y = y1
+            cx = x2
+            cy = y2
+        elif command == 'T' or command == 't':
+            var x2 = try read_number(data, &pos)
+            var y2 = try read_number(data, &pos)
+            if relative:
+                x2 += cx
+                y2 += cy
+            var x1 = cx
+            var y1 = cy
+            if previous == 'Q' or previous == 'q' or previous == 'T' or previous == 't':
+                x1 = reflect(cx, control_x)
+                y1 = reflect(cy, control_y)
+            try quadratic(drawing, transform, cx, cy, x1, y1, x2, y2)
+            control_x = x1
+            control_y = y1
+            cx = x2
+            cy = y2
+        elif command == 'A' or command == 'a':
+            let rx = try read_number(data, &pos)
+            let ry = try read_number(data, &pos)
+            let rotation = try read_number(data, &pos)
+            let large = (try read_flag(data, &pos)) != 0.0
+            let sweep = (try read_flag(data, &pos)) != 0.0
+            var ex = try read_number(data, &pos)
+            var ey = try read_number(data, &pos)
+            if relative:
+                ex += cx
+                ey += cy
+            try arc(drawing, transform, cx, cy, rx, ry, rotation, large, sweep, ex, ey)
+            cx = ex
+            cy = ey
+        elif command == 'Z' or command == 'z':
+            cx = sx
+            cy = sy
+            if open:
+                try drawing.flush(sub_start, filled, stroked, true)
+                open = false
+        else:
+            error(invalid, "unsupported path command")
+        previous = command
+    if open:
+        try drawing.flush(sub_start, filled, stroked, false)
+
+# mark: Rect and circle =======================================================================
+
+func corner(drawing: Drawing*, transform: Matrix, cx: f64, cy: f64, rx: f64, ry: f64, start: f64) -> !:
+    for step in 0..<5:
+        let angle = start + (math.pi * 0.5) * (f64)step / 4.0
+        try drawing.add_point(apply(transform, cx + rx * math.cos(angle), cy + ry * math.sin(angle)))
+
+func add_rect(drawing: Drawing*, transform: Matrix, x: f64, y: f64, w: f64, h: f64, rx_in: f64, ry_in: f64, filled: bool, stroked: bool) -> !:
+    var rx = math.abs(rx_in)
+    var ry = math.abs(ry_in)
+    if rx > w * 0.5:
+        rx = w * 0.5
+    if ry > h * 0.5:
+        ry = h * 0.5
+    let start = drawing.point_used
+    if rx <= 0.0 or ry <= 0.0:
+        try drawing.add_point(apply(transform, x, y))
+        try drawing.add_point(apply(transform, x + w, y))
+        try drawing.add_point(apply(transform, x + w, y + h))
+        try drawing.add_point(apply(transform, x, y + h))
+    else:
+        try corner(drawing, transform, x + w - rx, y + ry, rx, ry, -math.pi * 0.5)
+        try corner(drawing, transform, x + w - rx, y + h - ry, rx, ry, 0.0)
+        try corner(drawing, transform, x + rx, y + h - ry, rx, ry, math.pi * 0.5)
+        try corner(drawing, transform, x + rx, y + ry, rx, ry, math.pi)
+    try drawing.flush(start, filled, stroked, true)
+
+func add_circle(drawing: Drawing*, transform: Matrix, cx: f64, cy: f64, r: f64, filled: bool, stroked: bool) -> !:
+    let start = drawing.point_used
+    let steps = 32
+    for step in 0..<steps:
+        let angle = math.tau * (f64)step / (f64)steps
+        try drawing.add_point(apply(transform, cx + r * math.cos(angle), cy + r * math.sin(angle)))
+    try drawing.flush(start, filled, stroked, true)
+
+# mark: Attributes and transforms =============================================================
+
+## The value of `name="..."` inside `tag`, or none.
+func attribute(tag: str, name: str) -> str?:
+    let data = tag.bytes
+    let key = name.bytes
+    var index: usize = 0
+    while index + key.length + 2 <= data.length:
+        var matched = true
+        for offset in 0..<key.length:
+            if data[index + offset] != key[offset]:
+                matched = false
+                break
+        if matched and data[index + key.length] == '=' and data[index + key.length + 1] == '"':
+            var end = index + key.length + 2
+            while end < data.length and data[end] != '"':
+                end += 1
+            return (str)data[index + key.length + 2..<end]
+        index += 1
+    return none
+
+func number_attribute(tag: str, name: str, fallback: f64) -> f64:
+    let value = attribute(tag, name) else return fallback
+    return strings.parse_f64(value) catch _: recover fallback
+
+## Compose the transform list in `text` (translate/scale/rotate/matrix), left to right.
+func parse_transform(text: str) -> Matrix:
+    let data = text.bytes
+    var result = identity()
+    var pos: usize = 0
+    while pos < data.length:
+        while pos < data.length and (data[pos] == ' ' or data[pos] == ',' or data[pos] == '\t' or data[pos] == '\n'):
+            pos += 1
+        let name_start = pos
+        while pos < data.length and is_alpha(data[pos]):
+            pos += 1
+        if pos == name_start or pos >= data.length or data[pos] != '(':
+            break
+        let name = (str)data[name_start..<pos]
+        pos += 1
+        var values: f64[6] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        var count: usize = 0
+        while pos < data.length and data[pos] != ')':
+            if at_number(data, pos):
+                let value = read_number(data, &pos) catch _:
+                    break
+                if count < 6:
+                    values[count] = value
+                    count += 1
+            else:
+                pos += 1
+        if pos < data.length:
+            pos += 1
+        result = multiply(result, transform_function(name, values, count))
+    return result
+
+func transform_function(name: str, values: const f64[], count: usize) -> Matrix:
+    if name == "matrix" and count >= 6:
+        return Matrix(a = values[0], b = values[1], c = values[2], d = values[3], e = values[4], f = values[5])
+    if name == "translate":
+        return Matrix(e = values[0], f = values[1] if count >= 2 else 0.0)
+    if name == "scale":
+        return Matrix(a = values[0], d = values[1] if count >= 2 else values[0])
+    if name == "rotate":
+        let angle = values[0] * math.pi / 180.0
+        let cos_a = math.cos(angle)
+        let sin_a = math.sin(angle)
+        let rotation = Matrix(a = cos_a, b = sin_a, c = -sin_a, d = cos_a)
+        if count >= 3:
+            let to_origin = Matrix(e = -values[1], f = -values[2])
+            let back = Matrix(e = values[1], f = values[2])
+            return multiply(multiply(back, rotation), to_origin)
+        return rotation
+    return identity()
+
+func is_painted(tag: str, name: str, default_paint: str) -> bool:
+    let value = attribute(tag, name) else return default_paint != "" and default_paint != "none"
+    return value != "" and value != "none"
+
+# mark: The parser ============================================================================
+
+## Parse an SVG document into a flattened Drawing. Unsupported elements are ignored.
+pub func parse(source: str) -> interop.Reference[Drawing]!:
+    var empty_points: Point[]
+    var empty_contours: Contour[]
+    let native = try new Drawing(view_w = 0.0, view_h = 0.0, points = empty_points, point_used = 0, contours = empty_contours, contour_used = 0)
+    errdefer free(native)
+    errdefer native.close()
+    let data = source.bytes
+    var default_fill = "black"
+    var default_stroke = "none"
+    var stack: Matrix[8] = [Matrix(), Matrix(), Matrix(), Matrix(), Matrix(), Matrix(), Matrix(), Matrix()]
+    var depth: usize = 0
+    var index: usize = 0
+    while index < data.length:
+        if data[index] != '<':
+            index += 1
+            continue
+        let tag_start = index
+        var tag_end = index + 1
+        while tag_end < data.length and data[tag_end] != '>':
+            tag_end += 1
+        let tag = (str)data[tag_start..<tag_end]
+        let name = tag_name(tag)
+        if name == "svg":
+            native.view_w = view_size(tag, true)
+            native.view_h = view_size(tag, false)
+            if let paint = attribute(tag, "fill"):
+                default_fill = paint
+            if let paint = attribute(tag, "stroke"):
+                default_stroke = paint
+        elif name == "g":
+            let current = stack[depth - 1] if depth > 0 else identity()
+            var next = current
+            if let text = attribute(tag, "transform"):
+                next = multiply(current, parse_transform(text))
+            if depth < 8:
+                stack[depth] = next
+                depth += 1
+        elif name == "/g":
+            if depth > 0:
+                depth -= 1
+        elif name == "path" or name == "rect" or name == "circle":
+            let transform = stack[depth - 1] if depth > 0 else identity()
+            let filled = is_painted(tag, "fill", default_fill)
+            let stroked = is_painted(tag, "stroke", default_stroke)
+            if name == "path":
+                if let d = attribute(tag, "d"):
+                    try parse_path(native, d, transform, filled, stroked)
+            elif name == "rect":
+                let rx = number_attribute(tag, "rx", 0.0)
+                let ry = attribute(tag, "ry") else ""
+                let radius_y = strings.parse_f64(ry) catch _: recover rx
+                try add_rect(native, transform, number_attribute(tag, "x", 0.0), number_attribute(tag, "y", 0.0),
+                    number_attribute(tag, "width", 0.0), number_attribute(tag, "height", 0.0), rx, radius_y, filled, stroked)
+            else:
+                try add_circle(native, transform, number_attribute(tag, "cx", 0.0), number_attribute(tag, "cy", 0.0),
+                    number_attribute(tag, "r", 0.0), filled, stroked)
+        index = tag_end + 1 if tag_end < data.length else data.length
+    if native.view_w <= 0.0:
+        native.view_w = 24.0
+    if native.view_h <= 0.0:
+        native.view_h = 24.0
+    return try Drawing.own(native)
+
+## The element name right after `<`, e.g. "svg", "path", or "/g" for a closing group.
+func tag_name(tag: str) -> str:
+    let data = tag.bytes
+    if data.length < 2:
+        return ""
+    var start: usize = 1
+    if data[start] == '/':
+        var end = start + 1
+        while end < data.length and is_alpha(data[end]):
+            end += 1
+        return (str)data[start - 0..<end]
+    var end = start
+    while end < data.length and (is_alpha(data[end]) or is_digit(data[end])):
+        end += 1
+    return (str)data[start..<end]
+
+## width or height from the viewBox (4 numbers) if present, else the plain attribute.
+func view_size(tag: str, want_width: bool) -> f64:
+    if let box = attribute(tag, "viewBox"):
+        let data = box.bytes
+        var pos: usize = 0
+        var values: f64[4] = [0.0, 0.0, 0.0, 0.0]
+        var count: usize = 0
+        while count < 4 and at_number_or_space(data, &pos):
+            let value = read_number(data, &pos) catch _:
+                break
+            values[count] = value
+            count += 1
+        if count == 4:
+            return values[2] if want_width else values[3]
+    return number_attribute(tag, "width" if want_width else "height", 0.0)
+
+func at_number_or_space(data: const u8[], pos: usize*) -> bool:
+    skip_separators(data, pos)
+    return at_number(data, *pos)
+
+# mark: Tests =================================================================================
+
+test "a line path keeps its endpoints and is stroked, not filled":
+    let drawing = try parse("<svg viewBox=\"0 0 10 12\" fill=\"none\" stroke=\"currentColor\"><path d=\"M1 2 L3 4\"/></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.view_width() == 10.0 and native.view_height() == 12.0)
+    assert(native.contour_count() == 1)
+    assert(native.contour_size(0) == 2)
+    assert(native.contour_stroked(0) and not native.contour_filled(0) and not native.contour_closed(0))
+    assert(native.point(0).x == 1.0 and native.point(0).y == 2.0)
+    assert(native.point(1).x == 3.0 and native.point(1).y == 4.0)
+
+test "H, V and Z trace a closed box":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\"><path d=\"M2 2 H8 V8 H2 Z\"/></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.contour_count() == 1 and native.contour_closed(0))
+    assert(native.contour_size(0) == 4)
+    assert(native.point(1).x == 8.0 and native.point(1).y == 2.0)
+    assert(native.point(2).x == 8.0 and native.point(2).y == 8.0)
+    assert(native.point(3).x == 2.0 and native.point(3).y == 8.0)
+
+test "a cubic ends where it should and adds sampled points":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 C0 10 10 10 10 0\"/></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.contour_size(0) == 17)
+    let last = native.point(16)
+    assert(math.abs(last.x - 10.0) < 0.001 and math.abs(last.y - 0.0) < 0.001)
+
+test "relative moves and a group translate offset the geometry":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\"><g transform=\"translate(5 5)\"><path d=\"m1 1 l2 0\"/></g></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.contour_count() == 1 and native.contour_size(0) == 2)
+    assert(native.point(0).x == 6.0 and native.point(0).y == 6.0)
+    assert(native.point(1).x == 8.0 and native.point(1).y == 6.0)
+
+test "a filled rect and a circle produce closed contours":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\"><rect x=\"2\" y=\"3\" width=\"6\" height=\"4\" fill=\"currentColor\" stroke=\"none\"/><circle cx=\"12\" cy=\"12\" r=\"4\"/></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.contour_count() == 2)
+    assert(native.contour_filled(0) and not native.contour_stroked(0) and native.contour_closed(0))
+    assert(native.contour_size(0) == 4)
+    assert(native.contour_size(1) == 32 and native.contour_closed(1))
+
+test "a filled path with arcs (real icon shape) closes into one filled contour":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\"><path d=\"M6.5 3.5h11a3 3 0 0 1 3 3V8h-17V6.5a3 3 0 0 1 3-3Z\" fill=\"currentColor\"/></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.contour_count() == 1)
+    assert(native.contour_filled(0) and native.contour_closed(0))
+    assert(native.contour_size(0) > 8)

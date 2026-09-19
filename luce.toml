@@ -1,0 +1,6 @@
+[package]
+name = "luce_svg"
+source = "src"
+
+[exports]
+svg = "luce_svg.svg"
