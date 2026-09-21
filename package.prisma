@@ -1,0 +1,12 @@
+#prisma 4.0
+def package "luce-svg" {
+    str owner = "dymokomi"
+    str version = "0.1.0"
+    str language = "luce-base"
+    str description = "A small SVG parser and flattener for Luce/Base."
+    str readme = "README.md"
+
+    def export "svg" {
+        str module = "luce_svg.svg"
+    }
+}
