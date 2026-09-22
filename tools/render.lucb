@@ -1,0 +1,33 @@
+## Render an SVG file to a PGM coverage image with luce-svg's rasteriser, for
+## the conformance comparison in tools/conformance.py.
+##   render <input.svg> <size> <output.pgm>
+import c
+import files
+import memory
+import strings
+import svg
+
+pub func main(arguments: str[]) -> i32!:
+    if arguments.length != 4:
+        print("usage: render <input.svg> <size> <output.pgm>")
+        return 2
+    let input = try strings.copy(arguments[1])
+    defer strings.release(input)
+    let data = try files.read((c.str)input)
+    defer free(data)
+    let size = (u32)(try strings.parse_f64(arguments[2]))
+    let drawing = try svg.parse((str)data)
+    defer drawing.release()
+    let coverage = try alloc u8[(usize)size * (usize)size] in memory.heap
+    defer free(coverage) in memory.heap
+    try svg.rasterize(drawing.value(), size, size, coverage)
+    var header: u8[64]
+    let prefix = try format(header, f"P5\n{size} {size}\n255\n")
+    let output = try alloc u8[prefix.length + coverage.length] in memory.heap
+    defer free(output) in memory.heap
+    memory.copy(output, prefix.bytes, prefix.length)
+    memory.copy(output[prefix.length..], coverage, coverage.length)
+    let target = try strings.copy(arguments[3])
+    defer strings.release(target)
+    try files.write((c.str)target, output)
+    return 0

@@ -60,6 +60,10 @@ struct Contour:
     var round_join: bool = false
     var fill_opacity: f64 = 1.0
     var stroke_opacity: f64 = 1.0
+    ## The dash pattern (viewBox units, up to eight lengths) and its offset; none when empty.
+    var dashes: f64[8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var dash_count: usize = 0
+    var dash_offset: f64 = 0.0
 
 ## The style in force while an element's outlines are added.
 struct Style:
@@ -68,6 +72,9 @@ struct Style:
     var round_join: bool = false
     var fill_opacity: f64 = 1.0
     var stroke_opacity: f64 = 1.0
+    var dashes: f64[8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var dash_count: usize = 0
+    var dash_offset: f64 = 0.0
 
 # mark: The drawing ===========================================================================
 
@@ -120,7 +127,8 @@ pub struct Drawing:
             return
         try self.add_contour(Contour(start = start, length = length, filled = filled, stroked = stroked, closed = closed, width = self.style.width,
                                      round_cap = self.style.round_cap, round_join = self.style.round_join,
-                                     fill_opacity = self.style.fill_opacity, stroke_opacity = self.style.stroke_opacity))
+                                     fill_opacity = self.style.fill_opacity, stroke_opacity = self.style.stroke_opacity,
+                                     dashes = self.style.dashes, dash_count = self.style.dash_count, dash_offset = self.style.dash_offset))
 
     pub func view_width() -> f64:
         return self.view_w
@@ -225,7 +233,9 @@ func read_flag(data: const u8[], pos: usize*) -> f64!:
 
 # mark: Curve and arc flattening ==============================================================
 
-let segments: i64 = 16
+## Curves flatten to this many segments (arcs to twice this per turn): fine enough
+## that a 24-unit icon drawn at 256 pixels keeps its chord error under a tenth of a pixel.
+let segments: i64 = 48
 
 func cubic(drawing: Drawing*, transform: Matrix, x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) -> !:
     for step in 1..<segments + 1:
@@ -440,8 +450,8 @@ func parse_path(drawing: Drawing*, d: str, transform: Matrix, filled: bool, stro
 # mark: Rect and circle =======================================================================
 
 func corner(drawing: Drawing*, transform: Matrix, cx: f64, cy: f64, rx: f64, ry: f64, start: f64) -> !:
-    for step in 0..<5:
-        let angle = start + (math.pi * 0.5) * (f64)step / 4.0
+    for step in 0..<13:
+        let angle = start + (math.pi * 0.5) * (f64)step / 12.0
         try drawing.add_point(apply(transform, cx + rx * math.cos(angle), cy + ry * math.sin(angle)))
 
 func add_rect(drawing: Drawing*, transform: Matrix, x: f64, y: f64, w: f64, h: f64, rx_in: f64, ry_in: f64, filled: bool, stroked: bool) -> !:
@@ -458,6 +468,8 @@ func add_rect(drawing: Drawing*, transform: Matrix, x: f64, y: f64, w: f64, h: f
         try drawing.add_point(apply(transform, x + w, y + h))
         try drawing.add_point(apply(transform, x, y + h))
     else:
+        # As the SVG path for a rect begins: at (x + rx, y), then clockwise.
+        try drawing.add_point(apply(transform, x + rx, y))
         try corner(drawing, transform, x + w - rx, y + ry, rx, ry, -math.pi * 0.5)
         try corner(drawing, transform, x + w - rx, y + h - ry, rx, ry, 0.0)
         try corner(drawing, transform, x + rx, y + h - ry, rx, ry, math.pi * 0.5)
@@ -469,7 +481,7 @@ func add_circle(drawing: Drawing*, transform: Matrix, cx: f64, cy: f64, r: f64, 
 
 func add_ellipse(drawing: Drawing*, transform: Matrix, cx: f64, cy: f64, rx: f64, ry: f64, filled: bool, stroked: bool) -> !:
     let start = drawing.point_used
-    let steps = 32
+    let steps = 96
     for step in 0..<steps:
         let angle = math.tau * (f64)step / (f64)steps
         try drawing.add_point(apply(transform, cx + rx * math.cos(angle), cy + ry * math.sin(angle)))
@@ -579,6 +591,21 @@ func styled(tag: str, base: Style) -> Style:
         style.round_join = join == "round"
     style.fill_opacity = math.clamp(number_attribute(tag, "fill-opacity", base.fill_opacity), 0.0, 1.0)
     style.stroke_opacity = math.clamp(number_attribute(tag, "stroke-opacity", base.stroke_opacity), 0.0, 1.0)
+    if let pattern = attribute(tag, "stroke-dasharray"):
+        style.dash_count = 0
+        if pattern != "none":
+            let data = pattern.bytes
+            var pos: usize = 0
+            while pos < data.length and style.dash_count < 8:
+                skip_separators(data, &pos)
+                if pos >= data.length:
+                    break
+                let value = read_number(data, &pos) catch _:
+                    break
+                if value > 0.0:
+                    style.dashes[style.dash_count] = value
+                    style.dash_count += 1
+    style.dash_offset = number_attribute(tag, "stroke-dashoffset", base.dash_offset)
     return style
 
 func is_painted(tag: str, name: str, default_paint: str) -> bool:
@@ -650,24 +677,27 @@ func accumulate(acc: f32[], width: usize, height: usize, x0: f64, y0: f64, x1: f
             acc[base + (usize)xa_index] += (f32)(direction * dy * coverage)
             acc[base + (usize)xa_index + 1] += (f32)(direction * dy * (1.0 - coverage))
         else:
-            let span = xb - xa
-            let per_x = dy / span
-            let head = (xa_floor + 1.0 - xa)
-            let first_area = 0.5 * head * head * per_x
-            acc[base + (usize)xa_index] += (f32)(direction * first_area)
-            var column = xa_index + 1
-            var previous = first_area
-            while column < xb_index - 1:
-                let covered = ((f64)column + 1.0 - xa) - 0.5
-                let area = covered * per_x
-                acc[base + (usize)column] += (f32)(direction * (area - previous))
-                previous = area
-                column += 1
-            let last = xb - math.floor(xb)
-            let last_area = dy - 0.5 * (1.0 - last) * (1.0 - last) * per_x if last > 0.0 else dy
-            acc[base + (usize)column] += (f32)(direction * (last_area - previous))
-            if (usize)column + 1 <= width:
-                acc[base + (usize)column + 1] += (f32)(direction * (dy - last_area))
+            # Across several columns: the exact-area split font rasterisers use.
+            let d = direction * dy
+            let s = 1.0 / (xb - xa)
+            let xa_frac = xa - xa_floor
+            let a0 = 0.5 * s * (1.0 - xa_frac) * (1.0 - xa_frac)
+            let xb_frac = xb - (f64)xb_index + 1.0
+            let am = 0.5 * s * xb_frac * xb_frac
+            acc[base + (usize)xa_index] += (f32)(d * a0)
+            if xb_index == xa_index + 2:
+                acc[base + (usize)xa_index + 1] += (f32)(d * (1.0 - a0 - am))
+            else:
+                let a1 = s * (1.5 - xa_frac)
+                acc[base + (usize)xa_index + 1] += (f32)(d * (a1 - a0))
+                var column = xa_index + 2
+                while column < xb_index - 1:
+                    acc[base + (usize)column] += (f32)(d * s)
+                    column += 1
+                let a2 = a1 + (f64)(xb_index - xa_index - 3) * s
+                acc[base + (usize)(xb_index - 1)] += (f32)(d * (1.0 - a2 - am))
+            if (usize)xb_index <= width:
+                acc[base + (usize)xb_index] += (f32)(d * am)
         x = x_next
         row += 1
 
@@ -714,6 +744,94 @@ func disc(acc: f32[], width: usize, height: usize, centre: Point, radius: f64) -
         ring[index] = Point(centre.x + math.cos(angle) * radius, centre.y + math.sin(angle) * radius)
     accumulate_polygon(acc, width, height, ring)
 
+## Stroke one polyline of pixel-space points: a rectangle per segment, round joins
+## at the interior vertices and round caps at the ends when asked. A closed run
+## repeats its first point at the end and gets joins everywhere, no caps.
+func stroke_run(acc: f32[], width: usize, height: usize, path: const Point[], closed: bool, half: f64, round_cap: bool, round_join: bool) -> !:
+    let scratch = try alloc Point[4] in memory.heap
+    defer free(scratch) in memory.heap
+    let count = path.length
+    if count == 1:
+        if round_cap:
+            try disc(acc, width, height, path[0], half)
+        return
+    for index in 0..<count - 1:
+        let a = path[index]
+        let b = path[index + 1]
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let length = math.sqrt(dx * dx + dy * dy)
+        if length > 1e-9:
+            let nx = -dy / length * half
+            let ny = dx / length * half
+            scratch[0] = Point(a.x + nx, a.y + ny)
+            scratch[1] = Point(b.x + nx, b.y + ny)
+            scratch[2] = Point(b.x - nx, b.y - ny)
+            scratch[3] = Point(a.x - nx, a.y - ny)
+            accumulate_polygon(acc, width, height, scratch)
+    for index in 0..<count:
+        let interior = closed or (index > 0 and index + 1 < count)
+        if (interior and round_join) or (not interior and round_cap):
+            if not (closed and index == count - 1):
+                try disc(acc, width, height, path[index], half)
+
+## Stroke a polyline as dashes: walk its length against the pattern (in pixels),
+## emitting each "on" run as its own capped stroke.
+func stroke_dashed(acc: f32[], width: usize, height: usize, path: const Point[], contour: Contour, scale: f64, half: f64) -> !:
+    var total = 0.0
+    for index in 0..<contour.dash_count:
+        total += contour.dashes[index] * scale
+    if total <= 1e-9:
+        return
+    # Where in the pattern the path begins, from the offset.
+    var phase = contour.dash_offset * scale
+    phase = phase - math.floor(phase / total) * total
+    var slot: usize = 0
+    var remaining = contour.dashes[0] * scale
+    while phase >= remaining and slot < contour.dash_count * 2:
+        phase -= remaining
+        slot = (slot + 1) % contour.dash_count
+        remaining = contour.dashes[slot] * scale
+    remaining -= phase
+    var on = slot % 2 == 0
+    let run = try alloc Point[path.length + 2 * contour.dash_count + 8] in memory.heap
+    defer free(run) in memory.heap
+    var run_count: usize = 0
+    if on:
+        run[0] = path[0]
+        run_count = 1
+    for index in 0..<path.length - 1:
+        var a = path[index]
+        let b = path[index + 1]
+        var dx = b.x - a.x
+        var dy = b.y - a.y
+        var length = math.sqrt(dx * dx + dy * dy)
+        while length > remaining:
+            let t = remaining / length
+            let cut = Point(a.x + dx * t, a.y + dy * t)
+            if on:
+                if run_count < run.length:
+                    run[run_count] = cut
+                    run_count += 1
+                try stroke_run(acc, width, height, run[..<run_count], false, half, contour.round_cap, contour.round_join)
+                run_count = 0
+            else:
+                run[0] = cut
+                run_count = 1
+            on = not on
+            slot = (slot + 1) % contour.dash_count
+            remaining = contour.dashes[slot] * scale
+            a = cut
+            dx = b.x - a.x
+            dy = b.y - a.y
+            length = math.sqrt(dx * dx + dy * dy)
+        remaining -= length
+        if on and run_count < run.length:
+            run[run_count] = b
+            run_count += 1
+    if on and run_count >= 1:
+        try stroke_run(acc, width, height, run[..<run_count], false, half, contour.round_cap, contour.round_join)
+
 ## Rasterise `drawing` into `coverage`, `width * height` bytes, top-down: 255 where
 ## a fill or stroke covers a pixel fully, less along edges and under partial opacity.
 ## Strokes get their width, round caps and round joins; fills use the nonzero rule.
@@ -748,32 +866,17 @@ pub func rasterize(drawing: const Drawing*, width: u32, height: u32, coverage: u
             resolve(acc, w, h, contour.fill_opacity, coverage)
         if contour.stroked:
             let half = math.max(0.25, contour.width * fit.scale * 0.5)
-            let edges = count if contour.closed else count - 1
-            for index in 0..<edges:
-                let a = drawing.points[origin + index]
-                let b = drawing.points[origin + (index + 1) % count]
-                let ax = fit.offset_x + a.x * fit.scale
-                let ay = fit.offset_y + a.y * fit.scale
-                let bx = fit.offset_x + b.x * fit.scale
-                let by = fit.offset_y + b.y * fit.scale
-                let dx = bx - ax
-                let dy = by - ay
-                let length = math.sqrt(dx * dx + dy * dy)
-                if length > 1e-9:
-                    let nx = -dy / length * half
-                    let ny = dx / length * half
-                    scratch[0] = Point(ax + nx, ay + ny)
-                    scratch[1] = Point(bx + nx, by + ny)
-                    scratch[2] = Point(bx - nx, by - ny)
-                    scratch[3] = Point(ax - nx, ay - ny)
-                    accumulate_polygon(acc, w, h, scratch)
-            # Joins at interior vertices (all of them when closed), caps at the ends.
-            for index in 0..<count:
-                let interior = contour.closed or (index > 0 and index + 1 < count)
-                let wanted = (interior and contour.round_join) or (not interior and contour.round_cap and not contour.closed)
-                if wanted or (count == 1 and contour.round_cap):
-                    let p = drawing.points[origin + index]
-                    try disc(acc, w, h, Point(fit.offset_x + p.x * fit.scale, fit.offset_y + p.y * fit.scale), half)
+            # The contour in pixel space, closed ones with their first point repeated.
+            let extra: usize = 1 if contour.closed and count > 1 else 0
+            let path = try alloc Point[count + extra] in memory.heap
+            defer free(path) in memory.heap
+            for index in 0..<count + extra:
+                let p = drawing.points[origin + index % count]
+                path[index] = Point(fit.offset_x + p.x * fit.scale, fit.offset_y + p.y * fit.scale)
+            if contour.dash_count == 0:
+                try stroke_run(acc, w, h, path, contour.closed and count > 2, half, contour.round_cap, contour.round_join)
+            else:
+                try stroke_dashed(acc, w, h, path, contour, fit.scale, half)
             resolve(acc, w, h, contour.stroke_opacity, coverage)
 
 test "the rasteriser covers a stroked circle's ring and its filled disc with soft edges":
@@ -786,10 +889,10 @@ test "the rasteriser covers a stroked circle's ring and its filled disc with sof
     assert(coverage[24 * 48 + 24] == 0)
     assert(coverage[24 * 48 + 8] > 200 and coverage[24 * 48 + 40] > 200)
     assert(coverage[24 * 48 + 2] == 0)
-    # Off the centre row the ring's edges cross pixels part-way: soft values appear.
+    # Somewhere the ring's edges cross pixels part-way: soft values appear.
     var soft = false
-    for x in 0..<(usize)48:
-        let v = coverage[30 * 48 + x]
+    for index in 0..<(usize)(48 * 48):
+        let v = coverage[index]
         if v > 20 and v < 235:
             soft = true
     assert(soft)
@@ -941,8 +1044,8 @@ test "a cubic ends where it should and adds sampled points":
     let drawing = try parse("<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 C0 10 10 10 10 0\"/></svg>")
     defer drawing.release()
     let native = try drawing.get()
-    assert(native.contour_size(0) == 17)
-    let last = native.point(16)
+    assert(native.contour_size(0) == 49)
+    let last = native.point(48)
     assert(math.abs(last.x - 10.0) < 0.001 and math.abs(last.y - 0.0) < 0.001)
 
 test "relative moves and a group translate offset the geometry":
@@ -960,7 +1063,7 @@ test "a filled rect and a circle produce closed contours":
     assert(native.contour_count() == 2)
     assert(native.contour_filled(0) and not native.contour_stroked(0) and native.contour_closed(0))
     assert(native.contour_size(0) == 4)
-    assert(native.contour_size(1) == 32 and native.contour_closed(1))
+    assert(native.contour_size(1) == 96 and native.contour_closed(1))
 
 test "a filled path with arcs (real icon shape) closes into one filled contour":
     let drawing = try parse("<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\"><path d=\"M6.5 3.5h11a3 3 0 0 1 3 3V8h-17V6.5a3 3 0 0 1 3-3Z\" fill=\"currentColor\"/></svg>")
@@ -975,7 +1078,7 @@ test "ellipse, line and polygon elements become contours":
     defer drawing.release()
     let d = try drawing.get()
     assert(d.contour_count() == 3)
-    assert(d.contour_size(0) == 32 and d.contour_stroked(0))
-    let top = d.point(d.contour_start(0) + 24)
+    assert(d.contour_size(0) == 96 and d.contour_stroked(0))
+    let top = d.point(d.contour_start(0) + 72)
     assert(math.abs(top.y - 3.5) < 0.01 and math.abs(top.x - 12.0) < 0.01)
     assert(d.contour_size(1) == 2 and d.contour_size(2) == 3)
