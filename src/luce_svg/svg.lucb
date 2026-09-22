@@ -441,12 +441,33 @@ func add_rect(drawing: Drawing*, transform: Matrix, x: f64, y: f64, w: f64, h: f
     try drawing.flush(start, filled, stroked, true)
 
 func add_circle(drawing: Drawing*, transform: Matrix, cx: f64, cy: f64, r: f64, filled: bool, stroked: bool) -> !:
+    try add_ellipse(drawing, transform, cx, cy, r, r, filled, stroked)
+
+func add_ellipse(drawing: Drawing*, transform: Matrix, cx: f64, cy: f64, rx: f64, ry: f64, filled: bool, stroked: bool) -> !:
     let start = drawing.point_used
     let steps = 32
     for step in 0..<steps:
         let angle = math.tau * (f64)step / (f64)steps
-        try drawing.add_point(apply(transform, cx + r * math.cos(angle), cy + r * math.sin(angle)))
+        try drawing.add_point(apply(transform, cx + rx * math.cos(angle), cy + ry * math.sin(angle)))
     try drawing.flush(start, filled, stroked, true)
+
+## `line`, `polyline` and `polygon`: a run of points, closed for a polygon.
+func add_points(drawing: Drawing*, transform: Matrix, text: str, closed: bool, filled: bool, stroked: bool) -> !:
+    let start = drawing.point_used
+    let data = text.bytes
+    var pos: usize = 0
+    var count: usize = 0
+    var x = 0.0
+    while at_number_or_space(data, &pos):
+        let value = read_number(data, &pos) catch _:
+            break
+        if count % 2 == 0:
+            x = value
+        else:
+            try drawing.add_point(apply(transform, x, value))
+        count += 1
+    if count >= 4:
+        try drawing.flush(start, filled and closed, stroked, closed)
 
 # mark: Attributes and transforms =============================================================
 
@@ -570,7 +591,7 @@ pub func parse(source: str) -> interop.Reference[Drawing]!:
         elif name == "/g":
             if depth > 0:
                 depth -= 1
-        elif name == "path" or name == "rect" or name == "circle":
+        elif name == "path" or name == "rect" or name == "circle" or name == "ellipse" or name == "line" or name == "polyline" or name == "polygon":
             let transform = stack[depth - 1] if depth > 0 else identity()
             let filled = is_painted(tag, "fill", default_fill)
             let stroked = is_painted(tag, "stroke", default_stroke)
@@ -583,9 +604,20 @@ pub func parse(source: str) -> interop.Reference[Drawing]!:
                 let radius_y = strings.parse_f64(ry) catch _: recover rx
                 try add_rect(native, transform, number_attribute(tag, "x", 0.0), number_attribute(tag, "y", 0.0),
                     number_attribute(tag, "width", 0.0), number_attribute(tag, "height", 0.0), rx, radius_y, filled, stroked)
-            else:
+            elif name == "circle":
                 try add_circle(native, transform, number_attribute(tag, "cx", 0.0), number_attribute(tag, "cy", 0.0),
                     number_attribute(tag, "r", 0.0), filled, stroked)
+            elif name == "ellipse":
+                try add_ellipse(native, transform, number_attribute(tag, "cx", 0.0), number_attribute(tag, "cy", 0.0),
+                    number_attribute(tag, "rx", 0.0), number_attribute(tag, "ry", 0.0), filled, stroked)
+            elif name == "line":
+                let start = native.point_used
+                try native.add_point(apply(transform, number_attribute(tag, "x1", 0.0), number_attribute(tag, "y1", 0.0)))
+                try native.add_point(apply(transform, number_attribute(tag, "x2", 0.0), number_attribute(tag, "y2", 0.0)))
+                try native.flush(start, false, stroked, false)
+            else:
+                if let points = attribute(tag, "points"):
+                    try add_points(native, transform, points, name == "polygon", filled, stroked)
         index = tag_end + 1 if tag_end < data.length else data.length
     if native.view_w <= 0.0:
         native.view_w = 24.0
@@ -684,3 +716,13 @@ test "a filled path with arcs (real icon shape) closes into one filled contour":
     assert(native.contour_count() == 1)
     assert(native.contour_filled(0) and native.contour_closed(0))
     assert(native.contour_size(0) > 8)
+
+test "ellipse, line and polygon elements become contours":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\"><ellipse cx=\"12\" cy=\"9\" rx=\"8\" ry=\"5.5\"/><line x1=\"1\" y1=\"2\" x2=\"3\" y2=\"4\"/><polygon points=\"0,0 4,0 2,3\"/></svg>")
+    defer drawing.release()
+    let d = try drawing.get()
+    assert(d.contour_count() == 3)
+    assert(d.contour_size(0) == 32 and d.contour_stroked(0))
+    let top = d.point(d.contour_start(0) + 24)
+    assert(math.abs(top.y - 3.5) < 0.01 and math.abs(top.x - 12.0) < 0.01)
+    assert(d.contour_size(1) == 2 and d.contour_size(2) == 3)
