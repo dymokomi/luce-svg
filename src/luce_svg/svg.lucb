@@ -54,6 +54,20 @@ struct Contour:
     var filled: bool = false
     var stroked: bool = false
     var closed: bool = false
+    ## Stroke width in viewBox units, round caps and joins, and the paints' opacities.
+    var width: f64 = 1.0
+    var round_cap: bool = false
+    var round_join: bool = false
+    var fill_opacity: f64 = 1.0
+    var stroke_opacity: f64 = 1.0
+
+## The style in force while an element's outlines are added.
+struct Style:
+    var width: f64 = 1.0
+    var round_cap: bool = false
+    var round_join: bool = false
+    var fill_opacity: f64 = 1.0
+    var stroke_opacity: f64 = 1.0
 
 # mark: The drawing ===========================================================================
 
@@ -66,6 +80,7 @@ pub struct Drawing:
     var point_used: usize = 0
     var contours: Contour[]
     var contour_used: usize = 0
+    var style: Style = Style()
 
     static func own(native: Drawing*) -> interop.Reference[Drawing]!:
         return try interop.Reference[Drawing].adopt(native, drawing_type)
@@ -103,7 +118,9 @@ pub struct Drawing:
         let length = self.point_used - start
         if length == 0:
             return
-        try self.add_contour(Contour(start = start, length = length, filled = filled, stroked = stroked, closed = closed))
+        try self.add_contour(Contour(start = start, length = length, filled = filled, stroked = stroked, closed = closed, width = self.style.width,
+                                     round_cap = self.style.round_cap, round_join = self.style.round_join,
+                                     fill_opacity = self.style.fill_opacity, stroke_opacity = self.style.stroke_opacity))
 
     pub func view_width() -> f64:
         return self.view_w
@@ -128,6 +145,13 @@ pub struct Drawing:
 
     pub func contour_closed(index: usize) -> bool:
         return self.contours[index].closed
+
+    ## The stroke width of a contour, in viewBox units.
+    pub func contour_width(index: usize) -> f64:
+        return self.contours[index].width
+
+    pub func contour_fill_opacity(index: usize) -> f64:
+        return self.contours[index].fill_opacity
 
     pub func point(index: usize) -> Point:
         return self.points[index]
@@ -482,7 +506,8 @@ func attribute(tag: str, name: str) -> str?:
             if data[index + offset] != key[offset]:
                 matched = false
                 break
-        if matched and data[index + key.length] == '=' and data[index + key.length + 1] == '"':
+        let anchored = index == 0 or data[index - 1] == ' ' or data[index - 1] == '\t' or data[index - 1] == '\n'
+        if matched and anchored and data[index + key.length] == '=' and data[index + key.length + 1] == '"':
             var end = index + key.length + 2
             while end < data.length and data[end] != '"':
                 end += 1
@@ -544,9 +569,234 @@ func transform_function(name: str, values: const f64[], count: usize) -> Matrix:
         return rotation
     return identity()
 
+## `base` with whatever stroke and opacity attributes `tag` sets.
+func styled(tag: str, base: Style) -> Style:
+    var style = base
+    style.width = number_attribute(tag, "stroke-width", base.width)
+    if let cap = attribute(tag, "stroke-linecap"):
+        style.round_cap = cap == "round"
+    if let join = attribute(tag, "stroke-linejoin"):
+        style.round_join = join == "round"
+    style.fill_opacity = math.clamp(number_attribute(tag, "fill-opacity", base.fill_opacity), 0.0, 1.0)
+    style.stroke_opacity = math.clamp(number_attribute(tag, "stroke-opacity", base.stroke_opacity), 0.0, 1.0)
+    return style
+
 func is_painted(tag: str, name: str, default_paint: str) -> bool:
     let value = attribute(tag, name) else return default_paint != "" and default_paint != "none"
     return value != "" and value != "none"
+
+# mark: Coverage rasteriser ===================================================================
+
+## Where the drawing lands in a `width` by `height` pixel bitmap: scaled to fit
+## uniformly and centred, as an icon is fitted to its slot.
+struct Placement:
+    var scale: f64
+    var offset_x: f64
+    var offset_y: f64
+
+func placement(drawing: const Drawing*, width: u32, height: u32) -> Placement:
+    let scale = math.min((f64)width / drawing.view_w, (f64)height / drawing.view_h)
+    return Placement(scale = scale, offset_x = ((f64)width - drawing.view_w * scale) * 0.5, offset_y = ((f64)height - drawing.view_h * scale) * 0.5)
+
+## Signed-area accumulation of one edge into `acc` (width + 1 cells per row), the
+## exact-area method font rasterisers use: after a prefix sum along each row,
+## a cell holds the winding-weighted coverage of that pixel.
+func accumulate(acc: f32[], width: usize, height: usize, x0: f64, y0: f64, x1: f64, y1: f64):
+    if y0 == y1:
+        return
+    let stride = width + 1
+    let direction: f64 = 1.0 if y1 > y0 else -1.0
+    var top = y0
+    var bottom = y1
+    var left = x0
+    var right = x1
+    if direction < 0.0:
+        top = y1
+        bottom = y0
+        left = x1
+        right = x0
+    let dxdy = (right - left) / (bottom - top)
+    var x = left
+    var row = (usize)math.max(0.0, math.floor(top))
+    if top < 0.0:
+        x -= top * dxdy
+    let last_row = (usize)math.min((f64)height, math.ceil(bottom))
+    while row < last_row:
+        let row_top = math.max(top, (f64)row)
+        let row_bottom = math.min(bottom, (f64)(row + 1))
+        let dy = row_bottom - row_top
+        let x_next = x + dxdy * dy
+        let base = row * stride
+        var xa = x
+        var xb = x_next
+        if xa > xb:
+            let swap = xa
+            xa = xb
+            xb = swap
+        let xa_floor = math.floor(xa)
+        let xa_index = (i64)xa_floor
+        let xb_index = (i64)math.ceil(xb)
+        if xa_index < 0 or xb_index > (i64)width + 1:
+            # Off the bitmap: only its winding matters for what lies to the right.
+            if xa_index < 0:
+                acc[base] += (f32)(direction * dy)
+            else:
+                x = x_next
+                row += 1
+                continue
+        elif xa_index + 1 >= xb_index:
+            # Within one column: split the area between it and the next.
+            let coverage = (xa_floor + 1.0 - (xa + xb) * 0.5)
+            acc[base + (usize)xa_index] += (f32)(direction * dy * coverage)
+            acc[base + (usize)xa_index + 1] += (f32)(direction * dy * (1.0 - coverage))
+        else:
+            let span = xb - xa
+            let per_x = dy / span
+            let head = (xa_floor + 1.0 - xa)
+            let first_area = 0.5 * head * head * per_x
+            acc[base + (usize)xa_index] += (f32)(direction * first_area)
+            var column = xa_index + 1
+            var previous = first_area
+            while column < xb_index - 1:
+                let covered = ((f64)column + 1.0 - xa) - 0.5
+                let area = covered * per_x
+                acc[base + (usize)column] += (f32)(direction * (area - previous))
+                previous = area
+                column += 1
+            let last = xb - math.floor(xb)
+            let last_area = dy - 0.5 * (1.0 - last) * (1.0 - last) * per_x if last > 0.0 else dy
+            acc[base + (usize)column] += (f32)(direction * (last_area - previous))
+            if (usize)column + 1 <= width:
+                acc[base + (usize)column + 1] += (f32)(direction * (dy - last_area))
+        x = x_next
+        row += 1
+
+## Accumulate a closed polygon of pixel-space points, oriented so its area counts positive.
+func accumulate_polygon(acc: f32[], width: usize, height: usize, polygon: const Point[]):
+    if polygon.length < 3:
+        return
+    var area = 0.0
+    for index in 0..<polygon.length:
+        let a = polygon[index]
+        let b = polygon[(index + 1) % polygon.length]
+        area += a.x * b.y - b.x * a.y
+    for index in 0..<polygon.length:
+        var a = polygon[index]
+        var b = polygon[(index + 1) % polygon.length]
+        if area < 0.0:
+            let swap = a
+            a = b
+            b = swap
+        accumulate(acc, width, height, a.x, a.y, b.x, b.y)
+
+## Resolve the accumulator into `coverage` at `opacity`, taking the higher value
+## where shapes overlap, then clear it for the next shape.
+func resolve(acc: f32[], width: usize, height: usize, opacity: f64, coverage: u8[]):
+    let stride = width + 1
+    for row in 0..<height:
+        var sum: f32 = 0.0
+        for column in 0..<width:
+            sum += acc[row * stride + column]
+            acc[row * stride + column] = 0.0
+            let value = math.min(1.0, math.abs((f64)sum)) * opacity
+            let byte = (u8)(value * 255.0 + 0.5)
+            let slot = row * width + column
+            if byte > coverage[slot]:
+                coverage[slot] = byte
+        acc[row * stride + width] = 0.0
+
+## A regular polygon approximating a disc, for round caps and joins.
+func disc(acc: f32[], width: usize, height: usize, centre: Point, radius: f64) -> !:
+    let ring = try alloc Point[16] in memory.heap
+    defer free(ring) in memory.heap
+    for index in 0..<(usize)16:
+        let angle = (f64)index / 16.0 * math.pi * 2.0
+        ring[index] = Point(centre.x + math.cos(angle) * radius, centre.y + math.sin(angle) * radius)
+    accumulate_polygon(acc, width, height, ring)
+
+## Rasterise `drawing` into `coverage`, `width * height` bytes, top-down: 255 where
+## a fill or stroke covers a pixel fully, less along edges and under partial opacity.
+## Strokes get their width, round caps and round joins; fills use the nonzero rule.
+pub func rasterize(drawing: const Drawing*, width: u32, height: u32, coverage: u8[]) -> !:
+    if width == 0 or height == 0 or width > 4096 or height > 4096:
+        error(invalid, "a coverage bitmap is 1..4096 pixels on a side")
+    if coverage.length != (usize)width * (usize)height:
+        error(invalid, "the coverage buffer must hold width * height bytes")
+    for index in 0..<coverage.length:
+        coverage[index] = 0
+    let w = (usize)width
+    let h = (usize)height
+    let acc = try alloc f32[(w + 1) * h] in memory.heap
+    defer free(acc) in memory.heap
+    for index in 0..<acc.length:
+        acc[index] = 0.0
+    let fit = placement(drawing, width, height)
+    let scratch = try alloc Point[4] in memory.heap
+    defer free(scratch) in memory.heap
+    for contour_index in 0..<drawing.contour_used:
+        let contour = drawing.contours[contour_index]
+        if contour.length < 1:
+            continue
+        let origin = contour.start
+        let count = contour.length
+        if contour.filled and count >= 3:
+            for index in 0..<count:
+                let a = drawing.points[origin + index]
+                let b = drawing.points[origin + (index + 1) % count]
+                accumulate(acc, w, h, fit.offset_x + a.x * fit.scale, fit.offset_y + a.y * fit.scale, fit.offset_x + b.x * fit.scale, fit.offset_y + b.y * fit.scale)
+            # Orientation is the author's; the absolute winding fills either way.
+            resolve(acc, w, h, contour.fill_opacity, coverage)
+        if contour.stroked:
+            let half = math.max(0.25, contour.width * fit.scale * 0.5)
+            let edges = count if contour.closed else count - 1
+            for index in 0..<edges:
+                let a = drawing.points[origin + index]
+                let b = drawing.points[origin + (index + 1) % count]
+                let ax = fit.offset_x + a.x * fit.scale
+                let ay = fit.offset_y + a.y * fit.scale
+                let bx = fit.offset_x + b.x * fit.scale
+                let by = fit.offset_y + b.y * fit.scale
+                let dx = bx - ax
+                let dy = by - ay
+                let length = math.sqrt(dx * dx + dy * dy)
+                if length > 1e-9:
+                    let nx = -dy / length * half
+                    let ny = dx / length * half
+                    scratch[0] = Point(ax + nx, ay + ny)
+                    scratch[1] = Point(bx + nx, by + ny)
+                    scratch[2] = Point(bx - nx, by - ny)
+                    scratch[3] = Point(ax - nx, ay - ny)
+                    accumulate_polygon(acc, w, h, scratch)
+            # Joins at interior vertices (all of them when closed), caps at the ends.
+            for index in 0..<count:
+                let interior = contour.closed or (index > 0 and index + 1 < count)
+                let wanted = (interior and contour.round_join) or (not interior and contour.round_cap and not contour.closed)
+                if wanted or (count == 1 and contour.round_cap):
+                    let p = drawing.points[origin + index]
+                    try disc(acc, w, h, Point(fit.offset_x + p.x * fit.scale, fit.offset_y + p.y * fit.scale), half)
+            resolve(acc, w, h, contour.stroke_opacity, coverage)
+
+test "the rasteriser covers a stroked circle's ring and its filled disc with soft edges":
+    let source = "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"8\"/></svg>"
+    let drawing = try parse(source)
+    defer drawing.release()
+    var coverage: u8[48 * 48]
+    try rasterize(drawing.value(), 48, 48, coverage)
+    # Centre is empty, the ring at radius 16 px is solid, well outside is empty.
+    assert(coverage[24 * 48 + 24] == 0)
+    assert(coverage[24 * 48 + 8] > 200 and coverage[24 * 48 + 40] > 200)
+    assert(coverage[24 * 48 + 2] == 0)
+    # Off the centre row the ring's edges cross pixels part-way: soft values appear.
+    var soft = false
+    for x in 0..<(usize)48:
+        let v = coverage[30 * 48 + x]
+        if v > 20 and v < 235:
+            soft = true
+    assert(soft)
+    let filled = try parse("<svg viewBox=\"0 0 24 24\"><rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" fill=\"currentColor\" fill-opacity=\".5\"/></svg>")
+    defer filled.release()
+    try rasterize(filled.value(), 24, 24, coverage[..<24 * 24])
+    assert(coverage[12 * 24 + 12] > 120 and coverage[12 * 24 + 12] < 135 and coverage[1 * 24 + 1] == 0)
 
 # mark: The parser ============================================================================
 
@@ -560,6 +810,7 @@ pub func parse(source: str) -> interop.Reference[Drawing]!:
     let data = source.bytes
     var default_fill = "black"
     var default_stroke = "none"
+    var default_style = Style()
     var stack: Matrix[8] = [Matrix(), Matrix(), Matrix(), Matrix(), Matrix(), Matrix(), Matrix(), Matrix()]
     var depth: usize = 0
     var index: usize = 0
@@ -580,6 +831,7 @@ pub func parse(source: str) -> interop.Reference[Drawing]!:
                 default_fill = paint
             if let paint = attribute(tag, "stroke"):
                 default_stroke = paint
+            default_style = styled(tag, default_style)
         elif name == "g":
             let current = stack[depth - 1] if depth > 0 else identity()
             var next = current
@@ -595,6 +847,7 @@ pub func parse(source: str) -> interop.Reference[Drawing]!:
             let transform = stack[depth - 1] if depth > 0 else identity()
             let filled = is_painted(tag, "fill", default_fill)
             let stroked = is_painted(tag, "stroke", default_stroke)
+            native.style = styled(tag, default_style)
             if name == "path":
                 if let d = attribute(tag, "d"):
                     try parse_path(native, d, transform, filled, stroked)
