@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-svg" {
     str owner = "dymokomi"
-    str version = "0.2.0"
+    str version = "0.2.1"
     str kind = "package"
     str language = "luce-base"
     str description = "A small SVG parser and flattener for Luce/Base."
@@ -9,5 +9,11 @@ def package "luce-svg" {
 
     def export "svg" {
         str module = "luce_svg.svg"
+    }
+
+    def dependency "luce-std" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../luce-std"
     }
 }
