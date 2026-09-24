@@ -947,7 +947,10 @@ pub func parse(source: str) -> interop.Reference[Drawing]!:
             if depth > 0:
                 depth -= 1
         elif name == "path" or name == "rect" or name == "circle" or name == "ellipse" or name == "line" or name == "polyline" or name == "polygon":
-            let transform = stack[depth - 1] if depth > 0 else identity()
+            # The groups' transforms, then the shape's own (a rect turned about a point).
+            var transform = stack[depth - 1] if depth > 0 else identity()
+            if let text = attribute(tag, "transform"):
+                transform = multiply(transform, parse_transform(text))
             let filled = is_painted(tag, "fill", default_fill)
             let stroked = is_painted(tag, "stroke", default_stroke)
             native.style = styled(tag, default_style)
@@ -1082,3 +1085,17 @@ test "ellipse, line and polygon elements become contours":
     let top = d.point(d.contour_start(0) + 72)
     assert(math.abs(top.y - 3.5) < 0.01 and math.abs(top.x - 12.0) < 0.01)
     assert(d.contour_size(1) == 2 and d.contour_size(2) == 3)
+
+test "a shape's own transform applies after its groups', as a rect turned about a point":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\"><g transform=\"translate(1 0)\"><rect x=\"10\" y=\"2\" width=\"4\" height=\"4\" fill=\"currentColor\" stroke=\"none\" transform=\"rotate(90 12 12)\"/></g></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.contour_count() == 1 and native.contour_size(0) == 4)
+    # Turned a quarter about (12, 12), the top square 10..14 x 2..6 lands at 18..22 x 10..14; the group moves it right by 1.
+    var low_x = 100.0
+    var high_x = -100.0
+    for index in 0..<(usize)4:
+        let p = native.point(index)
+        low_x = math.min(low_x, p.x)
+        high_x = math.max(high_x, p.x)
+    assert(math.abs(low_x - 19.0) < 0.001 and math.abs(high_x - 23.0) < 0.001)
