@@ -288,8 +288,15 @@ func add_points(drawing: Drawing*, transform: Matrix, text: str, closed: bool) -
 
 ## Flatten one shape element `name` under `frame` into the drawing, as the next element.
 func add_shape(drawing: Drawing*, name: str, tag: str, frame: Frame) -> !:
-    drawing.style = frame.style
     let transform = frame.transform
+    drawing.style = frame.style
+    # The pen is in the element's user space: points leave it through the
+    # transform, so the width and dashes scale by its mean factor too.
+    let factor = math.sqrt(math.abs(transform.a * transform.d - transform.b * transform.c))
+    drawing.style.pen.width *= factor
+    for at in 0..<drawing.style.pen.dash_count:
+        drawing.style.pen.dashes[at] *= factor
+    drawing.style.pen.dash_offset *= factor
     let first = drawing.contour_used
     if name == "path":
         if let d = attribute(tag, "d"):
