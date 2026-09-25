@@ -1,0 +1,254 @@
+#==============================================================================================
+#
+#   svg/gradient - Gradient definitions, their placement on shapes, and color ramps
+#
+#   DESCRIPTION:
+#       A first pass over the document collects every linearGradient and radialGradient,
+#       wherever it stands, with its stops (offset, stop-color, stop-opacity, as attributes
+#       or style). A gradient takes what it does not set itself from the one its href names:
+#       its stops when it has none, and any attribute. Coordinates are numbers or
+#       percentages; gradientUnits is objectBoundingBox (the default, 0..1 across the
+#       shape's box) or userSpaceOnUse (the shape's own coordinates, percentages of the
+#       viewBox), and gradientTransform applies within that space. Each shape that paints
+#       with a gradient records the matrix from viewBox coordinates into gradient space.
+#       Colors blend in sRGB, as browsers blend them, before decoding to linear light;
+#       every spreadMethod pads.
+#
+#==============================================================================================
+
+## One color stop: where along the gradient it sits (0..1), its sRGB color and opacity.
+struct Stop:
+    var offset: f64 = 0.0
+    var color: Color = Color()
+    var opacity: f64 = 1.0
+
+## A gradient in its own space. Linear runs from (x1, y1) to (x2, y2); radial from the
+## focal point (fx, fy), kept inside the circle, out to the circle (cx, cy, r). Its stops
+## are `stop_count` of the drawing's, from `stop_start`.
+struct Gradient:
+    var radial: bool = false
+    var user_space: bool = false
+    var transform: Matrix = Matrix()
+    var x1: f64 = 0.0
+    var y1: f64 = 0.0
+    var x2: f64 = 1.0
+    var y2: f64 = 0.0
+    var cx: f64 = 0.5
+    var cy: f64 = 0.5
+    var r: f64 = 0.5
+    var fx: f64 = 0.5
+    var fy: f64 = 0.5
+    var stop_start: usize = 0
+    var stop_count: usize = 0
+
+## A gradient element as the first pass meets it, its tag a view into the source.
+struct Definition:
+    var id: str = ""
+    var tag: str = ""
+    var stop_start: usize = 0
+    var stop_count: usize = 0
+
+func is_gradient(name: str) -> bool:
+    return name == "linearGradient" or name == "radialGradient"
+
+# mark: Collecting ============================================================================
+
+## Collect every gradient of `source` into the drawing and return their ids by index
+## (views into `source`; the caller frees the array when it is not empty). A gradient
+## left with no stops gets an empty id, so a paint naming it falls back as for a
+## missing one.
+func collect_gradients(drawing: Drawing*, source: str) -> str[]!:
+    var count: usize = 0
+    var box = ViewBox()
+    var pos: usize = 0
+    while true:
+        let tag = next_tag(source, &pos) else break
+        let name = tag_name(tag)
+        if is_gradient(name):
+            count += 1
+        elif name == "svg" and box.w == 0.0:
+            box = view_box(tag)
+    var ids: str[]
+    if count == 0:
+        return ids
+    let definitions = try alloc Definition[count] in memory.heap
+    defer free(definitions) in memory.heap
+    var found: usize = 0
+    var open = false
+    pos = 0
+    while true:
+        let tag = next_tag(source, &pos) else break
+        let name = tag_name(tag)
+        if is_gradient(name):
+            let id = attribute(tag, "id") else ""
+            definitions[found] = Definition(id = id, tag = tag, stop_start = drawing.stop_used)
+            found += 1
+            open = not strings.ends_with(tag, "/")
+        elif name == "/linearGradient" or name == "/radialGradient":
+            open = false
+        elif name == "stop" and open:
+            let latest = definitions[found - 1]
+            let previous = drawing.stops[drawing.stop_used - 1].offset if latest.stop_count > 0 else 0.0
+            try drawing.add_stop(read_stop(tag, previous))
+            definitions[found - 1].stop_count += 1
+    ids = try alloc str[count] in memory.heap
+    errdefer free(ids) in memory.heap
+    for index in 0..<count:
+        let gradient = resolve_gradient(definitions, index, box.w if box.w > 0.0 else 24.0, box.h if box.h > 0.0 else 24.0)
+        ids[index] = definitions[index].id if gradient.stop_count > 0 else ""
+        try drawing.add_gradient(gradient)
+    return ids
+
+## A stop's offset (kept at or after `previous`), color and opacity.
+func read_stop(tag: str, previous: f64) -> Stop:
+    let offset = math.max(previous, math.clamp(length_of(property(tag, "offset"), 0.0, 1.0), 0.0, 1.0))
+    let text = property(tag, "stop-color") else "black"
+    let color = parse_color(text) else Color()
+    return Stop(offset = offset, color = color, opacity = math.clamp(number_property(tag, "stop-opacity", 1.0), 0.0, 1.0))
+
+## A coordinate: a number, a percentage of `extent`, or when absent `fraction` of it.
+func length_of(text: str?, fraction: f64, extent: f64) -> f64:
+    let value = text else return fraction * extent
+    if strings.ends_with(value, "%"):
+        let percent = strings.parse_f64((str)value.bytes[..<value.length - 1]) catch _: recover fraction * 100.0
+        return percent / 100.0 * extent
+    return strings.parse_f64(value) catch _: recover fraction * extent
+
+## The definition definition `index` links to by href, if any.
+func link(definitions: const Definition[], index: usize) -> usize?:
+    var href = attribute(definitions[index].tag, "href") else ""
+    if href == "":
+        href = attribute(definitions[index].tag, "xlink:href") else return none
+    if not strings.starts_with(href, "#"):
+        return none
+    let id = (str)href.bytes[1..]
+    for other in 0..<definitions.length:
+        if definitions[other].id == id:
+            return other
+    return none
+
+## An attribute of definition `index`, else of the one it links to, and so on.
+func linked(definitions: const Definition[], index: usize, name: str) -> str?:
+    var at = index
+    for hop in 0..<8:
+        if let value = attribute(definitions[at].tag, name):
+            return strings.trim(value)
+        at = link(definitions, at) else return none
+    return none
+
+## Definition `index` as a Gradient, with what it inherits by href. Percentages in user
+## space are of the viewBox (`view_w` by `view_h`; a radius of its normalised diagonal).
+func resolve_gradient(definitions: const Definition[], index: usize, view_w: f64, view_h: f64) -> Gradient:
+    let user_space = (linked(definitions, index, "gradientUnits") else "") == "userSpaceOnUse"
+    let w = view_w if user_space else 1.0
+    let h = view_h if user_space else 1.0
+    let diagonal = math.sqrt((w * w + h * h) * 0.5)
+    var gradient = Gradient(radial = tag_name(definitions[index].tag) == "radialGradient", user_space = user_space,
+                            transform = parse_transform(linked(definitions, index, "gradientTransform") else ""),
+                            x1 = length_of(linked(definitions, index, "x1"), 0.0, w), y1 = length_of(linked(definitions, index, "y1"), 0.0, h),
+                            x2 = length_of(linked(definitions, index, "x2"), 1.0, w), y2 = length_of(linked(definitions, index, "y2"), 0.0, h),
+                            cx = length_of(linked(definitions, index, "cx"), 0.5, w), cy = length_of(linked(definitions, index, "cy"), 0.5, h),
+                            r = length_of(linked(definitions, index, "r"), 0.5, diagonal))
+    gradient.fx = length_of(linked(definitions, index, "fx"), gradient.cx / w, w)
+    gradient.fy = length_of(linked(definitions, index, "fy"), gradient.cy / h, h)
+    # A focal point on or outside the circle moves just inside it, as SVG 1.1 asks.
+    let ex = gradient.fx - gradient.cx
+    let ey = gradient.fy - gradient.cy
+    let distance = math.sqrt(ex * ex + ey * ey)
+    if distance > gradient.r * 0.999 and distance > 0.0:
+        gradient.fx = gradient.cx + ex * gradient.r * 0.999 / distance
+        gradient.fy = gradient.cy + ey * gradient.r * 0.999 / distance
+    var at = index
+    for hop in 0..<8:
+        if definitions[at].stop_count > 0:
+            gradient.stop_start = definitions[at].stop_start
+            gradient.stop_count = definitions[at].stop_count
+            break
+        at = link(definitions, at) else break
+    return gradient
+
+# mark: Placing and shading ===================================================================
+
+## The inverse of `m`, or none when it is singular.
+func invert(m: Matrix) -> Matrix?:
+    let det = m.a * m.d - m.b * m.c
+    if math.abs(det) < 1e-12:
+        return none
+    return Matrix(a = m.d / det, b = -m.b / det, c = -m.c / det, d = m.a / det,
+                  e = (m.c * m.f - m.d * m.e) / det, f = (m.b * m.e - m.a * m.f) / det)
+
+## `source` placed on the element whose contours start at `first` and were drawn through
+## `transform`: a gradient paint gets the matrix from viewBox coordinates into gradient
+## space. A bounding-box gradient on a shape with no width or height paints nothing.
+func placed(drawing: const Drawing*, source: Paint, transform: Matrix, first: usize) -> Paint:
+    if source.gradient == 0:
+        return source
+    let gradient = drawing.gradients[source.gradient - 1]
+    var into = transform
+    if not gradient.user_space:
+        let undo = invert(transform) else return Paint()
+        var low = Point(math.infinity, math.infinity)
+        var high = Point(-math.infinity, -math.infinity)
+        for contour_index in first..<drawing.contour_used:
+            let contour = drawing.contours[contour_index]
+            for index in contour.start..<contour.start + contour.length:
+                let p = apply(undo, drawing.points[index].x, drawing.points[index].y)
+                low = Point(math.min(low.x, p.x), math.min(low.y, p.y))
+                high = Point(math.max(high.x, p.x), math.max(high.y, p.y))
+        if not (high.x - low.x > 1e-9 and high.y - low.y > 1e-9):
+            return Paint()
+        into = multiply(into, Matrix(a = high.x - low.x, d = high.y - low.y, e = low.x, f = low.y))
+    let space = invert(multiply(into, gradient.transform)) else return Paint()
+    var result = source
+    result.space = space
+    return result
+
+## Where along `gradient` the point `p` of its space falls, padded to 0..1.
+func gradient_offset(gradient: const Gradient*, p: Point) -> f64:
+    if not gradient.radial:
+        let dx = gradient.x2 - gradient.x1
+        let dy = gradient.y2 - gradient.y1
+        let span = dx * dx + dy * dy
+        if span <= 1e-18:
+            return 1.0
+        return math.clamp(((p.x - gradient.x1) * dx + (p.y - gradient.y1) * dy) / span, 0.0, 1.0)
+    if gradient.r <= 0.0:
+        return 1.0
+    # The ray from the focal point through `p` meets the circle at focal + s·(p − focal);
+    # `p` is 1/s of the way along it.
+    let dx = p.x - gradient.fx
+    let dy = p.y - gradient.fy
+    let a = dx * dx + dy * dy
+    if a <= 1e-18:
+        return 0.0
+    let ex = gradient.fx - gradient.cx
+    let ey = gradient.fy - gradient.cy
+    let b = 2.0 * (ex * dx + ey * dy)
+    let c = ex * ex + ey * ey - gradient.r * gradient.r
+    let s = (-b + math.sqrt(math.max(0.0, b * b - 4.0 * a * c))) / (2.0 * a)
+    return math.clamp(1.0 / s, 0.0, 1.0) if s > 0.0 else 1.0
+
+## How many entries a color ramp has, evenly spaced over offsets 0..1.
+let ramp_size: usize = 256
+
+## Fill `ramp` (`ramp_size` RGBA entries: linear color, stop opacity as alpha) with the
+## gradient's colors, blended in sRGB between the stops on either side.
+func fill_ramp(drawing: const Drawing*, gradient: const Gradient*, ramp: f32[]):
+    for entry in 0..<ramp_size:
+        let t = (f64)entry / (f64)(ramp_size - 1)
+        var low = drawing.stops[gradient.stop_start]
+        var high = low
+        for index in gradient.stop_start..<gradient.stop_start + gradient.stop_count:
+            high = drawing.stops[index]
+            if high.offset > t:
+                break
+            low = high
+        let span = high.offset - low.offset
+        let mix = (t - low.offset) / span if span > 1e-12 else 0.0
+        let color = to_linear(Color(r = low.color.r + (high.color.r - low.color.r) * mix,
+                                    g = low.color.g + (high.color.g - low.color.g) * mix,
+                                    b = low.color.b + (high.color.b - low.color.b) * mix))
+        ramp[entry * 4] = (f32)color.r
+        ramp[entry * 4 + 1] = (f32)color.g
+        ramp[entry * 4 + 2] = (f32)color.b
+        ramp[entry * 4 + 3] = (f32)(low.opacity + (high.opacity - low.opacity) * mix)

@@ -3,7 +3,8 @@
 #   svg/parse - The document grammar: tags, attributes, transforms and groups
 #
 #   DESCRIPTION:
-#       Walks the tags of an SVG document without building a tree. `<svg>` sets the viewBox
+#       Walks the tags of an SVG document without building a tree, after a first pass has
+#       collected its gradients (gradient.lucb). `<svg>` sets the viewBox
 #       and the root style, each `<g>` pushes a frame (its transform and style) that `</g>`
 #       pops, and each shape element is flattened under the frame in force. Comments are
 #       skipped, and so are the contents of definition containers (defs, clipPath, mask,
@@ -186,6 +187,26 @@ func is_shape(name: str) -> bool:
 func is_definition(name: str) -> bool:
     return name == "defs" or name == "clipPath" or name == "mask" or name == "symbol" or name == "pattern" or name == "marker"
 
+## The next tag at or after `*pos`: its text from `<` up to, not including, `>`. Comments
+## are skipped, and `*pos` moves past the tag. None at the end of the source.
+func next_tag(source: str, pos: usize*) -> str?:
+    let data = source.bytes
+    while *pos < data.length:
+        if data[*pos] != '<':
+            *pos += 1
+            continue
+        if strings.starts_with((str)data[*pos..], "<!--"):
+            let finish = strings.find_from(source, "-->", *pos) else return none
+            *pos = finish + 3
+            continue
+        let start = *pos
+        var end = start + 1
+        while end < data.length and data[end] != '>':
+            end += 1
+        *pos = end + 1 if end < data.length else data.length
+        return (str)data[start..<end]
+    return none
+
 ## The position just past the `</name>` that closes an element whose contents begin at `pos`.
 func skip_element(data: const u8[], pos: usize, name: str) -> usize:
     var index = pos
@@ -209,9 +230,9 @@ struct Frame:
     var style: Style = Style()
 
 ## `outer` with the transform and style attributes of `tag` applied: a group's or shape's
-## own transform comes after its ancestors'.
-func entered(outer: Frame, tag: str) -> Frame:
-    var inner = Frame(transform = outer.transform, style = styled(tag, outer.style))
+## own transform comes after its ancestors'. `gradient_ids` are the document's gradients.
+func entered(outer: Frame, tag: str, gradient_ids: const str[]) -> Frame:
+    var inner = Frame(transform = outer.transform, style = styled(tag, outer.style, gradient_ids))
     if let text = attribute(tag, "transform"):
         inner.transform = multiply(outer.transform, parse_transform(text))
     return inner
@@ -219,45 +240,44 @@ func entered(outer: Frame, tag: str) -> Frame:
 ## How deeply groups can nest; deeper groups draw with their parent's frame.
 let group_limit: usize = 32
 
+## Free the gradient ids collect_gradients returned.
+func release_ids(ids: str[]):
+    if ids.length > 0:
+        free(ids) in memory.heap
+
 ## Parse an SVG document into a flattened Drawing. Unsupported elements are ignored.
 pub func parse(source: str) -> interop.Reference[Drawing]!:
     var empty_points: Point[]
     var empty_contours: Contour[]
-    let native = try new Drawing(view_w = 0.0, view_h = 0.0, points = empty_points, point_used = 0, contours = empty_contours, contour_used = 0)
+    var empty_gradients: Gradient[]
+    var empty_stops: Stop[]
+    let native = try new Drawing(view_w = 0.0, view_h = 0.0, points = empty_points, point_used = 0, contours = empty_contours, contour_used = 0,
+                                 gradients = empty_gradients, stops = empty_stops)
     errdefer free(native)
     errdefer native.close()
     let data = source.bytes
+    let ids = try collect_gradients(native, source)
+    defer release_ids(ids)
     var frame = Frame()
     let saved = try alloc Frame[group_limit] in memory.heap
     defer free(saved) in memory.heap
     var depth: usize = 0
     var ignored: usize = 0
     var index: usize = 0
-    while index < data.length:
-        if data[index] != '<':
-            index += 1
-            continue
-        if strings.starts_with((str)data[index..], "<!--"):
-            let finish = strings.find_from(source, "-->", index) else break
-            index = finish + 3
-            continue
-        var tag_end = index + 1
-        while tag_end < data.length and data[tag_end] != '>':
-            tag_end += 1
-        let tag = (str)data[index..<tag_end]
+    while true:
+        let tag = next_tag(source, &index) else break
         let name = tag_name(tag)
-        let self_closing = data[tag_end - 1] == '/'
-        index = tag_end + 1 if tag_end < data.length else data.length
+        let self_closing = strings.ends_with(tag, "/")
         if name == "svg":
             let box = view_box(tag)
             native.view_w = box.w
             native.view_h = box.h
-            frame = Frame(transform = Matrix(e = -box.x, f = -box.y), style = styled(tag, Style()))
+            frame = Frame(transform = Matrix(e = -box.x, f = -box.y), style = styled(tag, Style(), ids))
         elif name == "g" and not self_closing:
             if depth < group_limit:
                 saved[depth] = frame
                 depth += 1
-                frame = entered(frame, tag)
+                frame = entered(frame, tag, ids)
             else:
                 ignored += 1
         elif name == "/g":
@@ -269,7 +289,7 @@ pub func parse(source: str) -> interop.Reference[Drawing]!:
         elif is_definition(name) and not self_closing:
             index = skip_element(data, index, name)
         elif is_shape(name):
-            try add_shape(native, name, tag, entered(frame, tag))
+            try add_shape(native, name, tag, entered(frame, tag, ids))
     if native.view_w <= 0.0:
         native.view_w = 24.0
     if native.view_h <= 0.0:

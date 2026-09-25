@@ -6,20 +6,24 @@
 #       Reads an SVG string — paths, basic shapes and nested groups — and flattens its curves
 #       and arcs into polylines. The result is a Drawing: the viewBox size plus a set of
 #       contours over one flat point buffer, in viewBox coordinates. Each contour carries its
-#       element's paints (sRGB fill and stroke colors or currentColor), opacities, stroke width,
-#       caps, joins and dashes. Two rasterisers draw it: an 8-bit coverage mask for icons,
-#       which the caller tints, and straight-alpha linear RGBA for artwork. Enough of the SVG
-#       grammar is covered for icons and plain illustrations (M L H V C S Q T A Z, rect,
-#       circle, ellipse, line, polyline, polygon, g; no gradients, text or clipping).
+#       element's paints (sRGB colors, currentColor, or linear and radial gradients), their
+#       opacities, and its pen: stroke width, caps, joins and dashes. Two rasterisers draw it:
+#       an 8-bit coverage mask for icons, which the caller tints, and straight-alpha linear
+#       RGBA for artwork. Enough of the SVG grammar is covered for icons and plain
+#       illustrations (M L H V C S Q T A Z, rect, circle, ellipse, line, polyline, polygon,
+#       g, linearGradient, radialGradient; no text, patterns, clipping or masks).
 #       Fragments, in ORDER:
 #
 #       module.lucb    the Drawing, its contours and their paints
 #       parse.lucb     the document grammar: tags, attributes, transforms, groups
 #       paths.lucb     path data and basic shapes, flattened to points
 #       style.lucb     styles, their inheritance, and paint and color parsing
+#       gradient.lucb  gradient definitions, their placement on shapes, and color ramps
 #       coverage.lucb  the exact-area coverage rasteriser and the 8-bit mask
+#       stroke.lucb    stroke outlines: segments, joins, caps and dashes
 #       rgba.lucb      compositing painted elements into linear RGBA
-#       tests.lucb     the tests
+#       tests.lucb     the parser and color tests
+#       raster_tests.lucb  the rasteriser tests
 #
 #==============================================================================================
 
@@ -42,12 +46,16 @@ pub struct Color:
     pub var g: f64 = 0.0
     pub var b: f64 = 0.0
 
-## How a fill or stroke is painted: not at all, with `color`, or with the caller's
-## currentColor.
+## How a fill or stroke is painted: not at all, with `color`, with the caller's
+## currentColor, or with a gradient.
 struct Paint:
     var painted: bool = false
     var current: bool = false
     var color: Color = Color()
+    ## One more than the index of the drawing's gradient this paints with; 0 for none.
+    var gradient: usize = 0
+    ## For a gradient on a contour: maps viewBox coordinates into the gradient's space.
+    var space: Matrix = Matrix()
 
 ## An affine transform mapping (x, y) to (a·x + c·y + e, b·x + d·y + f).
 struct Matrix:
@@ -82,17 +90,10 @@ struct Contour:
     var element: usize = 0
     var fill: Paint = Paint()
     var stroke: Paint = Paint()
-    ## Stroke width in viewBox units, round caps and joins, and the paints' opacities
-    ## (each already multiplied by the element's and its groups' `opacity`).
-    var width: f64 = 1.0
-    var round_cap: bool = false
-    var round_join: bool = false
+    var pen: Pen = Pen()
+    ## The paints' opacities, each already multiplied by the element's and its groups' `opacity`.
     var fill_opacity: f64 = 1.0
     var stroke_opacity: f64 = 1.0
-    ## The dash pattern (viewBox units, up to eight lengths) and its offset; none when empty.
-    var dashes: f64[8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    var dash_count: usize = 0
-    var dash_offset: f64 = 0.0
 
 # mark: The drawing ===========================================================================
 
@@ -105,6 +106,11 @@ pub struct Drawing:
     var point_used: usize = 0
     var contours: Contour[]
     var contour_used: usize = 0
+    ## Gradients by index (a Paint's `gradient` less one), their stops in one buffer.
+    var gradients: Gradient[]
+    var gradient_used: usize = 0
+    var stops: Stop[]
+    var stop_used: usize = 0
     ## The style and element number the next contours are added with.
     var style: Style = Style()
     var element: usize = 0
@@ -114,31 +120,27 @@ pub struct Drawing:
 
     mutating func add_point(value: Point) -> !:
         if self.point_used >= self.points.length:
-            let capacity: usize = 64 if self.points.length == 0 else self.points.length * 2
-            let grown = try alloc Point[capacity] in memory.heap
-            var index: usize = 0
-            while index < self.point_used:
-                grown[index] = self.points[index]
-                index += 1
-            if self.points.length > 0:
-                free(self.points) in memory.heap
-            self.points = grown
+            self.points = try grown(self.points, self.point_used, 64)
         self.points[self.point_used] = value
         self.point_used += 1
 
     mutating func add_contour(value: Contour) -> !:
         if self.contour_used >= self.contours.length:
-            let capacity: usize = 16 if self.contours.length == 0 else self.contours.length * 2
-            let grown = try alloc Contour[capacity] in memory.heap
-            var index: usize = 0
-            while index < self.contour_used:
-                grown[index] = self.contours[index]
-                index += 1
-            if self.contours.length > 0:
-                free(self.contours) in memory.heap
-            self.contours = grown
+            self.contours = try grown(self.contours, self.contour_used, 16)
         self.contours[self.contour_used] = value
         self.contour_used += 1
+
+    mutating func add_gradient(value: Gradient) -> !:
+        if self.gradient_used >= self.gradients.length:
+            self.gradients = try grown(self.gradients, self.gradient_used, 4)
+        self.gradients[self.gradient_used] = value
+        self.gradient_used += 1
+
+    mutating func add_stop(value: Stop) -> !:
+        if self.stop_used >= self.stops.length:
+            self.stops = try grown(self.stops, self.stop_used, 8)
+        self.stops[self.stop_used] = value
+        self.stop_used += 1
 
     ## Close an outline that has at least one point, painted in the current style; a
     ## `line` passes `fillable` false, since only its stroke is ever drawn.
@@ -149,9 +151,8 @@ pub struct Drawing:
         let style = self.style
         try self.add_contour(Contour(start = start, length = length, closed = closed, element = self.element,
                                      fill = style.fill if fillable else Paint(), stroke = style.stroke,
-                                     width = style.width, round_cap = style.round_cap, round_join = style.round_join,
-                                     fill_opacity = style.fill_opacity * style.opacity, stroke_opacity = style.stroke_opacity * style.opacity,
-                                     dashes = style.dashes, dash_count = style.dash_count, dash_offset = style.dash_offset))
+                                     pen = style.pen, fill_opacity = style.fill_opacity * style.opacity,
+                                     stroke_opacity = style.stroke_opacity * style.opacity))
 
     ## The viewBox width (or the `width` attribute, else 24).
     pub func view_width() -> f64:
@@ -191,7 +192,7 @@ pub struct Drawing:
 
     ## The stroke width of a contour, in viewBox units.
     pub func contour_width(index: usize) -> f64:
-        return self.contours[index].width
+        return self.contours[index].pen.width
 
     ## The fill's opacity, `fill-opacity` times every enclosing `opacity`.
     pub func contour_fill_opacity(index: usize) -> f64:
@@ -201,7 +202,7 @@ pub struct Drawing:
     pub func contour_stroke_opacity(index: usize) -> f64:
         return self.contours[index].stroke_opacity
 
-    ## The fill's sRGB color; meaningless when it is unfilled or currentColor.
+    ## The fill's sRGB color; meaningless when it is unfilled, currentColor or a gradient.
     pub func contour_fill_color(index: usize) -> Color:
         return self.contours[index].fill.color
 
@@ -209,7 +210,7 @@ pub struct Drawing:
     pub func contour_fill_current(index: usize) -> bool:
         return self.contours[index].fill.current
 
-    ## The stroke's sRGB color; meaningless when it is unstroked or currentColor.
+    ## The stroke's sRGB color; meaningless when it is unstroked, currentColor or a gradient.
     pub func contour_stroke_color(index: usize) -> Color:
         return self.contours[index].stroke.color
 
@@ -221,18 +222,37 @@ pub struct Drawing:
     pub func point(index: usize) -> Point:
         return self.points[index]
 
-    ## Free the point and contour buffers; the drawing is empty afterwards.
+    ## Free the drawing's buffers; it is empty afterwards.
     pub mutating func close():
         if self.points.length > 0:
             free(self.points) in memory.heap
         if self.contours.length > 0:
             free(self.contours) in memory.heap
+        if self.gradients.length > 0:
+            free(self.gradients) in memory.heap
+        if self.stops.length > 0:
+            free(self.stops) in memory.heap
         var empty_points: Point[]
         var empty_contours: Contour[]
+        var empty_gradients: Gradient[]
+        var empty_stops: Stop[]
         self.points = empty_points
         self.contours = empty_contours
+        self.gradients = empty_gradients
+        self.stops = empty_stops
         self.point_used = 0
         self.contour_used = 0
+        self.gradient_used = 0
+        self.stop_used = 0
+
+## `items`, of which `used` are in use, moved into a heap array twice as long (or `first`
+## long when empty); the old array is freed.
+func grown[T](items: T[], used: usize, first: usize) -> T[]!:
+    let larger = try alloc T[first if items.length == 0 else items.length * 2] in memory.heap
+    memory.copy(larger, items, used)
+    if items.length > 0:
+        free(items) in memory.heap
+    return larger
 
 ## The interop type a parsed Drawing is owned under.
 pub let drawing_type: interop.Type[Drawing] = interop.Type[Drawing]("SVG drawing", Drawing.close, closeable = true)

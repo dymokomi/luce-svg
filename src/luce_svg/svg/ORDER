@@ -2,6 +2,9 @@ module.lucb
 parse.lucb
 paths.lucb
 style.lucb
+gradient.lucb
 coverage.lucb
+stroke.lucb
 rgba.lucb
 tests.lucb
+raster_tests.lucb

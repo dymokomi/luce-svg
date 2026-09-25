@@ -6,9 +6,8 @@
 #       Scan conversion shared by both rasterisers: edges accumulate signed area into a
 #       row-major buffer (one spare cell per row), and a prefix sum along each row turns it
 #       into per-pixel coverage, which is exact for polygons. Fills trace an element's
-#       outlines as they are; strokes trace a rectangle per segment plus discs for round
-#       caps and joins, and dashes cut the outline first. `rasterize` resolves each contour
-#       into an 8-bit mask, the higher value winning where shapes overlap.
+#       outlines as they are (strokes are traced in stroke.lucb). `rasterize` resolves each
+#       contour into an 8-bit mask, the higher value winning where shapes overlap.
 #
 #==============================================================================================
 
@@ -135,107 +134,6 @@ func resolve(acc: f32[], width: usize, height: usize, opacity: f64, coverage: u8
                 coverage[slot] = byte
         acc[row * stride + width] = 0.0
 
-## A regular polygon approximating a disc, for round caps and joins.
-func disc(acc: f32[], width: usize, height: usize, centre: Point, radius: f64) -> !:
-    let ring = try alloc Point[16] in memory.heap
-    defer free(ring) in memory.heap
-    for index in 0..<(usize)16:
-        let angle = (f64)index / 16.0 * math.pi * 2.0
-        ring[index] = Point(centre.x + math.cos(angle) * radius, centre.y + math.sin(angle) * radius)
-    accumulate_polygon(acc, width, height, ring)
-
-## Stroke one polyline of pixel-space points: a rectangle per segment, round joins
-## at the interior vertices and round caps at the ends when asked. A closed run
-## repeats its first point at the end and gets joins everywhere, no caps.
-func stroke_run(acc: f32[], width: usize, height: usize, path: const Point[], closed: bool, half: f64, round_cap: bool, round_join: bool) -> !:
-    let scratch = try alloc Point[4] in memory.heap
-    defer free(scratch) in memory.heap
-    let count = path.length
-    if count == 1:
-        if round_cap:
-            try disc(acc, width, height, path[0], half)
-        return
-    for index in 0..<count - 1:
-        let a = path[index]
-        let b = path[index + 1]
-        let dx = b.x - a.x
-        let dy = b.y - a.y
-        let length = math.sqrt(dx * dx + dy * dy)
-        if length > 1e-9:
-            let nx = -dy / length * half
-            let ny = dx / length * half
-            scratch[0] = Point(a.x + nx, a.y + ny)
-            scratch[1] = Point(b.x + nx, b.y + ny)
-            scratch[2] = Point(b.x - nx, b.y - ny)
-            scratch[3] = Point(a.x - nx, a.y - ny)
-            accumulate_polygon(acc, width, height, scratch)
-    for index in 0..<count:
-        let interior = closed or (index > 0 and index + 1 < count)
-        if (interior and round_join) or (not interior and round_cap):
-            if not (closed and index == count - 1):
-                try disc(acc, width, height, path[index], half)
-
-## Stroke a polyline as dashes: walk its length against the pattern (in pixels),
-## emitting each "on" run as its own capped stroke.
-func stroke_dashed(acc: f32[], width: usize, height: usize, path: const Point[], contour: Contour, scale: f64, half: f64) -> !:
-    var total = 0.0
-    for index in 0..<contour.dash_count:
-        total += contour.dashes[index] * scale
-    if total <= 1e-9:
-        return
-    # Where in the pattern the path begins, from the offset.
-    var phase = contour.dash_offset * scale
-    phase = phase - math.floor(phase / total) * total
-    var slot: usize = 0
-    var remaining = contour.dashes[0] * scale
-    while phase >= remaining and slot < contour.dash_count * 2:
-        phase -= remaining
-        slot = (slot + 1) % contour.dash_count
-        remaining = contour.dashes[slot] * scale
-    remaining -= phase
-    var on = slot % 2 == 0
-    let run = try alloc Point[path.length + 2 * contour.dash_count + 8] in memory.heap
-    defer free(run) in memory.heap
-    var run_count: usize = 0
-    if on:
-        run[0] = path[0]
-        run_count = 1
-    for index in 0..<path.length - 1:
-        var a = path[index]
-        let b = path[index + 1]
-        var dx = b.x - a.x
-        var dy = b.y - a.y
-        var length = math.sqrt(dx * dx + dy * dy)
-        while length > remaining:
-            let t = remaining / length
-            let cut = Point(a.x + dx * t, a.y + dy * t)
-            if on:
-                if run_count < run.length:
-                    run[run_count] = cut
-                    run_count += 1
-                try stroke_run(acc, width, height, run[..<run_count], false, half, contour.round_cap, contour.round_join)
-                run_count = 0
-            else:
-                run[0] = cut
-                run_count = 1
-            on = not on
-            slot = (slot + 1) % contour.dash_count
-            remaining = contour.dashes[slot] * scale
-            a = cut
-            dx = b.x - a.x
-            dy = b.y - a.y
-            length = math.sqrt(dx * dx + dy * dy)
-        remaining -= length
-        if on and run_count < run.length:
-            run[run_count] = b
-            run_count += 1
-    if on and run_count >= 1:
-        try stroke_run(acc, width, height, run[..<run_count], false, half, contour.round_cap, contour.round_join)
-
-## The pixel-space half width a contour is stroked with, never under a quarter pixel.
-func stroke_half(contour: Contour, fit: Placement) -> f64:
-    return math.max(0.25, contour.width * fit.scale * 0.5)
-
 ## Accumulate a contour's outline for filling; its winding is the author's.
 func trace_fill(acc: f32[], width: usize, height: usize, drawing: const Drawing*, contour: Contour, fit: Placement):
     let origin = contour.start
@@ -244,23 +142,6 @@ func trace_fill(acc: f32[], width: usize, height: usize, drawing: const Drawing*
         let a = drawing.points[origin + index]
         let b = drawing.points[origin + (index + 1) % count]
         accumulate(acc, width, height, fit.offset_x + a.x * fit.scale, fit.offset_y + a.y * fit.scale, fit.offset_x + b.x * fit.scale, fit.offset_y + b.y * fit.scale)
-
-## Accumulate a contour's stroke: solid or dashed, with its caps and joins.
-func trace_stroke(acc: f32[], width: usize, height: usize, drawing: const Drawing*, contour: Contour, fit: Placement) -> !:
-    let origin = contour.start
-    let count = contour.length
-    let half = stroke_half(contour, fit)
-    # The contour in pixel space, closed ones with their first point repeated.
-    let extra: usize = 1 if contour.closed and count > 1 else 0
-    let path = try alloc Point[count + extra] in memory.heap
-    defer free(path) in memory.heap
-    for index in 0..<count + extra:
-        let p = drawing.points[origin + index % count]
-        path[index] = Point(fit.offset_x + p.x * fit.scale, fit.offset_y + p.y * fit.scale)
-    if contour.dash_count == 0:
-        try stroke_run(acc, width, height, path, contour.closed and count > 2, half, contour.round_cap, contour.round_join)
-    else:
-        try stroke_dashed(acc, width, height, path, contour, fit.scale, half)
 
 ## Check a bitmap's size and allocate a cleared accumulator for it.
 func accumulator(width: u32, height: u32) -> f32[]!:
@@ -273,7 +154,7 @@ func accumulator(width: u32, height: u32) -> f32[]!:
 
 ## Rasterise `drawing` into `coverage`, `width * height` bytes, top-down: 255 where
 ## a fill or stroke covers a pixel fully, less along edges and under partial opacity.
-## Strokes get their width, round caps and round joins; fills use the nonzero rule.
+## Strokes get their width, caps, joins and dashes; fills use the nonzero rule.
 ## Colors are ignored: this is the mask a caller tints, as luce-ui does for icons.
 pub func rasterize(drawing: const Drawing*, width: u32, height: u32, coverage: u8[]) -> !:
     let acc = try accumulator(width, height)

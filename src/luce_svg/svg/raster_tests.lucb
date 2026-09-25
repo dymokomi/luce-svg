@@ -1,0 +1,185 @@
+#==============================================================================================
+#
+#   svg/raster_tests - The rasteriser tests: coverage, compositing, strokes and gradients
+#
+#==============================================================================================
+
+## The RGBA of pixel (`x`, `y`) of a `width`-wide straight-alpha buffer.
+func pixel_at(pixels: const f32[], width: usize, x: usize, y: usize) -> f64[4]:
+    let slot = (y * width + x) * 4
+    return [(f64)pixels[slot], (f64)pixels[slot + 1], (f64)pixels[slot + 2], (f64)pixels[slot + 3]]
+
+## The alpha at (`x`, `y`) of `source` drawn at `size` pixels square.
+func alpha_at(source: str, size: u32, x: usize, y: usize) -> f64!:
+    let drawing = try parse(source)
+    defer drawing.release()
+    let pixels = try alloc f32[(usize)size * (usize)size * 4] in memory.heap
+    defer free(pixels) in memory.heap
+    try rasterize_rgba(drawing.value(), size, size, pixels, Color())
+    return pixel_at(pixels, (usize)size, x, y)[3]
+
+test "the rasteriser covers a stroked circle's ring and its filled disc with soft edges":
+    let source = "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"8\"/></svg>"
+    let drawing = try parse(source)
+    defer drawing.release()
+    var coverage: u8[48 * 48]
+    try rasterize(drawing.value(), 48, 48, coverage)
+    # Centre is empty, the ring at radius 16 px is solid, well outside is empty.
+    assert(coverage[24 * 48 + 24] == 0)
+    assert(coverage[24 * 48 + 8] > 200 and coverage[24 * 48 + 40] > 200)
+    assert(coverage[24 * 48 + 2] == 0)
+    # Somewhere the ring's edges cross pixels part-way: soft values appear.
+    var soft = false
+    for index in 0..<(usize)(48 * 48):
+        let v = coverage[index]
+        if v > 20 and v < 235:
+            soft = true
+    assert(soft)
+    let filled = try parse("<svg viewBox=\"0 0 24 24\"><rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" fill=\"currentColor\" fill-opacity=\".5\"/></svg>")
+    defer filled.release()
+    try rasterize(filled.value(), 24, 24, coverage[..<24 * 24])
+    assert(coverage[12 * 24 + 12] > 120 and coverage[12 * 24 + 12] < 135 and coverage[1 * 24 + 1] == 0)
+
+test "a red circle over a blue rect composites in linear light with the coverage rasteriser's edges":
+    let drawing = try parse("<svg viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\" fill=\"blue\"/><circle cx=\"5\" cy=\"5\" r=\"2.5\" fill=\"#ff0000\"/></svg>")
+    defer drawing.release()
+    var pixels: f32[10 * 10 * 4]
+    try rasterize_rgba(drawing.value(), 10, 10, pixels, Color())
+    let centre = pixel_at(pixels, 10, 5, 5)
+    assert(near(centre[0], 1.0, 1e-6) and centre[1] == 0.0 and near(centre[2], 0.0, 1e-6) and near(centre[3], 1.0, 1e-6))
+    let outside = pixel_at(pixels, 10, 0, 0)
+    assert(outside[0] == 0.0 and near(outside[2], 1.0, 1e-6) and near(outside[3], 1.0, 1e-6))
+    # The circle's left edge crosses pixel (2, 5) part-way: red and blue share it.
+    let edge = pixel_at(pixels, 10, 2, 5)
+    assert(edge[0] > 0.2 and edge[0] < 0.8 and near(edge[0] + edge[2], 1.0, 1e-5) and near(edge[3], 1.0, 1e-6))
+    # The circle alone through the coverage rasteriser gives the same edge.
+    let alone = try parse("<svg viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"2.5\"/></svg>")
+    defer alone.release()
+    var coverage: u8[10 * 10]
+    try rasterize(alone.value(), 10, 10, coverage)
+    for y in 0..<(usize)10:
+        for x in 0..<(usize)10:
+            assert(near(pixel_at(pixels, 10, x, y)[0] * 255.0, (f64)coverage[y * 10 + x], 0.5 + 1e-4))
+
+test "a group's fill and fill-opacity reach its shapes, decoded to linear light":
+    let drawing = try parse("<svg viewBox=\"0 0 4 4\"><g fill=\"#808080\" fill-opacity=\"0.5\"><rect width=\"4\" height=\"4\"/></g></svg>")
+    defer drawing.release()
+    var pixels: f32[4 * 4 * 4]
+    try rasterize_rgba(drawing.value(), 4, 4, pixels, Color())
+    let grey = pixel_at(pixels, 4, 1, 1)
+    assert(near(grey[0], 0.2158605, 1e-6) and grey[0] == grey[1] and grey[1] == grey[2] and near(grey[3], 0.5, 1e-6))
+
+test "fill none with a stroke paints only the outline":
+    let drawing = try parse("<svg viewBox=\"0 0 10 10\"><rect x=\"2\" y=\"2\" width=\"6\" height=\"6\" fill=\"none\" stroke=\"red\" stroke-width=\"2\"/></svg>")
+    defer drawing.release()
+    var pixels: f32[10 * 10 * 4]
+    try rasterize_rgba(drawing.value(), 10, 10, pixels, Color())
+    assert(pixel_at(pixels, 10, 5, 5)[3] == 0.0 and pixel_at(pixels, 10, 0, 5)[3] == 0.0)
+    let side = pixel_at(pixels, 10, 2, 5)
+    assert(near(side[0], 1.0, 1e-6) and side[1] == 0.0 and near(side[3], 1.0, 1e-6))
+
+test "opacities multiply, blend over what is below, and currentColor is the caller's":
+    let drawing = try parse("<svg viewBox=\"0 0 2 1\"><rect width=\"2\" height=\"1\" fill=\"blue\"/><g opacity=\"0.5\"><rect width=\"1\" height=\"1\" fill=\"red\"/></g><rect x=\"1\" width=\"1\" height=\"1\" fill=\"currentColor\" opacity=\"0.5\" fill-opacity=\"0.5\"/></svg>")
+    defer drawing.release()
+    var pixels: f32[2 * 1 * 4]
+    try rasterize_rgba(drawing.value(), 2, 1, pixels, Color(r = 1.0, g = 0.5, b = 0.0))
+    let half = pixel_at(pixels, 2, 0, 0)
+    assert(near(half[0], 0.5, 1e-6) and half[1] == 0.0 and near(half[2], 0.5, 1e-6) and near(half[3], 1.0, 1e-6))
+    let quarter = pixel_at(pixels, 2, 1, 0)
+    assert(near(quarter[0], 0.25, 1e-6) and near(quarter[1], 0.25 * 0.2140411, 1e-6) and near(quarter[2], 0.75, 1e-6))
+
+test "one element's subpaths fill together, so a reversed inner square is a hole":
+    let drawing = try parse("<svg viewBox=\"0 0 6 6\"><path d=\"M0 0H6V6H0Z M2 2V4H4V2Z\" fill=\"red\"/></svg>")
+    defer drawing.release()
+    var pixels: f32[6 * 6 * 4]
+    try rasterize_rgba(drawing.value(), 6, 6, pixels, Color())
+    assert(pixel_at(pixels, 6, 2, 2)[3] == 0.0 and pixel_at(pixels, 6, 3, 3)[3] == 0.0 and near(pixel_at(pixels, 6, 0, 0)[3], 1.0, 1e-6))
+
+# mark: Strokes ===============================================================================
+
+test "a thick stroked circle is one solid ring, with no cracks between its segments":
+    let source = "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"8\" fill=\"none\" stroke=\"red\" stroke-width=\"4\"/></svg>"
+    let drawing = try parse(source)
+    defer drawing.release()
+    var pixels: f32[48 * 48 * 4]
+    try rasterize_rgba(drawing.value(), 48, 48, pixels, Color())
+    var coverage: u8[48 * 48]
+    try rasterize(drawing.value(), 48, 48, coverage)
+    # The ring spans 12 to 20 pixels from the centre; a pixel wholly inside it is solid.
+    for y in 0..<(usize)48:
+        for x in 0..<(usize)48:
+            let dx = (f64)x + 0.5 - 24.0
+            let dy = (f64)y + 0.5 - 24.0
+            let distance = math.sqrt(dx * dx + dy * dy)
+            if distance > 13.0 and distance < 19.0:
+                assert(pixel_at(pixels, 48, x, y)[3] > 0.9999 and coverage[y * 48 + x] == 255)
+
+test "joins: a miter up to its limit, else a bevel; round; bevel":
+    let before = "<svg viewBox=\"0 0 24 24\"><polyline points=\"4,20 12,8 20,20\" fill=\"none\" stroke=\"red\" stroke-width=\"4\""
+    var buffer: u8[256]
+    # The vertex is at (48, 32) pixels; a miter's tip reaches row 16, a round join row 24, a bevel row 27.6.
+    let miter = try format(buffer, f"{before}/></svg>")
+    assert((try alpha_at(miter, 96, 48, 19)) > 0.99)
+    let limited = try format(buffer, f"{before} stroke-miterlimit=\"1.5\"/></svg>")
+    assert((try alpha_at(limited, 96, 48, 19)) == 0.0 and (try alpha_at(limited, 96, 48, 25)) == 0.0)
+    let round = try format(buffer, f"{before} stroke-linejoin=\"round\"/></svg>")
+    assert((try alpha_at(round, 96, 48, 19)) == 0.0 and (try alpha_at(round, 96, 48, 25)) > 0.99)
+    let bevel = try format(buffer, f"{before} style=\"stroke-linejoin: bevel\"/></svg>")
+    assert((try alpha_at(bevel, 96, 48, 25)) == 0.0 and (try alpha_at(bevel, 96, 48, 28)) > 0.99)
+
+test "a square cap reaches half the width past the end, a butt cap stops at it":
+    let square = "<svg viewBox=\"0 0 24 24\"><line x1=\"4\" y1=\"12\" x2=\"20\" y2=\"12\" stroke=\"red\" stroke-width=\"4\" stroke-linecap=\"square\"/></svg>"
+    assert((try alpha_at(square, 24, 2, 12)) > 0.9999 and (try alpha_at(square, 24, 1, 12)) == 0.0)
+    let butt = "<svg viewBox=\"0 0 24 24\"><line x1=\"4\" y1=\"12\" x2=\"20\" y2=\"12\" stroke=\"red\" stroke-width=\"4\"/></svg>"
+    assert((try alpha_at(butt, 24, 3, 12)) == 0.0 and (try alpha_at(butt, 24, 4, 12)) > 0.9999)
+
+# mark: Gradients =============================================================================
+
+test "a linear gradient spans the shape's box and blends in sRGB before decoding":
+    let drawing = try parse("<svg viewBox=\"0 0 10 1\"><defs><linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"#000\"/><stop offset=\"1\" stop-color=\"#fff\"/></linearGradient></defs><rect width=\"10\" height=\"1\" fill=\"url(#g)\"/></svg>")
+    defer drawing.release()
+    var pixels: f32[10 * 4]
+    try rasterize_rgba(drawing.value(), 10, 1, pixels, Color())
+    for x in 0..<(usize)10:
+        let entry = math.round(((f64)x + 0.5) / 10.0 * 255.0)
+        let expected = linear_channel(entry / 255.0)
+        let got = pixel_at(pixels, 10, x, 0)
+        assert(near(got[0], expected, 1e-6) and got[0] == got[2] and near(got[3], 1.0, 1e-6))
+
+test "a gradient inherits stops by href, in user space with its transform and stop opacity":
+    let drawing = try parse("<svg viewBox=\"0 0 10 1\"><defs><linearGradient id=\"base\"><stop offset=\"0%\" style=\"stop-color:red\"/><stop offset=\"100%\" style=\"stop-color:blue; stop-opacity:0.5\"/></linearGradient><linearGradient id=\"g2\" xlink:href=\"#base\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"5\" y2=\"0\" gradientTransform=\"translate(5 0)\"/></defs><rect width=\"10\" height=\"1\" fill=\"url(#g2)\"/></svg>")
+    defer drawing.release()
+    var pixels: f32[10 * 4]
+    try rasterize_rgba(drawing.value(), 10, 1, pixels, Color())
+    # Pixels left of x = 5 pad with the first stop; pixel 9 sits 0.9 of the way along.
+    let left = pixel_at(pixels, 10, 2, 0)
+    assert(near(left[0], 1.0, 1e-6) and left[2] == 0.0 and near(left[3], 1.0, 1e-6))
+    let mix = 230.0 / 255.0
+    let right = pixel_at(pixels, 10, 9, 0)
+    assert(near(right[0], linear_channel(1.0 - mix), 1e-6) and near(right[2], linear_channel(mix), 1e-6) and near(right[3], 1.0 - 0.5 * mix, 1e-5))
+
+test "a radial gradient stretches over its box and honours its focal point":
+    let stops = "<stop offset=\"0\" stop-color=\"white\"/><stop offset=\"1\" stop-color=\"black\"/>"
+    var buffer: u8[512]
+    let wide = try parse(try format(buffer, f"<svg viewBox=\"0 0 20 10\"><radialGradient id=\"r\">{stops}</radialGradient><rect width=\"20\" height=\"10\" fill=\"url(#r)\"/></svg>"))
+    defer wide.release()
+    var pixels: f32[20 * 10 * 4]
+    try rasterize_rgba(wide.value(), 20, 10, pixels, Color())
+    # Pixel (19, 4) is 0.95 across and 0.1 up the ellipse: t = √(0.95² + 0.1²).
+    let t = math.sqrt(0.95 * 0.95 + 0.1 * 0.1)
+    assert(near(pixel_at(pixels, 20, 19, 4)[0], linear_channel(1.0 - math.round(t * 255.0) / 255.0), 1e-6))
+    assert(pixel_at(pixels, 20, 0, 0)[0] == 0.0 and near(pixel_at(pixels, 20, 0, 0)[3], 1.0, 1e-6))
+    let focal = try parse(try format(buffer, f"<svg viewBox=\"0 0 10 10\"><radialGradient id=\"r\" fx=\"0.1\">{stops}</radialGradient><rect width=\"10\" height=\"10\" fill=\"url(#r)\"/></svg>"))
+    defer focal.release()
+    var square: f32[10 * 10 * 4]
+    try rasterize_rgba(focal.value(), 10, 10, square, Color())
+    assert(pixel_at(square, 10, 1, 4)[0] > 0.75 and pixel_at(square, 10, 8, 4)[0] < 0.06)
+
+test "a missing or stopless gradient paints nothing, or the fallback written after it":
+    let missing = "<svg viewBox=\"0 0 4 4\"><linearGradient id=\"empty\"/><rect width=\"4\" height=\"4\" fill=\"url(#nope)\"/><rect width=\"4\" height=\"4\" fill=\"url(#empty)\"/></svg>"
+    assert((try alpha_at(missing, 4, 1, 1)) == 0.0)
+    let drawing = try parse("<svg viewBox=\"0 0 4 4\"><rect width=\"4\" height=\"4\" fill=\"url(#nope) red\"/></svg>")
+    defer drawing.release()
+    var pixels: f32[4 * 4 * 4]
+    try rasterize_rgba(drawing.value(), 4, 4, pixels, Color())
+    assert(near(pixel_at(pixels, 4, 1, 1)[0], 1.0, 1e-6) and pixel_at(pixels, 4, 1, 1)[1] == 0.0)

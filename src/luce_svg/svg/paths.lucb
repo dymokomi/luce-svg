@@ -290,6 +290,7 @@ func add_points(drawing: Drawing*, transform: Matrix, text: str, closed: bool) -
 func add_shape(drawing: Drawing*, name: str, tag: str, frame: Frame) -> !:
     drawing.style = frame.style
     let transform = frame.transform
+    let first = drawing.contour_used
     if name == "path":
         if let d = attribute(tag, "d"):
             try parse_path(drawing, d, transform)
@@ -311,4 +312,12 @@ func add_shape(drawing: Drawing*, name: str, tag: str, frame: Frame) -> !:
         try drawing.flush(start, false, false)
     elif let points = attribute(tag, "points"):
         try add_points(drawing, transform, points, name == "polygon")
+    if frame.style.fill.gradient > 0 or frame.style.stroke.gradient > 0:
+        # Gradients need the finished shape: its box, and its transform.
+        let fill = placed(drawing, frame.style.fill, transform, first)
+        let stroke = placed(drawing, frame.style.stroke, transform, first)
+        for index in first..<drawing.contour_used:
+            if drawing.contours[index].fill.painted:
+                drawing.contours[index].fill = fill
+            drawing.contours[index].stroke = stroke
     drawing.element += 1

@@ -1,0 +1,232 @@
+#==============================================================================================
+#
+#   svg/stroke - Stroke outlines: segments, joins, caps and dashes
+#
+#   DESCRIPTION:
+#       A stroke is traced as polygons that all accumulate, positively wound, into the one
+#       buffer a fill uses, so resolving it once gives the union by the nonzero rule: a
+#       rectangle per segment, a join at every interior vertex (miter up to the miter
+#       limit, else bevel; round; or bevel) that closes the wedge between neighbouring
+#       rectangles, and a cap at each open end (butt, round or square). Dashes cut the
+#       outline into runs first, each stroked and capped on its own. Round caps and joins
+#       are 16-sided discs, as the icons have always been drawn.
+#
+#==============================================================================================
+
+## How a stroke's open ends are drawn.
+enum Cap as u8:
+    butt = 0
+    round = 1
+    square = 2
+
+## How a stroke turns at a vertex.
+enum Join as u8:
+    miter = 0
+    round = 1
+    bevel = 2
+
+## How a stroke is drawn, in viewBox units: SVG's defaults are one unit wide, butt caps,
+## miter joins with a limit of 4, and no dashes.
+struct Pen:
+    var width: f64 = 1.0
+    var cap: Cap = Cap.butt
+    var join: Join = Join.miter
+    var miter_limit: f64 = 4.0
+    ## The dash pattern (up to eight lengths) and its offset; none when empty.
+    var dashes: f64[8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var dash_count: usize = 0
+    var dash_offset: f64 = 0.0
+
+## The pixel-space half width a contour is stroked with, never under a quarter pixel.
+func stroke_half(contour: Contour, fit: Placement) -> f64:
+    return math.max(0.25, contour.pen.width * fit.scale * 0.5)
+
+## A regular polygon approximating a disc, for round caps and joins.
+func disc(acc: f32[], width: usize, height: usize, centre: Point, radius: f64) -> !:
+    let ring = try alloc Point[16] in memory.heap
+    defer free(ring) in memory.heap
+    for index in 0..<(usize)16:
+        let angle = (f64)index / 16.0 * math.pi * 2.0
+        ring[index] = Point(centre.x + math.cos(angle) * radius, centre.y + math.sin(angle) * radius)
+    accumulate_polygon(acc, width, height, ring)
+
+## The unit vector from `a` to `b`, or none when they coincide.
+func heading(a: Point, b: Point) -> Point?:
+    let dx = b.x - a.x
+    let dy = b.y - a.y
+    let length = math.sqrt(dx * dx + dy * dy)
+    if length <= 1e-9:
+        return none
+    return Point(dx / length, dy / length)
+
+## The nearest point of `path` before (or after, when `forward`) `index` that is not
+## on top of it, wrapping round a closed run, whose last point repeats its first.
+func neighbour(path: const Point[], index: usize, closed: bool, forward: bool) -> Point?:
+    let ring = path.length - 1 if closed else path.length
+    var step: usize = 1
+    while step < ring:
+        var at = index
+        if forward:
+            if not closed and index + step >= ring:
+                return none
+            at = (index + step) % ring
+        else:
+            if not closed and step > index:
+                return none
+            at = (index + ring - step) % ring
+        if heading(path[index], path[at]) != none:
+            return path[at]
+        step += 1
+    return none
+
+## Accumulate the join at vertex `index`: the wedge outside the turn, as a miter (when
+## its length over the stroke width stays within the limit), a bevel, or a disc.
+func join_at(acc: f32[], width: usize, height: usize, scratch: Point[], path: const Point[], index: usize, closed: bool, half: f64, pen: Pen) -> !:
+    let vertex = path[index]
+    if pen.join == Join.round:
+        try disc(acc, width, height, vertex, half)
+        return
+    let before = neighbour(path, index, closed, false) else return
+    let after = neighbour(path, index, closed, true) else return
+    let d0 = heading(before, vertex) else return
+    let d1 = heading(vertex, after) else return
+    let turn = d0.x * d1.y - d0.y * d1.x
+    let dot = d0.x * d1.x + d0.y * d1.y
+    if math.abs(turn) < 1e-12 and dot > 0.0:
+        return
+    # The outer side is the one the path turns away from; a normal is (-dy, dx).
+    let side = -half if turn > 0.0 else half
+    let outer0 = Point(vertex.x - d0.y * side, vertex.y + d0.x * side)
+    let outer1 = Point(vertex.x - d1.y * side, vertex.y + d1.x * side)
+    scratch[0] = vertex
+    scratch[1] = outer0
+    # Miter length over stroke width is 1 / sin(θ/2) for the angle θ between the segments.
+    let cosine = math.sqrt(math.max(0.0, (1.0 + dot) * 0.5))
+    if pen.join == Join.miter and cosine > 1e-9 and 1.0 / cosine <= pen.miter_limit:
+        let reach = side / (1.0 + dot)
+        scratch[2] = Point(vertex.x - (d0.y + d1.y) * reach, vertex.y + (d0.x + d1.x) * reach)
+        scratch[3] = outer1
+        accumulate_polygon(acc, width, height, scratch)
+    else:
+        scratch[2] = outer1
+        accumulate_polygon(acc, width, height, scratch[..<3])
+
+## Accumulate the cap at the open end `index`: a disc, or a square reaching `half`
+## past the end (along x for a lone point); a butt cap adds nothing.
+func cap_at(acc: f32[], width: usize, height: usize, scratch: Point[], path: const Point[], index: usize, half: f64, pen: Pen) -> !:
+    let end = path[index]
+    if pen.cap == Cap.round:
+        try disc(acc, width, height, end, half)
+        return
+    if pen.cap != Cap.square:
+        return
+    var out = Point(1.0, 0.0)
+    if let inner = neighbour(path, index, false, index == 0):
+        out = heading(inner, end) else Point(1.0, 0.0)
+    let nx = -out.y * half
+    let ny = out.x * half
+    scratch[0] = Point(end.x + nx, end.y + ny)
+    scratch[1] = Point(end.x + nx + out.x * half, end.y + ny + out.y * half)
+    scratch[2] = Point(end.x - nx + out.x * half, end.y - ny + out.y * half)
+    scratch[3] = Point(end.x - nx, end.y - ny)
+    accumulate_polygon(acc, width, height, scratch)
+
+## Stroke one polyline of pixel-space points: a rectangle per segment, joins at the
+## interior vertices and caps at the ends. A closed run repeats its first point at the
+## end and gets joins everywhere, no caps.
+func stroke_run(acc: f32[], width: usize, height: usize, path: const Point[], closed: bool, half: f64, pen: Pen) -> !:
+    let scratch = try alloc Point[4] in memory.heap
+    defer free(scratch) in memory.heap
+    let count = path.length
+    for index in 0..<count - 1:
+        let a = path[index]
+        let b = path[index + 1]
+        let along = heading(a, b) else continue
+        let nx = -along.y * half
+        let ny = along.x * half
+        scratch[0] = Point(a.x + nx, a.y + ny)
+        scratch[1] = Point(b.x + nx, b.y + ny)
+        scratch[2] = Point(b.x - nx, b.y - ny)
+        scratch[3] = Point(a.x - nx, a.y - ny)
+        accumulate_polygon(acc, width, height, scratch)
+    for index in 0..<count:
+        if closed and index == count - 1:
+            continue
+        if closed or (index > 0 and index + 1 < count):
+            try join_at(acc, width, height, scratch, path, index, closed, half, pen)
+        else:
+            try cap_at(acc, width, height, scratch, path, index, half, pen)
+
+## Stroke a polyline as dashes: walk its length against the pattern (in pixels),
+## emitting each "on" run as its own capped stroke.
+func stroke_dashed(acc: f32[], width: usize, height: usize, path: const Point[], pen: Pen, scale: f64, half: f64) -> !:
+    var total = 0.0
+    for index in 0..<pen.dash_count:
+        total += pen.dashes[index] * scale
+    if total <= 1e-9:
+        return
+    # Where in the pattern the path begins, from the offset.
+    var phase = pen.dash_offset * scale
+    phase = phase - math.floor(phase / total) * total
+    var slot: usize = 0
+    var remaining = pen.dashes[0] * scale
+    while phase >= remaining and slot < pen.dash_count * 2:
+        phase -= remaining
+        slot = (slot + 1) % pen.dash_count
+        remaining = pen.dashes[slot] * scale
+    remaining -= phase
+    var on = slot % 2 == 0
+    let run = try alloc Point[path.length + 2 * pen.dash_count + 8] in memory.heap
+    defer free(run) in memory.heap
+    var run_count: usize = 0
+    if on:
+        run[0] = path[0]
+        run_count = 1
+    for index in 0..<path.length - 1:
+        var a = path[index]
+        let b = path[index + 1]
+        var dx = b.x - a.x
+        var dy = b.y - a.y
+        var length = math.sqrt(dx * dx + dy * dy)
+        while length > remaining:
+            let t = remaining / length
+            let cut = Point(a.x + dx * t, a.y + dy * t)
+            if on:
+                if run_count < run.length:
+                    run[run_count] = cut
+                    run_count += 1
+                try stroke_run(acc, width, height, run[..<run_count], false, half, pen)
+                run_count = 0
+            else:
+                run[0] = cut
+                run_count = 1
+            on = not on
+            slot = (slot + 1) % pen.dash_count
+            remaining = pen.dashes[slot] * scale
+            a = cut
+            dx = b.x - a.x
+            dy = b.y - a.y
+            length = math.sqrt(dx * dx + dy * dy)
+        remaining -= length
+        if on and run_count < run.length:
+            run[run_count] = b
+            run_count += 1
+    if on and run_count >= 1:
+        try stroke_run(acc, width, height, run[..<run_count], false, half, pen)
+
+## Accumulate a contour's stroke: solid or dashed, with its caps and joins.
+func trace_stroke(acc: f32[], width: usize, height: usize, drawing: const Drawing*, contour: Contour, fit: Placement) -> !:
+    let origin = contour.start
+    let count = contour.length
+    let half = stroke_half(contour, fit)
+    # The contour in pixel space, closed ones with their first point repeated.
+    let extra: usize = 1 if contour.closed and count > 1 else 0
+    let path = try alloc Point[count + extra] in memory.heap
+    defer free(path) in memory.heap
+    for index in 0..<count + extra:
+        let p = drawing.points[origin + index % count]
+        path[index] = Point(fit.offset_x + p.x * fit.scale, fit.offset_y + p.y * fit.scale)
+    if contour.pen.dash_count == 0:
+        try stroke_run(acc, width, height, path, contour.closed and count > 2, half, contour.pen)
+    else:
+        try stroke_dashed(acc, width, height, path, contour.pen, fit.scale, half)

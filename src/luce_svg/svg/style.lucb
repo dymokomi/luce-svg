@@ -11,53 +11,56 @@
 #
 #==============================================================================================
 
-## What an element draws with. SVG's defaults: a black fill, no stroke, one unit wide.
+## What an element draws with. SVG's defaults: a black fill and no stroke.
 struct Style:
     var fill: Paint = Paint(painted = true)
     var stroke: Paint = Paint()
     var opacity: f64 = 1.0
-    var width: f64 = 1.0
-    var round_cap: bool = false
-    var round_join: bool = false
     var fill_opacity: f64 = 1.0
     var stroke_opacity: f64 = 1.0
-    var dashes: f64[8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    var dash_count: usize = 0
-    var dash_offset: f64 = 0.0
+    var pen: Pen = Pen()
 
 ## `base`, the parent's style, with whatever paint, stroke and opacity properties `tag` sets.
 ## `opacity` multiplies into the parent's, so a group's fades everything inside it (each
-## paint on its own, not the group as one layer).
-func styled(tag: str, base: Style) -> Style:
+## paint on its own, not the group as one layer). `gradient_ids` names the document's
+## gradients, by index, for `url(#id)` paints.
+func styled(tag: str, base: Style, gradient_ids: const str[]) -> Style:
     var style = base
     if let value = property(tag, "fill"):
-        style.fill = paint(value, base.fill)
+        style.fill = paint(value, base.fill, gradient_ids)
     if let value = property(tag, "stroke"):
-        style.stroke = paint(value, base.stroke)
+        style.stroke = paint(value, base.stroke, gradient_ids)
     style.opacity = base.opacity * math.clamp(number_property(tag, "opacity", 1.0), 0.0, 1.0)
-    style.width = number_property(tag, "stroke-width", base.width)
-    if let cap = property(tag, "stroke-linecap"):
-        style.round_cap = cap == "round"
-    if let join = property(tag, "stroke-linejoin"):
-        style.round_join = join == "round"
     style.fill_opacity = math.clamp(number_property(tag, "fill-opacity", base.fill_opacity), 0.0, 1.0)
     style.stroke_opacity = math.clamp(number_property(tag, "stroke-opacity", base.stroke_opacity), 0.0, 1.0)
+    style.pen = penned(tag, base.pen)
+    return style
+
+## `base` with whatever stroke width, cap, join, miter limit and dash properties `tag` sets.
+func penned(tag: str, base: Pen) -> Pen:
+    var pen = base
+    pen.width = number_property(tag, "stroke-width", base.width)
+    if let cap = property(tag, "stroke-linecap"):
+        pen.cap = Cap.round if cap == "round" else (Cap.square if cap == "square" else Cap.butt)
+    if let join = property(tag, "stroke-linejoin"):
+        pen.join = Join.round if join == "round" else (Join.bevel if join == "bevel" else Join.miter)
+    pen.miter_limit = math.max(1.0, number_property(tag, "stroke-miterlimit", base.miter_limit))
     if let pattern = property(tag, "stroke-dasharray"):
-        style.dash_count = 0
+        pen.dash_count = 0
         if pattern != "none":
             let data = pattern.bytes
             var pos: usize = 0
-            while pos < data.length and style.dash_count < 8:
+            while pos < data.length and pen.dash_count < 8:
                 skip_separators(data, &pos)
                 if pos >= data.length:
                     break
                 let value = read_number(data, &pos) catch _:
                     break
                 if value > 0.0:
-                    style.dashes[style.dash_count] = value
-                    style.dash_count += 1
-    style.dash_offset = number_property(tag, "stroke-dashoffset", base.dash_offset)
-    return style
+                    pen.dashes[pen.dash_count] = value
+                    pen.dash_count += 1
+    pen.dash_offset = number_property(tag, "stroke-dashoffset", base.dash_offset)
+    return pen
 
 # mark: Properties ============================================================================
 
@@ -90,13 +93,23 @@ func number_property(tag: str, name: str, fallback: f64) -> f64:
 
 # mark: Paints and colors =====================================================================
 
-## The paint `value` names. `inherit` keeps the parent's; a paint this parser cannot draw
-## (a gradient's url(), an unknown name) is black, so the shape still shows.
-func paint(value: str, inherited: Paint) -> Paint:
+## The paint `value` names. `inherit` keeps the parent's. `url(#id)` paints with the
+## gradient of that id among `gradient_ids`, else with the fallback written after it, else
+## not at all. An unknown color name is black, so the shape still shows.
+func paint(value: str, inherited: Paint, gradient_ids: const str[]) -> Paint:
     if value == "" or value == "none" or same_folded(value, "transparent"):
         return Paint()
     if value == "inherit":
         return inherited
+    if strings.starts_with(value, "url("):
+        let close = strings.find(value, ")") else return Paint()
+        var id = strings.trim((str)value.bytes[4..<close])
+        if strings.starts_with(id, "#"):
+            id = (str)id.bytes[1..]
+        for index in 0..<gradient_ids.length:
+            if id != "" and gradient_ids[index] == id:
+                return Paint(painted = true, gradient = index + 1)
+        return paint(strings.trim((str)value.bytes[close + 1..]), Paint(), gradient_ids)
     if same_folded(value, "currentColor"):
         return Paint(painted = true, current = true)
     let color = parse_color(value) else return Paint(painted = true)
