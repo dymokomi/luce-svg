@@ -1,0 +1,208 @@
+#==============================================================================================
+#
+#   svg/tests - The parser, color and rasteriser tests
+#
+#==============================================================================================
+
+func near(a: f64, b: f64, tolerance: f64) -> bool:
+    return math.abs(a - b) <= tolerance
+
+## The RGBA of pixel (`x`, `y`) of a `width`-wide straight-alpha buffer.
+func pixel_at(pixels: const f32[], width: usize, x: usize, y: usize) -> f64[4]:
+    let slot = (y * width + x) * 4
+    return [(f64)pixels[slot], (f64)pixels[slot + 1], (f64)pixels[slot + 2], (f64)pixels[slot + 3]]
+
+test "a line path keeps its endpoints and is stroked, not filled":
+    let drawing = try parse("<svg viewBox=\"0 0 10 12\" fill=\"none\" stroke=\"currentColor\"><path d=\"M1 2 L3 4\"/></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.view_width() == 10.0 and native.view_height() == 12.0)
+    assert(native.contour_count() == 1)
+    assert(native.contour_size(0) == 2)
+    assert(native.contour_stroked(0) and not native.contour_filled(0) and not native.contour_closed(0))
+    assert(native.point(0).x == 1.0 and native.point(0).y == 2.0)
+    assert(native.point(1).x == 3.0 and native.point(1).y == 4.0)
+
+test "H, V and Z trace a closed box":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\"><path d=\"M2 2 H8 V8 H2 Z\"/></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.contour_count() == 1 and native.contour_closed(0))
+    assert(native.contour_size(0) == 4)
+    assert(native.point(1).x == 8.0 and native.point(1).y == 2.0)
+    assert(native.point(2).x == 8.0 and native.point(2).y == 8.0)
+    assert(native.point(3).x == 2.0 and native.point(3).y == 8.0)
+
+test "a cubic ends where it should and adds sampled points":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\"><path d=\"M0 0 C0 10 10 10 10 0\"/></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.contour_size(0) == 49)
+    let last = native.point(48)
+    assert(math.abs(last.x - 10.0) < 0.001 and math.abs(last.y - 0.0) < 0.001)
+
+test "relative moves and a group translate offset the geometry":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\"><g transform=\"translate(5 5)\"><path d=\"m1 1 l2 0\"/></g></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.contour_count() == 1 and native.contour_size(0) == 2)
+    assert(native.point(0).x == 6.0 and native.point(0).y == 6.0)
+    assert(native.point(1).x == 8.0 and native.point(1).y == 6.0)
+
+test "a filled rect and a circle produce closed contours":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\"><rect x=\"2\" y=\"3\" width=\"6\" height=\"4\" fill=\"currentColor\" stroke=\"none\"/><circle cx=\"12\" cy=\"12\" r=\"4\"/></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.contour_count() == 2)
+    assert(native.contour_filled(0) and not native.contour_stroked(0) and native.contour_closed(0))
+    assert(native.contour_size(0) == 4)
+    assert(native.contour_size(1) == 96 and native.contour_closed(1))
+
+test "a filled path with arcs (real icon shape) closes into one filled contour":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\"><path d=\"M6.5 3.5h11a3 3 0 0 1 3 3V8h-17V6.5a3 3 0 0 1 3-3Z\" fill=\"currentColor\"/></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.contour_count() == 1)
+    assert(native.contour_filled(0) and native.contour_closed(0))
+    assert(native.contour_size(0) > 8)
+
+test "ellipse, line and polygon elements become contours":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\"><ellipse cx=\"12\" cy=\"9\" rx=\"8\" ry=\"5.5\"/><line x1=\"1\" y1=\"2\" x2=\"3\" y2=\"4\"/><polygon points=\"0,0 4,0 2,3\"/></svg>")
+    defer drawing.release()
+    let d = try drawing.get()
+    assert(d.contour_count() == 3)
+    assert(d.contour_size(0) == 96 and d.contour_stroked(0))
+    let top = d.point(d.contour_start(0) + 72)
+    assert(math.abs(top.y - 3.5) < 0.01 and math.abs(top.x - 12.0) < 0.01)
+    assert(d.contour_size(1) == 2 and d.contour_size(2) == 3)
+
+test "a shape's own transform applies after its groups', as a rect turned about a point":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\"><g transform=\"translate(1 0)\"><rect x=\"10\" y=\"2\" width=\"4\" height=\"4\" fill=\"currentColor\" stroke=\"none\" transform=\"rotate(90 12 12)\"/></g></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.contour_count() == 1 and native.contour_size(0) == 4)
+    # Turned a quarter about (12, 12), the top square 10..14 x 2..6 lands at 18..22 x 10..14; the group moves it right by 1.
+    var low_x = 100.0
+    var high_x = -100.0
+    for index in 0..<(usize)4:
+        let p = native.point(index)
+        low_x = math.min(low_x, p.x)
+        high_x = math.max(high_x, p.x)
+    assert(math.abs(low_x - 19.0) < 0.001 and math.abs(high_x - 23.0) < 0.001)
+
+test "the rasteriser covers a stroked circle's ring and its filled disc with soft edges":
+    let source = "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"8\"/></svg>"
+    let drawing = try parse(source)
+    defer drawing.release()
+    var coverage: u8[48 * 48]
+    try rasterize(drawing.value(), 48, 48, coverage)
+    # Centre is empty, the ring at radius 16 px is solid, well outside is empty.
+    assert(coverage[24 * 48 + 24] == 0)
+    assert(coverage[24 * 48 + 8] > 200 and coverage[24 * 48 + 40] > 200)
+    assert(coverage[24 * 48 + 2] == 0)
+    # Somewhere the ring's edges cross pixels part-way: soft values appear.
+    var soft = false
+    for index in 0..<(usize)(48 * 48):
+        let v = coverage[index]
+        if v > 20 and v < 235:
+            soft = true
+    assert(soft)
+    let filled = try parse("<svg viewBox=\"0 0 24 24\"><rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" fill=\"currentColor\" fill-opacity=\".5\"/></svg>")
+    defer filled.release()
+    try rasterize(filled.value(), 24, 24, coverage[..<24 * 24])
+    assert(coverage[12 * 24 + 12] > 120 and coverage[12 * 24 + 12] < 135 and coverage[1 * 24 + 1] == 0)
+
+test "polylines fill, comments and definitions are skipped, single quotes and the viewBox origin count":
+    let drawing = try parse("<svg viewBox='10 20 24 24'><!-- <rect width=\"1\" height=\"1\"/> --><defs><clipPath id=\"c\"><rect width=\"5\" height=\"5\"/></clipPath></defs><polyline points='10,20 14,20 12,23'/></svg>")
+    defer drawing.release()
+    let d = try drawing.get()
+    assert(d.contour_count() == 1 and d.contour_filled(0) and not d.contour_closed(0))
+    assert(d.point(0).x == 0.0 and d.point(0).y == 0.0 and d.point(2).x == 2.0 and d.point(2).y == 3.0)
+
+# mark: Color tests ===========================================================================
+
+test "colors parse from hex, rgb() and names, and paints are not colors":
+    let short = parse_color("#f0A") else error(invalid, "a color did not parse")
+    assert(short.r == 1.0 and short.g == 0.0 and near(short.b, 170.0 / 255.0, 1e-12))
+    let long = parse_color(" #00ff80 ") else error(invalid, "a color did not parse")
+    assert(long.r == 0.0 and long.g == 1.0 and near(long.b, 128.0 / 255.0, 1e-12))
+    let numbers = parse_color("rgb(255, 0,51)") else error(invalid, "a color did not parse")
+    assert(numbers.r == 1.0 and numbers.g == 0.0 and near(numbers.b, 0.2, 1e-12))
+    let percents = parse_color("RGB(100% 50% 120%)") else error(invalid, "a color did not parse")
+    assert(percents.r == 1.0 and percents.g == 0.5 and percents.b == 1.0)
+    let named = parse_color("RebeccaPurple") else error(invalid, "a color did not parse")
+    assert(near(named.r, 102.0 / 255.0, 1e-12) and near(named.g, 51.0 / 255.0, 1e-12) and near(named.b, 153.0 / 255.0, 1e-12))
+    let white = parse_color("whitesmoke") else error(invalid, "a color did not parse")
+    assert(near(white.r, 245.0 / 255.0, 1e-12))
+    assert(parse_color("none") == none and parse_color("currentColor") == none and parse_color("#12") == none)
+    assert(parse_color("rgb(1, 2)") == none and parse_color("rgb(1, 2, 3, 4)") == none and parse_color("blurple") == none)
+
+test "paints come from attributes and style, inherit through groups, and default to a black fill":
+    let drawing = try parse("<svg viewBox=\"0 0 24 24\"><rect width=\"2\" height=\"2\"/><g fill=\"red\" stroke=\"#00f\" opacity=\"0.5\"><g><circle r=\"2\" fill-opacity=\"0.5\"/></g><rect width=\"2\" height=\"2\" style=\"fill: currentColor; stroke:none\" fill=\"green\"/></g></svg>")
+    defer drawing.release()
+    let d = try drawing.get()
+    assert(d.contour_count() == 3 and d.contour_element(1) == 1 and d.contour_element(2) == 2)
+    let black = d.contour_fill_color(0)
+    assert(d.contour_filled(0) and not d.contour_stroked(0) and black.r == 0.0 and black.g == 0.0 and black.b == 0.0)
+    let red = d.contour_fill_color(1)
+    let blue = d.contour_stroke_color(1)
+    assert(red.r == 1.0 and red.g == 0.0 and blue.b == 1.0 and not d.contour_fill_current(1) and not d.contour_stroke_current(1))
+    assert(d.contour_fill_opacity(1) == 0.25 and d.contour_stroke_opacity(1) == 0.5)
+    assert(d.contour_fill_current(2) and not d.contour_stroked(2) and d.contour_fill_opacity(2) == 0.5)
+
+# mark: RGBA tests ============================================================================
+
+test "a red circle over a blue rect composites in linear light with the coverage rasteriser's edges":
+    let drawing = try parse("<svg viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\" fill=\"blue\"/><circle cx=\"5\" cy=\"5\" r=\"2.5\" fill=\"#ff0000\"/></svg>")
+    defer drawing.release()
+    var pixels: f32[10 * 10 * 4]
+    try rasterize_rgba(drawing.value(), 10, 10, pixels, Color())
+    let centre = pixel_at(pixels, 10, 5, 5)
+    assert(near(centre[0], 1.0, 1e-6) and centre[1] == 0.0 and near(centre[2], 0.0, 1e-6) and near(centre[3], 1.0, 1e-6))
+    let outside = pixel_at(pixels, 10, 0, 0)
+    assert(outside[0] == 0.0 and near(outside[2], 1.0, 1e-6) and near(outside[3], 1.0, 1e-6))
+    # The circle's left edge crosses pixel (2, 5) part-way: red and blue share it.
+    let edge = pixel_at(pixels, 10, 2, 5)
+    assert(edge[0] > 0.2 and edge[0] < 0.8 and near(edge[0] + edge[2], 1.0, 1e-5) and near(edge[3], 1.0, 1e-6))
+    # The circle alone through the coverage rasteriser gives the same edge.
+    let alone = try parse("<svg viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"2.5\"/></svg>")
+    defer alone.release()
+    var coverage: u8[10 * 10]
+    try rasterize(alone.value(), 10, 10, coverage)
+    for y in 0..<(usize)10:
+        for x in 0..<(usize)10:
+            assert(near(pixel_at(pixels, 10, x, y)[0] * 255.0, (f64)coverage[y * 10 + x], 0.5 + 1e-4))
+
+test "a group's fill and fill-opacity reach its shapes, decoded to linear light":
+    let drawing = try parse("<svg viewBox=\"0 0 4 4\"><g fill=\"#808080\" fill-opacity=\"0.5\"><rect width=\"4\" height=\"4\"/></g></svg>")
+    defer drawing.release()
+    var pixels: f32[4 * 4 * 4]
+    try rasterize_rgba(drawing.value(), 4, 4, pixels, Color())
+    let grey = pixel_at(pixels, 4, 1, 1)
+    assert(near(grey[0], 0.2158605, 1e-6) and grey[0] == grey[1] and grey[1] == grey[2] and near(grey[3], 0.5, 1e-6))
+
+test "fill none with a stroke paints only the outline":
+    let drawing = try parse("<svg viewBox=\"0 0 10 10\"><rect x=\"2\" y=\"2\" width=\"6\" height=\"6\" fill=\"none\" stroke=\"red\" stroke-width=\"2\"/></svg>")
+    defer drawing.release()
+    var pixels: f32[10 * 10 * 4]
+    try rasterize_rgba(drawing.value(), 10, 10, pixels, Color())
+    assert(pixel_at(pixels, 10, 5, 5)[3] == 0.0 and pixel_at(pixels, 10, 0, 5)[3] == 0.0)
+    let side = pixel_at(pixels, 10, 2, 5)
+    assert(near(side[0], 1.0, 1e-6) and side[1] == 0.0 and near(side[3], 1.0, 1e-6))
+
+test "opacities multiply, blend over what is below, and currentColor is the caller's":
+    let drawing = try parse("<svg viewBox=\"0 0 2 1\"><rect width=\"2\" height=\"1\" fill=\"blue\"/><g opacity=\"0.5\"><rect width=\"1\" height=\"1\" fill=\"red\"/></g><rect x=\"1\" width=\"1\" height=\"1\" fill=\"currentColor\" opacity=\"0.5\" fill-opacity=\"0.5\"/></svg>")
+    defer drawing.release()
+    var pixels: f32[2 * 1 * 4]
+    try rasterize_rgba(drawing.value(), 2, 1, pixels, Color(r = 1.0, g = 0.5, b = 0.0))
+    let half = pixel_at(pixels, 2, 0, 0)
+    assert(near(half[0], 0.5, 1e-6) and half[1] == 0.0 and near(half[2], 0.5, 1e-6) and near(half[3], 1.0, 1e-6))
+    let quarter = pixel_at(pixels, 2, 1, 0)
+    assert(near(quarter[0], 0.25, 1e-6) and near(quarter[1], 0.25 * 0.2140411, 1e-6) and near(quarter[2], 0.75, 1e-6))
+
+test "one element's subpaths fill together, so a reversed inner square is a hole":
+    let drawing = try parse("<svg viewBox=\"0 0 6 6\"><path d=\"M0 0H6V6H0Z M2 2V4H4V2Z\" fill=\"red\"/></svg>")
+    defer drawing.release()
+    var pixels: f32[6 * 6 * 4]
+    try rasterize_rgba(drawing.value(), 6, 6, pixels, Color())
+    assert(pixel_at(pixels, 6, 2, 2)[3] == 0.0 and pixel_at(pixels, 6, 3, 3)[3] == 0.0 and near(pixel_at(pixels, 6, 0, 0)[3], 1.0, 1e-6))

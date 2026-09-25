@@ -1,0 +1,238 @@
+#==============================================================================================
+#
+#   svg - A small SVG parser, flattener and rasteriser
+#
+#   DESCRIPTION:
+#       Reads an SVG string — paths, basic shapes and nested groups — and flattens its curves
+#       and arcs into polylines. The result is a Drawing: the viewBox size plus a set of
+#       contours over one flat point buffer, in viewBox coordinates. Each contour carries its
+#       element's paints (sRGB fill and stroke colors or currentColor), opacities, stroke width,
+#       caps, joins and dashes. Two rasterisers draw it: an 8-bit coverage mask for icons,
+#       which the caller tints, and straight-alpha linear RGBA for artwork. Enough of the SVG
+#       grammar is covered for icons and plain illustrations (M L H V C S Q T A Z, rect,
+#       circle, ellipse, line, polyline, polygon, g; no gradients, text or clipping).
+#       Fragments, in ORDER:
+#
+#       module.lucb    the Drawing, its contours and their paints
+#       parse.lucb     the document grammar: tags, attributes, transforms, groups
+#       paths.lucb     path data and basic shapes, flattened to points
+#       style.lucb     styles, their inheritance, and paint and color parsing
+#       coverage.lucb  the exact-area coverage rasteriser and the 8-bit mask
+#       rgba.lucb      compositing painted elements into linear RGBA
+#       tests.lucb     the tests
+#
+#==============================================================================================
+
+import memory
+import interop
+import math
+import strings
+
+## An SVG the parser could not read.
+pub let invalid: ErrorCode = ErrorCode.package(320)
+
+## A point in viewBox (or, inside the rasterisers, pixel) coordinates.
+pub struct Point:
+    pub var x: f64 = 0.0
+    pub var y: f64 = 0.0
+
+## An sRGB color, each channel encoded (not linear) in 0..1.
+pub struct Color:
+    pub var r: f64 = 0.0
+    pub var g: f64 = 0.0
+    pub var b: f64 = 0.0
+
+## How a fill or stroke is painted: not at all, with `color`, or with the caller's
+## currentColor.
+struct Paint:
+    var painted: bool = false
+    var current: bool = false
+    var color: Color = Color()
+
+## An affine transform mapping (x, y) to (a·x + c·y + e, b·x + d·y + f).
+struct Matrix:
+    var a: f64 = 1.0
+    var b: f64 = 0.0
+    var c: f64 = 0.0
+    var d: f64 = 1.0
+    var e: f64 = 0.0
+    var f: f64 = 0.0
+
+func identity() -> Matrix:
+    return Matrix()
+
+func apply(transform: Matrix, x: f64, y: f64) -> Point:
+    return Point(transform.a * x + transform.c * y + transform.e, transform.b * x + transform.d * y + transform.f)
+
+## `outer` composed with `inner`: a point is transformed by `inner`, then `outer`.
+func multiply(outer: Matrix, inner: Matrix) -> Matrix:
+    return Matrix(a = outer.a * inner.a + outer.c * inner.b,
+                  b = outer.b * inner.a + outer.d * inner.b,
+                  c = outer.a * inner.c + outer.c * inner.d,
+                  d = outer.b * inner.c + outer.d * inner.d,
+                  e = outer.a * inner.e + outer.c * inner.f + outer.e,
+                  f = outer.b * inner.e + outer.d * inner.f + outer.f)
+
+## One flattened outline: a run of points plus how it should be drawn. The contours of one
+## element share `element` and its paints, and are filled together by the nonzero rule.
+struct Contour:
+    var start: usize = 0
+    var length: usize = 0
+    var closed: bool = false
+    var element: usize = 0
+    var fill: Paint = Paint()
+    var stroke: Paint = Paint()
+    ## Stroke width in viewBox units, round caps and joins, and the paints' opacities
+    ## (each already multiplied by the element's and its groups' `opacity`).
+    var width: f64 = 1.0
+    var round_cap: bool = false
+    var round_join: bool = false
+    var fill_opacity: f64 = 1.0
+    var stroke_opacity: f64 = 1.0
+    ## The dash pattern (viewBox units, up to eight lengths) and its offset; none when empty.
+    var dashes: f64[8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var dash_count: usize = 0
+    var dash_offset: f64 = 0.0
+
+# mark: The drawing ===========================================================================
+
+## A parsed drawing: the viewBox size and its contours over a shared point buffer. Every point
+## is in viewBox space, measured from the viewBox's top-left corner.
+pub struct Drawing:
+    var view_w: f64 = 0.0
+    var view_h: f64 = 0.0
+    var points: Point[]
+    var point_used: usize = 0
+    var contours: Contour[]
+    var contour_used: usize = 0
+    ## The style and element number the next contours are added with.
+    var style: Style = Style()
+    var element: usize = 0
+
+    static func own(native: Drawing*) -> interop.Reference[Drawing]!:
+        return try interop.Reference[Drawing].adopt(native, drawing_type)
+
+    mutating func add_point(value: Point) -> !:
+        if self.point_used >= self.points.length:
+            let capacity: usize = 64 if self.points.length == 0 else self.points.length * 2
+            let grown = try alloc Point[capacity] in memory.heap
+            var index: usize = 0
+            while index < self.point_used:
+                grown[index] = self.points[index]
+                index += 1
+            if self.points.length > 0:
+                free(self.points) in memory.heap
+            self.points = grown
+        self.points[self.point_used] = value
+        self.point_used += 1
+
+    mutating func add_contour(value: Contour) -> !:
+        if self.contour_used >= self.contours.length:
+            let capacity: usize = 16 if self.contours.length == 0 else self.contours.length * 2
+            let grown = try alloc Contour[capacity] in memory.heap
+            var index: usize = 0
+            while index < self.contour_used:
+                grown[index] = self.contours[index]
+                index += 1
+            if self.contours.length > 0:
+                free(self.contours) in memory.heap
+            self.contours = grown
+        self.contours[self.contour_used] = value
+        self.contour_used += 1
+
+    ## Close an outline that has at least one point, painted in the current style; a
+    ## `line` passes `fillable` false, since only its stroke is ever drawn.
+    mutating func flush(start: usize, fillable: bool, closed: bool) -> !:
+        let length = self.point_used - start
+        if length == 0:
+            return
+        let style = self.style
+        try self.add_contour(Contour(start = start, length = length, closed = closed, element = self.element,
+                                     fill = style.fill if fillable else Paint(), stroke = style.stroke,
+                                     width = style.width, round_cap = style.round_cap, round_join = style.round_join,
+                                     fill_opacity = style.fill_opacity * style.opacity, stroke_opacity = style.stroke_opacity * style.opacity,
+                                     dashes = style.dashes, dash_count = style.dash_count, dash_offset = style.dash_offset))
+
+    ## The viewBox width (or the `width` attribute, else 24).
+    pub func view_width() -> f64:
+        return self.view_w
+
+    ## The viewBox height (or the `height` attribute, else 24).
+    pub func view_height() -> f64:
+        return self.view_h
+
+    ## How many contours the drawing holds, in document order.
+    pub func contour_count() -> usize:
+        return self.contour_used
+
+    ## The index of a contour's first point.
+    pub func contour_start(index: usize) -> usize:
+        return self.contours[index].start
+
+    ## How many points a contour has.
+    pub func contour_size(index: usize) -> usize:
+        return self.contours[index].length
+
+    ## Which element, counted from 0 in document order, a contour belongs to.
+    pub func contour_element(index: usize) -> usize:
+        return self.contours[index].element
+
+    ## Whether a contour is filled.
+    pub func contour_filled(index: usize) -> bool:
+        return self.contours[index].fill.painted
+
+    ## Whether a contour is stroked.
+    pub func contour_stroked(index: usize) -> bool:
+        return self.contours[index].stroke.painted
+
+    ## Whether a contour was closed (Z, rect, circle, ellipse, polygon).
+    pub func contour_closed(index: usize) -> bool:
+        return self.contours[index].closed
+
+    ## The stroke width of a contour, in viewBox units.
+    pub func contour_width(index: usize) -> f64:
+        return self.contours[index].width
+
+    ## The fill's opacity, `fill-opacity` times every enclosing `opacity`.
+    pub func contour_fill_opacity(index: usize) -> f64:
+        return self.contours[index].fill_opacity
+
+    ## The stroke's opacity, `stroke-opacity` times every enclosing `opacity`.
+    pub func contour_stroke_opacity(index: usize) -> f64:
+        return self.contours[index].stroke_opacity
+
+    ## The fill's sRGB color; meaningless when it is unfilled or currentColor.
+    pub func contour_fill_color(index: usize) -> Color:
+        return self.contours[index].fill.color
+
+    ## Whether the fill is currentColor, the color the caller supplies.
+    pub func contour_fill_current(index: usize) -> bool:
+        return self.contours[index].fill.current
+
+    ## The stroke's sRGB color; meaningless when it is unstroked or currentColor.
+    pub func contour_stroke_color(index: usize) -> Color:
+        return self.contours[index].stroke.color
+
+    ## Whether the stroke is currentColor, the color the caller supplies.
+    pub func contour_stroke_current(index: usize) -> bool:
+        return self.contours[index].stroke.current
+
+    ## A point of the shared buffer, in viewBox units.
+    pub func point(index: usize) -> Point:
+        return self.points[index]
+
+    ## Free the point and contour buffers; the drawing is empty afterwards.
+    pub mutating func close():
+        if self.points.length > 0:
+            free(self.points) in memory.heap
+        if self.contours.length > 0:
+            free(self.contours) in memory.heap
+        var empty_points: Point[]
+        var empty_contours: Contour[]
+        self.points = empty_points
+        self.contours = empty_contours
+        self.point_used = 0
+        self.contour_used = 0
+
+## The interop type a parsed Drawing is owned under.
+pub let drawing_type: interop.Type[Drawing] = interop.Type[Drawing]("SVG drawing", Drawing.close, closeable = true)

@@ -1,0 +1,108 @@
+#==============================================================================================
+#
+#   svg/rgba - Compositing painted elements into linear RGBA
+#
+#   DESCRIPTION:
+#       Draws a Drawing in color. Element by element in document order, all of its fill
+#       outlines accumulate together (so holes cut by the nonzero rule stay open), then
+#       composite source-over in the fill's color; its stroke follows the same way. The
+#       anti-aliasing is the coverage rasteriser's, unquantised. Paints are decoded from
+#       sRGB to linear light before they blend, and only the rows and columns an element
+#       can touch are resolved, so large drawings with many small shapes stay cheap.
+#
+#==============================================================================================
+
+## The accumulator cells an element can have touched: rows `row0..<row1` and cells
+## `column0..<column1` of each (the last cell of a row is the spare one past the edge).
+struct Span:
+    var row0: usize = 0
+    var row1: usize = 0
+    var column0: usize = 0
+    var column1: usize = 0
+
+## The span of contours `first..<last` placed by `fit`, grown by `grow` pixels (a stroke's
+## half width) plus a pixel of margin, clamped to a `width` by `height` bitmap.
+func element_span(drawing: const Drawing*, first: usize, last: usize, fit: Placement, grow: f64, width: usize, height: usize) -> Span:
+    var low_x = math.infinity
+    var low_y = math.infinity
+    var high_x = -math.infinity
+    var high_y = -math.infinity
+    for contour_index in first..<last:
+        let contour = drawing.contours[contour_index]
+        for index in contour.start..<contour.start + contour.length:
+            let p = drawing.points[index]
+            low_x = math.min(low_x, fit.offset_x + p.x * fit.scale)
+            low_y = math.min(low_y, fit.offset_y + p.y * fit.scale)
+            high_x = math.max(high_x, fit.offset_x + p.x * fit.scale)
+            high_y = math.max(high_y, fit.offset_y + p.y * fit.scale)
+    let margin = grow + 1.0
+    let rows = (f64)height
+    let cells = (f64)(width + 1)
+    let row0 = (usize)math.clamp(math.floor(low_y - margin), 0.0, rows)
+    let column0 = (usize)math.clamp(math.floor(low_x - margin), 0.0, cells)
+    let row1 = (usize)math.clamp(math.ceil(high_y + margin), 0.0, rows)
+    let column1 = (usize)math.clamp(math.ceil(high_x + margin) + 1.0, 0.0, cells)
+    return Span(row0 = row0, row1 = row1 if row1 > row0 else row0, column0 = column0, column1 = column1 if column1 > column0 else column0)
+
+## Resolve the accumulator over `span` as coverage, blend `color` (linear) at `alpha`
+## times that coverage over the straight-alpha `pixels`, and clear what was read.
+func composite(acc: f32[], width: usize, span: Span, color: Color, alpha: f64, pixels: f32[]):
+    let stride = width + 1
+    for row in span.row0..<span.row1:
+        var sum: f32 = 0.0
+        for column in span.column0..<span.column1:
+            let cell = row * stride + column
+            sum += acc[cell]
+            acc[cell] = 0.0
+            let cover = math.min(1.0, math.abs((f64)sum)) * alpha
+            if column >= width or cover <= 0.0:
+                continue
+            let slot = (row * width + column) * 4
+            let below = (f64)pixels[slot + 3] * (1.0 - cover)
+            let total = cover + below
+            pixels[slot] = (f32)((color.r * cover + (f64)pixels[slot] * below) / total)
+            pixels[slot + 1] = (f32)((color.g * cover + (f64)pixels[slot + 1] * below) / total)
+            pixels[slot + 2] = (f32)((color.b * cover + (f64)pixels[slot + 2] * below) / total)
+            pixels[slot + 3] = (f32)total
+
+## The linear color a paint draws with; `current` is already linear.
+func paint_color(source: Paint, current: Color) -> Color:
+    return current if source.current else to_linear(source.color)
+
+## Rasterise `drawing` in color into `pixels`, `width * height * 4` floats, top-down
+## RGBA in straight (not premultiplied) alpha. Color channels are LINEAR light, not
+## encoded sRGB: every paint, including `current` (the sRGB color `currentColor` means,
+## as parse_color returns it), is decoded before blending. The drawing is placed as
+## `rasterize` places it, scaled uniformly from the viewBox and centred. Each element's
+## fill, then its stroke, composites source-over in document order onto a transparent
+## start, anti-aliased by exact area coverage.
+pub func rasterize_rgba(drawing: const Drawing*, width: u32, height: u32, pixels: f32[], current: Color) -> !:
+    let acc = try accumulator(width, height)
+    defer free(acc) in memory.heap
+    if pixels.length != (usize)width * (usize)height * 4:
+        error(invalid, "the pixel buffer must hold width * height * 4 floats")
+    for index in 0..<pixels.length:
+        pixels[index] = 0.0
+    let w = (usize)width
+    let h = (usize)height
+    let fit = placement(drawing, width, height)
+    let current_linear = to_linear(current)
+    var first: usize = 0
+    while first < drawing.contour_used:
+        # The element's contours run from `first` to `last`, sharing one style.
+        let head = drawing.contours[first]
+        var last = first + 1
+        while last < drawing.contour_used and drawing.contours[last].element == head.element:
+            last += 1
+        if head.fill.painted:
+            for index in first..<last:
+                if drawing.contours[index].length >= 3:
+                    trace_fill(acc, w, h, drawing, drawing.contours[index], fit)
+            composite(acc, w, element_span(drawing, first, last, fit, 0.0, w, h), paint_color(head.fill, current_linear), head.fill_opacity, pixels)
+        if head.stroke.painted:
+            for index in first..<last:
+                if drawing.contours[index].length >= 1:
+                    try trace_stroke(acc, w, h, drawing, drawing.contours[index], fit)
+            let span = element_span(drawing, first, last, fit, stroke_half(head, fit), w, h)
+            composite(acc, w, span, paint_color(head.stroke, current_linear), head.stroke_opacity, pixels)
+        first = last

@@ -1,0 +1,277 @@
+#==============================================================================================
+#
+#   svg/parse - The document grammar: tags, attributes, transforms and groups
+#
+#   DESCRIPTION:
+#       Walks the tags of an SVG document without building a tree. `<svg>` sets the viewBox
+#       and the root style, each `<g>` pushes a frame (its transform and style) that `</g>`
+#       pops, and each shape element is flattened under the frame in force. Comments are
+#       skipped, and so are the contents of definition containers (defs, clipPath, mask,
+#       symbol, pattern, marker), whose shapes are not drawn where they stand.
+#
+#==============================================================================================
+
+# mark: Number and byte scanning ==============================================================
+
+func is_alpha(byte: u8) -> bool:
+    return (byte >= 'A' and byte <= 'Z') or (byte >= 'a' and byte <= 'z')
+
+func is_digit(byte: u8) -> bool:
+    return byte >= '0' and byte <= '9'
+
+func is_space(byte: u8) -> bool:
+    return byte == ' ' or byte == '\t' or byte == '\n' or byte == '\r'
+
+func skip_separators(data: const u8[], pos: usize*):
+    while *pos < data.length and (is_space(data[*pos]) or data[*pos] == ','):
+        *pos += 1
+
+func at_number(data: const u8[], pos: usize) -> bool:
+    if pos >= data.length:
+        return false
+    let byte = data[pos]
+    return byte == '+' or byte == '-' or byte == '.' or is_digit(byte)
+
+## Skip separators, then answer whether a number starts there.
+func at_number_or_space(data: const u8[], pos: usize*) -> bool:
+    skip_separators(data, pos)
+    return at_number(data, *pos)
+
+## Read one SVG number token (sign, digits, fraction, exponent) and parse it.
+func read_number(data: const u8[], pos: usize*) -> f64!:
+    skip_separators(data, pos)
+    let start = *pos
+    if *pos < data.length and (data[*pos] == '+' or data[*pos] == '-'):
+        *pos += 1
+    while *pos < data.length and is_digit(data[*pos]):
+        *pos += 1
+    if *pos < data.length and data[*pos] == '.':
+        *pos += 1
+        while *pos < data.length and is_digit(data[*pos]):
+            *pos += 1
+    if *pos < data.length and (data[*pos] == 'e' or data[*pos] == 'E'):
+        *pos += 1
+        if *pos < data.length and (data[*pos] == '+' or data[*pos] == '-'):
+            *pos += 1
+        while *pos < data.length and is_digit(data[*pos]):
+            *pos += 1
+    if *pos == start:
+        error(invalid, "expected a number in path data")
+    return try strings.parse_f64((str)data[start..<*pos])
+
+## Arc flags are a single 0 or 1 with no separator required.
+func read_flag(data: const u8[], pos: usize*) -> f64!:
+    skip_separators(data, pos)
+    if *pos >= data.length or (data[*pos] != '0' and data[*pos] != '1'):
+        error(invalid, "expected an arc flag")
+    let value = 1.0 if data[*pos] == '1' else 0.0
+    *pos += 1
+    return value
+
+# mark: Attributes and transforms =============================================================
+
+## The value of `name="..."` (or `name='...'`) inside `tag`, or none.
+func attribute(tag: str, name: str) -> str?:
+    let data = tag.bytes
+    let key = name.bytes
+    var index: usize = 0
+    while index + key.length + 2 <= data.length:
+        var matched = true
+        for offset in 0..<key.length:
+            if data[index + offset] != key[offset]:
+                matched = false
+                break
+        let anchored = index == 0 or is_space(data[index - 1])
+        let quote = data[index + key.length + 1]
+        if matched and anchored and data[index + key.length] == '=' and (quote == '"' or quote == '\''):
+            var end = index + key.length + 2
+            while end < data.length and data[end] != quote:
+                end += 1
+            return (str)data[index + key.length + 2..<end]
+        index += 1
+    return none
+
+func number_attribute(tag: str, name: str, fallback: f64) -> f64:
+    let value = attribute(tag, name) else return fallback
+    return strings.parse_f64(value) catch _: recover fallback
+
+## Compose the transform list in `text` (translate/scale/rotate/matrix), left to right.
+func parse_transform(text: str) -> Matrix:
+    let data = text.bytes
+    var result = identity()
+    var pos: usize = 0
+    while pos < data.length:
+        skip_separators(data, &pos)
+        let name_start = pos
+        while pos < data.length and is_alpha(data[pos]):
+            pos += 1
+        if pos == name_start or pos >= data.length or data[pos] != '(':
+            break
+        let name = (str)data[name_start..<pos]
+        pos += 1
+        var values: f64[6] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        var count: usize = 0
+        while pos < data.length and data[pos] != ')':
+            if at_number(data, pos):
+                let value = read_number(data, &pos) catch _:
+                    break
+                if count < 6:
+                    values[count] = value
+                    count += 1
+            else:
+                pos += 1
+        if pos < data.length:
+            pos += 1
+        result = multiply(result, transform_function(name, values, count))
+    return result
+
+func transform_function(name: str, values: const f64[], count: usize) -> Matrix:
+    if name == "matrix" and count >= 6:
+        return Matrix(a = values[0], b = values[1], c = values[2], d = values[3], e = values[4], f = values[5])
+    if name == "translate":
+        return Matrix(e = values[0], f = values[1] if count >= 2 else 0.0)
+    if name == "scale":
+        return Matrix(a = values[0], d = values[1] if count >= 2 else values[0])
+    if name == "rotate":
+        let angle = values[0] * math.pi / 180.0
+        let cos_a = math.cos(angle)
+        let sin_a = math.sin(angle)
+        let rotation = Matrix(a = cos_a, b = sin_a, c = -sin_a, d = cos_a)
+        if count >= 3:
+            let to_origin = Matrix(e = -values[1], f = -values[2])
+            let back = Matrix(e = values[1], f = values[2])
+            return multiply(multiply(back, rotation), to_origin)
+        return rotation
+    return identity()
+
+# mark: Tags ==================================================================================
+
+## The element name right after `<`, e.g. "svg", "path", or "/g" for a closing group.
+func tag_name(tag: str) -> str:
+    let data = tag.bytes
+    if data.length < 2:
+        return ""
+    var end: usize = 2 if data[1] == '/' else 1
+    while end < data.length and (is_alpha(data[end]) or is_digit(data[end])):
+        end += 1
+    return (str)data[1..<end]
+
+## The viewBox's origin and size, or the origin and the `width` and `height` attributes.
+struct ViewBox:
+    var x: f64 = 0.0
+    var y: f64 = 0.0
+    var w: f64 = 0.0
+    var h: f64 = 0.0
+
+func view_box(tag: str) -> ViewBox:
+    if let box = attribute(tag, "viewBox"):
+        let data = box.bytes
+        var pos: usize = 0
+        var values: f64[4] = [0.0, 0.0, 0.0, 0.0]
+        var count: usize = 0
+        while count < 4 and at_number_or_space(data, &pos):
+            let value = read_number(data, &pos) catch _:
+                break
+            values[count] = value
+            count += 1
+        if count == 4:
+            return ViewBox(x = values[0], y = values[1], w = values[2], h = values[3])
+    return ViewBox(w = number_attribute(tag, "width", 0.0), h = number_attribute(tag, "height", 0.0))
+
+func is_shape(name: str) -> bool:
+    return name == "path" or name == "rect" or name == "circle" or name == "ellipse" or name == "line" or name == "polyline" or name == "polygon"
+
+## Containers whose contents are definitions, drawn only where referenced (which this
+## parser does not do), so they are skipped whole.
+func is_definition(name: str) -> bool:
+    return name == "defs" or name == "clipPath" or name == "mask" or name == "symbol" or name == "pattern" or name == "marker"
+
+## The position just past the `</name>` that closes an element whose contents begin at `pos`.
+func skip_element(data: const u8[], pos: usize, name: str) -> usize:
+    var index = pos
+    while index + 1 < data.length:
+        if data[index] == '<' and data[index + 1] == '/':
+            let closing = tag_name((str)data[index..])
+            var end = index
+            while end < data.length and data[end] != '>':
+                end += 1
+            if (str)closing.bytes[1..] == name:
+                return end + 1 if end < data.length else data.length
+            index = end
+        index += 1
+    return data.length
+
+# mark: The parser ============================================================================
+
+## The transform and style a group or shape draws with.
+struct Frame:
+    var transform: Matrix = Matrix()
+    var style: Style = Style()
+
+## `outer` with the transform and style attributes of `tag` applied: a group's or shape's
+## own transform comes after its ancestors'.
+func entered(outer: Frame, tag: str) -> Frame:
+    var inner = Frame(transform = outer.transform, style = styled(tag, outer.style))
+    if let text = attribute(tag, "transform"):
+        inner.transform = multiply(outer.transform, parse_transform(text))
+    return inner
+
+## How deeply groups can nest; deeper groups draw with their parent's frame.
+let group_limit: usize = 32
+
+## Parse an SVG document into a flattened Drawing. Unsupported elements are ignored.
+pub func parse(source: str) -> interop.Reference[Drawing]!:
+    var empty_points: Point[]
+    var empty_contours: Contour[]
+    let native = try new Drawing(view_w = 0.0, view_h = 0.0, points = empty_points, point_used = 0, contours = empty_contours, contour_used = 0)
+    errdefer free(native)
+    errdefer native.close()
+    let data = source.bytes
+    var frame = Frame()
+    let saved = try alloc Frame[group_limit] in memory.heap
+    defer free(saved) in memory.heap
+    var depth: usize = 0
+    var ignored: usize = 0
+    var index: usize = 0
+    while index < data.length:
+        if data[index] != '<':
+            index += 1
+            continue
+        if strings.starts_with((str)data[index..], "<!--"):
+            let finish = strings.find_from(source, "-->", index) else break
+            index = finish + 3
+            continue
+        var tag_end = index + 1
+        while tag_end < data.length and data[tag_end] != '>':
+            tag_end += 1
+        let tag = (str)data[index..<tag_end]
+        let name = tag_name(tag)
+        let self_closing = data[tag_end - 1] == '/'
+        index = tag_end + 1 if tag_end < data.length else data.length
+        if name == "svg":
+            let box = view_box(tag)
+            native.view_w = box.w
+            native.view_h = box.h
+            frame = Frame(transform = Matrix(e = -box.x, f = -box.y), style = styled(tag, Style()))
+        elif name == "g" and not self_closing:
+            if depth < group_limit:
+                saved[depth] = frame
+                depth += 1
+                frame = entered(frame, tag)
+            else:
+                ignored += 1
+        elif name == "/g":
+            if ignored > 0:
+                ignored -= 1
+            elif depth > 0:
+                depth -= 1
+                frame = saved[depth]
+        elif is_definition(name) and not self_closing:
+            index = skip_element(data, index, name)
+        elif is_shape(name):
+            try add_shape(native, name, tag, entered(frame, tag))
+    if native.view_w <= 0.0:
+        native.view_w = 24.0
+    if native.view_h <= 0.0:
+        native.view_h = 24.0
+    return try Drawing.own(native)

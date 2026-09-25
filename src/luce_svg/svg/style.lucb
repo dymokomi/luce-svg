@@ -1,0 +1,241 @@
+#==============================================================================================
+#
+#   svg/style - Styles, their inheritance, and paint and color parsing
+#
+#   DESCRIPTION:
+#       A Style is what an element draws with: its fill and stroke paints, their opacities,
+#       the stroke's width, caps, joins and dashes, and the product of every enclosing
+#       `opacity`. Each property is read from the element's `style="..."` declarations
+#       first, then from its presentation attribute, else inherited from the parent. Colors
+#       are #rgb, #rrggbb, rgb() with numbers or percentages, and the 148 CSS named colors.
+#
+#==============================================================================================
+
+## What an element draws with. SVG's defaults: a black fill, no stroke, one unit wide.
+struct Style:
+    var fill: Paint = Paint(painted = true)
+    var stroke: Paint = Paint()
+    var opacity: f64 = 1.0
+    var width: f64 = 1.0
+    var round_cap: bool = false
+    var round_join: bool = false
+    var fill_opacity: f64 = 1.0
+    var stroke_opacity: f64 = 1.0
+    var dashes: f64[8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var dash_count: usize = 0
+    var dash_offset: f64 = 0.0
+
+## `base`, the parent's style, with whatever paint, stroke and opacity properties `tag` sets.
+## `opacity` multiplies into the parent's, so a group's fades everything inside it (each
+## paint on its own, not the group as one layer).
+func styled(tag: str, base: Style) -> Style:
+    var style = base
+    if let value = property(tag, "fill"):
+        style.fill = paint(value, base.fill)
+    if let value = property(tag, "stroke"):
+        style.stroke = paint(value, base.stroke)
+    style.opacity = base.opacity * math.clamp(number_property(tag, "opacity", 1.0), 0.0, 1.0)
+    style.width = number_property(tag, "stroke-width", base.width)
+    if let cap = property(tag, "stroke-linecap"):
+        style.round_cap = cap == "round"
+    if let join = property(tag, "stroke-linejoin"):
+        style.round_join = join == "round"
+    style.fill_opacity = math.clamp(number_property(tag, "fill-opacity", base.fill_opacity), 0.0, 1.0)
+    style.stroke_opacity = math.clamp(number_property(tag, "stroke-opacity", base.stroke_opacity), 0.0, 1.0)
+    if let pattern = property(tag, "stroke-dasharray"):
+        style.dash_count = 0
+        if pattern != "none":
+            let data = pattern.bytes
+            var pos: usize = 0
+            while pos < data.length and style.dash_count < 8:
+                skip_separators(data, &pos)
+                if pos >= data.length:
+                    break
+                let value = read_number(data, &pos) catch _:
+                    break
+                if value > 0.0:
+                    style.dashes[style.dash_count] = value
+                    style.dash_count += 1
+    style.dash_offset = number_property(tag, "stroke-dashoffset", base.dash_offset)
+    return style
+
+# mark: Properties ============================================================================
+
+## A style property of `tag`, trimmed: its last declaration in `style="..."`, else its
+## presentation attribute, else none.
+func property(tag: str, name: str) -> str?:
+    if let declarations = attribute(tag, "style"):
+        var found: str? = none
+        var rest = declarations
+        while rest.length > 0:
+            var piece = rest
+            rest = ""
+            if let cut = strings.find(piece, ";"):
+                rest = (str)piece.bytes[cut + 1..]
+                piece = (str)piece.bytes[..<cut]
+            let (key, value) = strings.split_once(piece, ":") else continue
+            if strings.trim(key) == name:
+                found = strings.trim(value)
+        if let value = found:
+            return value
+    let value = attribute(tag, name) else return none
+    return strings.trim(value)
+
+## A numeric property (a trailing `px` allowed), or `fallback` when absent or unreadable.
+func number_property(tag: str, name: str, fallback: f64) -> f64:
+    var value = property(tag, name) else return fallback
+    if strings.ends_with(value, "px"):
+        value = (str)value.bytes[..<value.length - 2]
+    return strings.parse_f64(value) catch _: recover fallback
+
+# mark: Paints and colors =====================================================================
+
+## The paint `value` names. `inherit` keeps the parent's; a paint this parser cannot draw
+## (a gradient's url(), an unknown name) is black, so the shape still shows.
+func paint(value: str, inherited: Paint) -> Paint:
+    if value == "" or value == "none" or same_folded(value, "transparent"):
+        return Paint()
+    if value == "inherit":
+        return inherited
+    if same_folded(value, "currentColor"):
+        return Paint(painted = true, current = true)
+    let color = parse_color(value) else return Paint(painted = true)
+    return Paint(painted = true, color = color)
+
+## Parse a CSS color: `#rgb`, `#rrggbb`, `rgb(r, g, b)` with 0..255 numbers or
+## percentages, or one of the 148 named colors (any case). None for anything else,
+## including `none` and `currentColor`, which are paints rather than colors.
+pub func parse_color(text: str) -> Color?:
+    let value = strings.trim(text)
+    let data = value.bytes
+    if data.length > 0 and data[0] == '#':
+        return hex_color(data[1..])
+    # Byte 3 being `(` puts a character boundary before it, so the first three bytes slice safely.
+    if data.length > 5 and data[3] == '(' and same_folded((str)data[..<3], "rgb") and data[data.length - 1] == ')':
+        return rgb_color(data[4..<data.length - 1])
+    for index in 0..<color_names.length:
+        if same_folded(value, color_names[index]):
+            let packed = color_values[index]
+            return Color(r = (f64)((packed >> 16) & 0xFF) / 255.0, g = (f64)((packed >> 8) & 0xFF) / 255.0, b = (f64)(packed & 0xFF) / 255.0)
+    return none
+
+## Three or six hex digits, the `#` already consumed.
+func hex_color(digits: const u8[]) -> Color?:
+    if digits.length != 3 and digits.length != 6:
+        return none
+    let width: usize = digits.length // 3
+    var channels: f64[3] = [0.0, 0.0, 0.0]
+    for index in 0..<(usize)3:
+        var channel: u32 = 0
+        for offset in 0..<width:
+            let digit = hex_digit(digits[index * width + offset]) else return none
+            channel = channel * 16 + digit
+        if width == 1:
+            channel *= 17
+        channels[index] = (f64)channel / 255.0
+    return Color(r = channels[0], g = channels[1], b = channels[2])
+
+func hex_digit(byte: u8) -> u32?:
+    if is_digit(byte):
+        return (u32)(byte - '0')
+    if byte >= 'a' and byte <= 'f':
+        return (u32)(byte - 'a') + 10
+    if byte >= 'A' and byte <= 'F':
+        return (u32)(byte - 'A') + 10
+    return none
+
+## The inside of `rgb(...)`: three numbers (0..255) or percentages, comma or space
+## separated, each clamped.
+func rgb_color(inside: const u8[]) -> Color?:
+    var channels: f64[3] = [0.0, 0.0, 0.0]
+    var pos: usize = 0
+    for index in 0..<(usize)3:
+        let value = read_number(inside, &pos) catch _:
+            return none
+        var channel = value / 255.0
+        if pos < inside.length and inside[pos] == '%':
+            channel = value / 100.0
+            pos += 1
+        channels[index] = math.clamp(channel, 0.0, 1.0)
+    skip_separators(inside, &pos)
+    if pos != inside.length:
+        return none
+    return Color(r = channels[0], g = channels[1], b = channels[2])
+
+## Whether `a` and `b` match, ignoring ASCII case.
+func same_folded(a: str, b: str) -> bool:
+    if a.length != b.length:
+        return false
+    for index in 0..<a.length:
+        var x = a.bytes[index]
+        var y = b.bytes[index]
+        if x >= 'A' and x <= 'Z':
+            x += 32
+        if y >= 'A' and y <= 'Z':
+            y += 32
+        if x != y:
+            return false
+    return true
+
+## `color` decoded from sRGB to linear light, channel by channel.
+func to_linear(color: Color) -> Color:
+    return Color(r = linear_channel(color.r), g = linear_channel(color.g), b = linear_channel(color.b))
+
+func linear_channel(value: f64) -> f64:
+    if value <= 0.04045:
+        return value / 12.92
+    return math.pow((value + 0.055) / 1.055, 2.4)
+
+## The CSS named colors, sorted, with their 0xRRGGBB values in `color_values`.
+let color_names: str[148] = ["aliceblue", "antiquewhite", "aqua", "aquamarine", "azure", "beige",
+                             "bisque", "black", "blanchedalmond", "blue", "blueviolet", "brown",
+                             "burlywood", "cadetblue", "chartreuse", "chocolate", "coral",
+                             "cornflowerblue", "cornsilk", "crimson", "cyan", "darkblue",
+                             "darkcyan", "darkgoldenrod", "darkgray", "darkgreen", "darkgrey",
+                             "darkkhaki", "darkmagenta", "darkolivegreen", "darkorange",
+                             "darkorchid", "darkred", "darksalmon", "darkseagreen", "darkslateblue",
+                             "darkslategray", "darkslategrey", "darkturquoise", "darkviolet",
+                             "deeppink", "deepskyblue", "dimgray", "dimgrey", "dodgerblue",
+                             "firebrick", "floralwhite", "forestgreen", "fuchsia", "gainsboro",
+                             "ghostwhite", "gold", "goldenrod", "gray", "green", "greenyellow",
+                             "grey", "honeydew", "hotpink", "indianred", "indigo", "ivory", "khaki",
+                             "lavender", "lavenderblush", "lawngreen", "lemonchiffon", "lightblue",
+                             "lightcoral", "lightcyan", "lightgoldenrodyellow", "lightgray",
+                             "lightgreen", "lightgrey", "lightpink", "lightsalmon", "lightseagreen",
+                             "lightskyblue", "lightslategray", "lightslategrey", "lightsteelblue",
+                             "lightyellow", "lime", "limegreen", "linen", "magenta", "maroon",
+                             "mediumaquamarine", "mediumblue", "mediumorchid", "mediumpurple",
+                             "mediumseagreen", "mediumslateblue", "mediumspringgreen",
+                             "mediumturquoise", "mediumvioletred", "midnightblue", "mintcream",
+                             "mistyrose", "moccasin", "navajowhite", "navy", "oldlace", "olive",
+                             "olivedrab", "orange", "orangered", "orchid", "palegoldenrod",
+                             "palegreen", "paleturquoise", "palevioletred", "papayawhip",
+                             "peachpuff", "peru", "pink", "plum", "powderblue", "purple",
+                             "rebeccapurple", "red", "rosybrown", "royalblue", "saddlebrown",
+                             "salmon", "sandybrown", "seagreen", "seashell", "sienna", "silver",
+                             "skyblue", "slateblue", "slategray", "slategrey", "snow",
+                             "springgreen", "steelblue", "tan", "teal", "thistle", "tomato",
+                             "turquoise", "violet", "wheat", "white", "whitesmoke", "yellow",
+                             "yellowgreen"]
+let color_values: u32[148] = [0xF0F8FF, 0xFAEBD7, 0x00FFFF, 0x7FFFD4, 0xF0FFFF, 0xF5F5DC, 0xFFE4C4,
+                              0x000000, 0xFFEBCD, 0x0000FF, 0x8A2BE2, 0xA52A2A, 0xDEB887, 0x5F9EA0,
+                              0x7FFF00, 0xD2691E, 0xFF7F50, 0x6495ED, 0xFFF8DC, 0xDC143C, 0x00FFFF,
+                              0x00008B, 0x008B8B, 0xB8860B, 0xA9A9A9, 0x006400, 0xA9A9A9, 0xBDB76B,
+                              0x8B008B, 0x556B2F, 0xFF8C00, 0x9932CC, 0x8B0000, 0xE9967A, 0x8FBC8F,
+                              0x483D8B, 0x2F4F4F, 0x2F4F4F, 0x00CED1, 0x9400D3, 0xFF1493, 0x00BFFF,
+                              0x696969, 0x696969, 0x1E90FF, 0xB22222, 0xFFFAF0, 0x228B22, 0xFF00FF,
+                              0xDCDCDC, 0xF8F8FF, 0xFFD700, 0xDAA520, 0x808080, 0x008000, 0xADFF2F,
+                              0x808080, 0xF0FFF0, 0xFF69B4, 0xCD5C5C, 0x4B0082, 0xFFFFF0, 0xF0E68C,
+                              0xE6E6FA, 0xFFF0F5, 0x7CFC00, 0xFFFACD, 0xADD8E6, 0xF08080, 0xE0FFFF,
+                              0xFAFAD2, 0xD3D3D3, 0x90EE90, 0xD3D3D3, 0xFFB6C1, 0xFFA07A, 0x20B2AA,
+                              0x87CEFA, 0x778899, 0x778899, 0xB0C4DE, 0xFFFFE0, 0x00FF00, 0x32CD32,
+                              0xFAF0E6, 0xFF00FF, 0x800000, 0x66CDAA, 0x0000CD, 0xBA55D3, 0x9370DB,
+                              0x3CB371, 0x7B68EE, 0x00FA9A, 0x48D1CC, 0xC71585, 0x191970, 0xF5FFFA,
+                              0xFFE4E1, 0xFFE4B5, 0xFFDEAD, 0x000080, 0xFDF5E6, 0x808000, 0x6B8E23,
+                              0xFFA500, 0xFF4500, 0xDA70D6, 0xEEE8AA, 0x98FB98, 0xAFEEEE, 0xDB7093,
+                              0xFFEFD5, 0xFFDAB9, 0xCD853F, 0xFFC0CB, 0xDDA0DD, 0xB0E0E6, 0x800080,
+                              0x663399, 0xFF0000, 0xBC8F8F, 0x4169E1, 0x8B4513, 0xFA8072, 0xF4A460,
+                              0x2E8B57, 0xFFF5EE, 0xA0522D, 0xC0C0C0, 0x87CEEB, 0x6A5ACD, 0x708090,
+                              0x708090, 0xFFFAFA, 0x00FF7F, 0x4682B4, 0xD2B48C, 0x008080, 0xD8BFD8,
+                              0xFF6347, 0x40E0D0, 0xEE82EE, 0xF5DEB3, 0xFFFFFF, 0xF5F5F5, 0xFFFF00,
+                              0x9ACD32]

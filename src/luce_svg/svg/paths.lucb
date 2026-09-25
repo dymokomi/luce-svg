@@ -1,0 +1,314 @@
+#==============================================================================================
+#
+#   svg/paths - Path data and basic shapes, flattened to points
+#
+#   DESCRIPTION:
+#       Turns one shape element into contours: path data (M L H V C S Q T A Z, absolute and
+#       relative), rect with rounded corners, circle, ellipse, line, polyline and polygon.
+#       Curves and arcs are sampled finely enough that icons stay exact at large sizes;
+#       every point passes through the element's transform on its way into the Drawing.
+#
+#==============================================================================================
+
+# mark: Curve and arc flattening ==============================================================
+
+## Curves flatten to this many segments (arcs to twice this per turn): fine enough
+## that a 24-unit icon drawn at 256 pixels keeps its chord error under a tenth of a pixel.
+let segments: i64 = 48
+
+func cubic(drawing: Drawing*, transform: Matrix, x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) -> !:
+    for step in 1..<segments + 1:
+        let t = (f64)step / (f64)segments
+        let u = 1.0 - t
+        let bx = u * u * u * x0 + 3.0 * u * u * t * x1 + 3.0 * u * t * t * x2 + t * t * t * x3
+        let by = u * u * u * y0 + 3.0 * u * u * t * y1 + 3.0 * u * t * t * y2 + t * t * t * y3
+        try drawing.add_point(apply(transform, bx, by))
+
+func quadratic(drawing: Drawing*, transform: Matrix, x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> !:
+    for step in 1..<segments + 1:
+        let t = (f64)step / (f64)segments
+        let u = 1.0 - t
+        let bx = u * u * x0 + 2.0 * u * t * x1 + t * t * x2
+        let by = u * u * y0 + 2.0 * u * t * y1 + t * t * y2
+        try drawing.add_point(apply(transform, bx, by))
+
+## Endpoint-parameterised elliptical arc from (x0,y0) to (x2,y2), flattened to points.
+func arc(drawing: Drawing*, transform: Matrix, x0: f64, y0: f64, rx_in: f64, ry_in: f64,
+         rotation: f64, large: bool, sweep: bool, x2: f64, y2: f64) -> !:
+    var rx = math.abs(rx_in)
+    var ry = math.abs(ry_in)
+    if rx == 0.0 or ry == 0.0:
+        try drawing.add_point(apply(transform, x2, y2))
+        return
+    let phi = rotation * math.pi / 180.0
+    let cos_phi = math.cos(phi)
+    let sin_phi = math.sin(phi)
+    let dx = (x0 - x2) * 0.5
+    let dy = (y0 - y2) * 0.5
+    let x1p = cos_phi * dx + sin_phi * dy
+    let y1p = -sin_phi * dx + cos_phi * dy
+    # Grow the radii if they are too small to span the endpoints.
+    let lambda = x1p * x1p / (rx * rx) + y1p * y1p / (ry * ry)
+    if lambda > 1.0:
+        let scale = math.sqrt(lambda)
+        rx *= scale
+        ry *= scale
+    let numerator = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p
+    let denominator = rx * rx * y1p * y1p + ry * ry * x1p * x1p
+    var factor = math.sqrt(numerator / denominator) if numerator > 0.0 and denominator > 0.0 else 0.0
+    if large == sweep:
+        factor = -factor
+    let cxp = factor * rx * y1p / ry
+    let cyp = -factor * ry * x1p / rx
+    let cx = cos_phi * cxp - sin_phi * cyp + (x0 + x2) * 0.5
+    let cy = sin_phi * cxp + cos_phi * cyp + (y0 + y2) * 0.5
+    let start = math.atan2((y1p - cyp) / ry, (x1p - cxp) / rx)
+    var delta = math.atan2((-y1p - cyp) / ry, (-x1p - cxp) / rx) - start
+    if sweep and delta < 0.0:
+        delta += math.tau
+    elif not sweep and delta > 0.0:
+        delta -= math.tau
+    let steps = (i64)math.ceil(math.abs(delta) / (math.tau / (f64)(segments * 2))) + 1
+    for step in 1..<steps + 1:
+        let angle = start + delta * (f64)step / (f64)steps
+        let ex = cx + rx * math.cos(angle) * cos_phi - ry * math.sin(angle) * sin_phi
+        let ey = cy + rx * math.cos(angle) * sin_phi + ry * math.sin(angle) * cos_phi
+        try drawing.add_point(apply(transform, ex, ey))
+
+# mark: Path data =============================================================================
+
+func reflect(current: f64, control: f64) -> f64:
+    return 2.0 * current - control
+
+## Flatten path data `d`, one contour per subpath.
+func parse_path(drawing: Drawing*, d: str, transform: Matrix) -> !:
+    let data = d.bytes
+    var pos: usize = 0
+    var command: u8 = 0
+    var previous: u8 = 0
+    var cx: f64 = 0.0
+    var cy: f64 = 0.0
+    var sx: f64 = 0.0
+    var sy: f64 = 0.0
+    var control_x: f64 = 0.0
+    var control_y: f64 = 0.0
+    var open = false
+    var sub_start: usize = 0
+    while true:
+        skip_separators(data, &pos)
+        if pos >= data.length:
+            break
+        if is_alpha(data[pos]):
+            command = data[pos]
+            pos += 1
+        elif command == 0:
+            error(invalid, "path data must begin with a command")
+        let relative = command >= 'a' and command <= 'z'
+        if command == 'M' or command == 'm':
+            if open:
+                try drawing.flush(sub_start, true, false)
+            let nx = try read_number(data, &pos)
+            let ny = try read_number(data, &pos)
+            cx = (cx + nx) if relative else nx
+            cy = (cy + ny) if relative else ny
+            sx = cx
+            sy = cy
+            sub_start = drawing.point_used
+            try drawing.add_point(apply(transform, cx, cy))
+            open = true
+            command = 'l' if relative else 'L'
+        elif command == 'L' or command == 'l':
+            let nx = try read_number(data, &pos)
+            let ny = try read_number(data, &pos)
+            cx = (cx + nx) if relative else nx
+            cy = (cy + ny) if relative else ny
+            try drawing.add_point(apply(transform, cx, cy))
+        elif command == 'H' or command == 'h':
+            let nx = try read_number(data, &pos)
+            cx = (cx + nx) if relative else nx
+            try drawing.add_point(apply(transform, cx, cy))
+        elif command == 'V' or command == 'v':
+            let ny = try read_number(data, &pos)
+            cy = (cy + ny) if relative else ny
+            try drawing.add_point(apply(transform, cx, cy))
+        elif command == 'C' or command == 'c':
+            var x1 = try read_number(data, &pos)
+            var y1 = try read_number(data, &pos)
+            var x2 = try read_number(data, &pos)
+            var y2 = try read_number(data, &pos)
+            var x3 = try read_number(data, &pos)
+            var y3 = try read_number(data, &pos)
+            if relative:
+                x1 += cx
+                y1 += cy
+                x2 += cx
+                y2 += cy
+                x3 += cx
+                y3 += cy
+            try cubic(drawing, transform, cx, cy, x1, y1, x2, y2, x3, y3)
+            control_x = x2
+            control_y = y2
+            cx = x3
+            cy = y3
+        elif command == 'S' or command == 's':
+            var x2 = try read_number(data, &pos)
+            var y2 = try read_number(data, &pos)
+            var x3 = try read_number(data, &pos)
+            var y3 = try read_number(data, &pos)
+            if relative:
+                x2 += cx
+                y2 += cy
+                x3 += cx
+                y3 += cy
+            var x1 = cx
+            var y1 = cy
+            if previous == 'C' or previous == 'c' or previous == 'S' or previous == 's':
+                x1 = reflect(cx, control_x)
+                y1 = reflect(cy, control_y)
+            try cubic(drawing, transform, cx, cy, x1, y1, x2, y2, x3, y3)
+            control_x = x2
+            control_y = y2
+            cx = x3
+            cy = y3
+        elif command == 'Q' or command == 'q':
+            var x1 = try read_number(data, &pos)
+            var y1 = try read_number(data, &pos)
+            var x2 = try read_number(data, &pos)
+            var y2 = try read_number(data, &pos)
+            if relative:
+                x1 += cx
+                y1 += cy
+                x2 += cx
+                y2 += cy
+            try quadratic(drawing, transform, cx, cy, x1, y1, x2, y2)
+            control_x = x1
+            control_y = y1
+            cx = x2
+            cy = y2
+        elif command == 'T' or command == 't':
+            var x2 = try read_number(data, &pos)
+            var y2 = try read_number(data, &pos)
+            if relative:
+                x2 += cx
+                y2 += cy
+            var x1 = cx
+            var y1 = cy
+            if previous == 'Q' or previous == 'q' or previous == 'T' or previous == 't':
+                x1 = reflect(cx, control_x)
+                y1 = reflect(cy, control_y)
+            try quadratic(drawing, transform, cx, cy, x1, y1, x2, y2)
+            control_x = x1
+            control_y = y1
+            cx = x2
+            cy = y2
+        elif command == 'A' or command == 'a':
+            let rx = try read_number(data, &pos)
+            let ry = try read_number(data, &pos)
+            let rotation = try read_number(data, &pos)
+            let large = (try read_flag(data, &pos)) != 0.0
+            let sweep = (try read_flag(data, &pos)) != 0.0
+            var ex = try read_number(data, &pos)
+            var ey = try read_number(data, &pos)
+            if relative:
+                ex += cx
+                ey += cy
+            try arc(drawing, transform, cx, cy, rx, ry, rotation, large, sweep, ex, ey)
+            cx = ex
+            cy = ey
+        elif command == 'Z' or command == 'z':
+            cx = sx
+            cy = sy
+            if open:
+                try drawing.flush(sub_start, true, true)
+                open = false
+        else:
+            error(invalid, "unsupported path command")
+        previous = command
+    if open:
+        try drawing.flush(sub_start, true, false)
+
+# mark: Basic shapes ==========================================================================
+
+func corner(drawing: Drawing*, transform: Matrix, cx: f64, cy: f64, rx: f64, ry: f64, start: f64) -> !:
+    for step in 0..<13:
+        let angle = start + (math.pi * 0.5) * (f64)step / 12.0
+        try drawing.add_point(apply(transform, cx + rx * math.cos(angle), cy + ry * math.sin(angle)))
+
+func add_rect(drawing: Drawing*, transform: Matrix, x: f64, y: f64, w: f64, h: f64, rx_in: f64, ry_in: f64) -> !:
+    var rx = math.abs(rx_in)
+    var ry = math.abs(ry_in)
+    if rx > w * 0.5:
+        rx = w * 0.5
+    if ry > h * 0.5:
+        ry = h * 0.5
+    let start = drawing.point_used
+    if rx <= 0.0 or ry <= 0.0:
+        try drawing.add_point(apply(transform, x, y))
+        try drawing.add_point(apply(transform, x + w, y))
+        try drawing.add_point(apply(transform, x + w, y + h))
+        try drawing.add_point(apply(transform, x, y + h))
+    else:
+        # As the SVG path for a rect begins: at (x + rx, y), then clockwise.
+        try drawing.add_point(apply(transform, x + rx, y))
+        try corner(drawing, transform, x + w - rx, y + ry, rx, ry, -math.pi * 0.5)
+        try corner(drawing, transform, x + w - rx, y + h - ry, rx, ry, 0.0)
+        try corner(drawing, transform, x + rx, y + h - ry, rx, ry, math.pi * 0.5)
+        try corner(drawing, transform, x + rx, y + ry, rx, ry, math.pi)
+    try drawing.flush(start, true, true)
+
+## An ellipse (a circle when `rx == ry`) as 96 points.
+func add_ellipse(drawing: Drawing*, transform: Matrix, cx: f64, cy: f64, rx: f64, ry: f64) -> !:
+    let start = drawing.point_used
+    let steps = 96
+    for step in 0..<steps:
+        let angle = math.tau * (f64)step / (f64)steps
+        try drawing.add_point(apply(transform, cx + rx * math.cos(angle), cy + ry * math.sin(angle)))
+    try drawing.flush(start, true, true)
+
+## `polyline` and `polygon`: a run of points, closed for a polygon. Both fill, as SVG
+## says, a polyline as though closed.
+func add_points(drawing: Drawing*, transform: Matrix, text: str, closed: bool) -> !:
+    let start = drawing.point_used
+    let data = text.bytes
+    var pos: usize = 0
+    var count: usize = 0
+    var x = 0.0
+    while at_number_or_space(data, &pos):
+        let value = read_number(data, &pos) catch _:
+            break
+        if count % 2 == 0:
+            x = value
+        else:
+            try drawing.add_point(apply(transform, x, value))
+        count += 1
+    if count >= 4:
+        try drawing.flush(start, true, closed)
+    else:
+        drawing.point_used = start
+
+## Flatten one shape element `name` under `frame` into the drawing, as the next element.
+func add_shape(drawing: Drawing*, name: str, tag: str, frame: Frame) -> !:
+    drawing.style = frame.style
+    let transform = frame.transform
+    if name == "path":
+        if let d = attribute(tag, "d"):
+            try parse_path(drawing, d, transform)
+    elif name == "rect":
+        let rx = number_attribute(tag, "rx", 0.0)
+        let ry = number_attribute(tag, "ry", rx)
+        try add_rect(drawing, transform, number_attribute(tag, "x", 0.0), number_attribute(tag, "y", 0.0),
+                     number_attribute(tag, "width", 0.0), number_attribute(tag, "height", 0.0), rx, ry)
+    elif name == "circle":
+        let r = number_attribute(tag, "r", 0.0)
+        try add_ellipse(drawing, transform, number_attribute(tag, "cx", 0.0), number_attribute(tag, "cy", 0.0), r, r)
+    elif name == "ellipse":
+        try add_ellipse(drawing, transform, number_attribute(tag, "cx", 0.0), number_attribute(tag, "cy", 0.0),
+                        number_attribute(tag, "rx", 0.0), number_attribute(tag, "ry", 0.0))
+    elif name == "line":
+        let start = drawing.point_used
+        try drawing.add_point(apply(transform, number_attribute(tag, "x1", 0.0), number_attribute(tag, "y1", 0.0)))
+        try drawing.add_point(apply(transform, number_attribute(tag, "x2", 0.0), number_attribute(tag, "y2", 0.0)))
+        try drawing.flush(start, false, false)
+    elif let points = attribute(tag, "points"):
+        try add_points(drawing, transform, points, name == "polygon")
+    drawing.element += 1
