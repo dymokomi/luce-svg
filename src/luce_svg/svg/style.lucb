@@ -4,8 +4,8 @@
 #
 #   DESCRIPTION:
 #       A Style is what an element draws with: its fill and stroke paints, their opacities,
-#       the stroke's width, caps, joins and dashes, and the product of every enclosing
-#       `opacity`. Each property is read from the element's `style="..."` declarations
+#       the stroke's width, caps, joins and dashes, its font (text.lucb), and the product
+#       of every enclosing `opacity`. Each property is read from the element's `style="..."` declarations
 #       first, then from its presentation attribute, else inherited from the parent. Colors
 #       are #rgb, #rrggbb, rgb() with numbers or percentages, and the 148 CSS named colors.
 #
@@ -19,6 +19,7 @@ struct Style:
     var fill_opacity: f64 = 1.0
     var stroke_opacity: f64 = 1.0
     var pen: Pen = Pen()
+    var font: Font = Font()
 
 ## `base`, the parent's style, with whatever paint, stroke and opacity properties `tag` sets.
 ## `opacity` multiplies into the parent's, so a group's fades everything inside it (each
@@ -34,6 +35,7 @@ func styled(tag: str, base: Style, gradient_ids: const str[]) -> Style:
     style.fill_opacity = math.clamp(number_property(tag, "fill-opacity", base.fill_opacity), 0.0, 1.0)
     style.stroke_opacity = math.clamp(number_property(tag, "stroke-opacity", base.stroke_opacity), 0.0, 1.0)
     style.pen = penned(tag, base.pen)
+    style.font = fonted(tag, base.font)
     return style
 
 ## `base` with whatever stroke width, cap, join, miter limit and dash properties `tag` sets.

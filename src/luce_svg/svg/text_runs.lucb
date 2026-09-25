@@ -1,0 +1,264 @@
+#==============================================================================================
+#
+#   svg/text_runs - Reading a `<text>` element into runs
+#
+#   DESCRIPTION:
+#       Walks a `<text>` element's content up to its `</text>`: character data joins the
+#       current run, each `<tspan>` opens a run in its own style and position, and its
+#       `</tspan>` goes back to the enclosing style. Character references and the five
+#       XML entities are decoded, CDATA is taken as it stands, comments and other
+#       elements are passed over, and white space collapses as browsers collapse it:
+#       every run of spaces, tabs and line breaks becomes one space, kept with the text
+#       before it, and none at the start or end of the element or of a chunk.
+#
+#==============================================================================================
+
+## How deeply tspans can nest; deeper ones share their parent's style.
+let tspan_limit: usize = 16
+
+## The white space state across one `<text>`: whether ink has been written, and whether
+## the last byte written was a collapsed space.
+struct Spacing:
+    var inked: bool = false
+    var spaced: bool = false
+
+## Take back a collapsed space just written, at the end of the element or of a chunk:
+## from `run`, or when it was written before `run` began, from the last kept run.
+func trim_space(drawing: Drawing*, run: const Run*, spacing: Spacing*):
+    if not spacing.spaced:
+        return
+    spacing.spaced = false
+    if drawing.text_used > run.text_start:
+        drawing.text_used -= 1
+    elif drawing.run_used > 0:
+        drawing.runs[drawing.run_used - 1].text_length -= 1
+        if drawing.runs[drawing.run_used - 1].text_length == 0:
+            drawing.run_used -= 1
+
+## The first number of a coordinate list attribute, or none.
+func first_number(tag: str, name: str) -> f64?:
+    let value = attribute(tag, name) else return none
+    var pos: usize = 0
+    if not at_number_or_space(value.bytes, &pos):
+        return none
+    return read_number(value.bytes, &pos) catch _: recover none
+
+## Begin a run in `style` after `previous` (the first of its `<text>` when `first`),
+## taking the position attributes of `tag`. An empty previous run hands its position on.
+func begin_run(drawing: Drawing*, tag: str, style: Style, previous: const Run*, first: bool, order: usize) -> Run!:
+    var shown = TextRun(size = style.font.size, weight = style.font.weight, italic = style.font.italic,
+                        anchor = style.font.anchor, filled = style.fill.painted, current = style.fill.current,
+                        color = style.fill.color, opacity = style.fill_opacity * style.opacity, order = order)
+    if style.fill.gradient > 0:
+        let gradient = drawing.gradients[style.fill.gradient - 1]
+        shown.color = drawing.stops[gradient.stop_start].color
+    shown.opens = first
+    shown.chunk = first
+    if not first and previous.text_length == 0:
+        let last = previous.shown
+        shown.opens = last.opens
+        shown.chunk = last.chunk
+        shown.x = last.x
+        shown.y = last.y
+        shown.has_x = last.has_x
+        shown.has_y = last.has_y
+        shown.dx = last.dx
+        shown.dy = last.dy
+        drawing.text_used = previous.family_start
+    if let x = first_number(tag, "x"):
+        shown.x = x
+        shown.has_x = true
+        shown.chunk = true
+    if let y = first_number(tag, "y"):
+        shown.y = y
+        shown.has_y = true
+        shown.chunk = true
+    let dx = first_number(tag, "dx") else 0.0
+    let dy = first_number(tag, "dy") else 0.0
+    shown.dx += dx
+    shown.dy += dy
+    var run = Run(family_start = drawing.text_used, shown = shown)
+    try append_families(drawing, style.font.families)
+    run.family_length = drawing.text_used - run.family_start
+    run.text_start = drawing.text_used
+    return run
+
+## Close `run`, keeping it if it holds any text.
+func end_run(drawing: Drawing*, run: Run*) -> !:
+    run.text_length = drawing.text_used - run.text_start
+    if run.text_length > 0:
+        try drawing.add_run(*run)
+
+## Append a font-family list, each name trimmed and unquoted, joined by commas.
+func append_families(drawing: Drawing*, families: str) -> !:
+    var rest = families
+    var first = true
+    while true:
+        var name = rest
+        var more = false
+        if let cut = strings.find(rest, ","):
+            name = (str)rest.bytes[..<cut]
+            rest = (str)rest.bytes[cut + 1..]
+            more = true
+        name = strings.trim(name)
+        if name.length >= 2 and (name.bytes[0] == '"' or name.bytes[0] == '\'') and name.bytes[name.length - 1] == name.bytes[0]:
+            name = strings.trim((str)name.bytes[1..<name.length - 1])
+        if name.length > 0:
+            if not first:
+                try drawing.add_text_byte(',')
+            try drawing.add_text_bytes(name.bytes)
+            first = false
+        if not more:
+            break
+
+## Whether `tag` places its text with x or y, starting a new chunk.
+func positioned(tag: str) -> bool:
+    if let x = first_number(tag, "x"):
+        return true
+    if let y = first_number(tag, "y"):
+        return true
+    return false
+
+# mark: Character data ========================================================================
+
+## Append one character's UTF-8 bytes, collapsing white space by `spacing`.
+func append_scalar(drawing: Drawing*, scalar: u32, spacing: Spacing*) -> !:
+    if scalar == 32 or scalar == 9 or scalar == 10 or scalar == 13:
+        if spacing.inked and not spacing.spaced:
+            try drawing.add_text_byte(' ')
+            spacing.spaced = true
+        return
+    if scalar == 0 or scalar > 0x10FFFF or (scalar >= 0xD800 and scalar <= 0xDFFF):
+        return
+    spacing.inked = true
+    spacing.spaced = false
+    if scalar < 0x80:
+        try drawing.add_text_byte((u8)scalar)
+    elif scalar < 0x800:
+        try drawing.add_text_byte((u8)(0xC0 | (scalar >> 6)))
+        try drawing.add_text_byte((u8)(0x80 | (scalar & 0x3F)))
+    elif scalar < 0x10000:
+        try drawing.add_text_byte((u8)(0xE0 | (scalar >> 12)))
+        try drawing.add_text_byte((u8)(0x80 | ((scalar >> 6) & 0x3F)))
+        try drawing.add_text_byte((u8)(0x80 | (scalar & 0x3F)))
+    else:
+        try drawing.add_text_byte((u8)(0xF0 | (scalar >> 18)))
+        try drawing.add_text_byte((u8)(0x80 | ((scalar >> 12) & 0x3F)))
+        try drawing.add_text_byte((u8)(0x80 | ((scalar >> 6) & 0x3F)))
+        try drawing.add_text_byte((u8)(0x80 | (scalar & 0x3F)))
+
+## Append `data`, with its entities decoded when `decode`. Non-ASCII bytes pass as they are.
+func append_characters(drawing: Drawing*, data: const u8[], decode: bool, spacing: Spacing*) -> !:
+    var pos: usize = 0
+    while pos < data.length:
+        let byte = data[pos]
+        if byte >= 0x80:
+            spacing.inked = true
+            spacing.spaced = false
+            try drawing.add_text_byte(byte)
+            pos += 1
+            continue
+        if byte == '&' and decode:
+            if let found = entity(data[pos..]):
+                try append_scalar(drawing, found.scalar, spacing)
+                pos += found.length
+                continue
+        try append_scalar(drawing, (u32)byte, spacing)
+        pos += 1
+
+## A decoded entity: the character it stands for and its length in bytes.
+struct Entity:
+    var scalar: u32 = 0
+    var length: usize = 0
+
+## The entity at the start of `data`, or none.
+func entity(data: const u8[]) -> Entity?:
+    var end: usize = 1
+    while end < data.length and end < 12 and data[end] != ';':
+        end += 1
+    if end >= data.length or data[end] != ';':
+        return none
+    let name = (str)data[1..<end]
+    let names: str[5] = ["amp", "lt", "gt", "quot", "apos"]
+    let values: u32[5] = [38, 60, 62, 34, 39]
+    for index in 0..<names.length:
+        if name == names[index]:
+            return Entity(scalar = values[index], length = end + 1)
+    if name.length < 2 or name.bytes[0] != '#':
+        return none
+    let hexadecimal = name.bytes[1] == 'x' or name.bytes[1] == 'X'
+    var value: u32 = 0
+    for byte in name.bytes[(2 if hexadecimal else 1)..]:
+        let digit = hex_digit(byte) else return none
+        if not hexadecimal and digit > 9:
+            return none
+        value = value * (16 if hexadecimal else 10) + digit
+        if value > 0x10FFFF:
+            return none
+    return Entity(scalar = value, length = end + 1)
+
+# mark: The element ===========================================================================
+
+## Read the `<text>` element `tag`, whose content starts at `pos`, as runs drawn under
+## `frame` after `order` shape elements. The position just past its `</text>`.
+func add_text(drawing: Drawing*, source: str, pos: usize, tag: str, frame: Frame, gradient_ids: const str[]) -> usize!:
+    let data = source.bytes
+    let styles = try alloc Style[tspan_limit] in memory.heap
+    defer free(styles) in memory.heap
+    var depth: usize = 0
+    var ignored: usize = 0
+    var style = frame.style
+    var spacing = Spacing()
+    let nothing = Run()
+    var run = try begin_run(drawing, tag, style, &nothing, true, drawing.element)
+    run.shown.transform = frame.transform
+    var index = pos
+    while index < data.length:
+        if data[index] != '<':
+            var end = index
+            while end < data.length and data[end] != '<':
+                end += 1
+            try append_characters(drawing, data[index..<end], true, &spacing)
+            index = end
+            continue
+        let rest = (str)data[index..]
+        if strings.starts_with(rest, "<!--"):
+            let finish = strings.find_from(source, "-->", index) else break
+            index = finish + 3
+            continue
+        if strings.starts_with(rest, "<![CDATA["):
+            let finish = strings.find_from(source, "]]>", index) else break
+            try append_characters(drawing, data[index + 9..<finish], false, &spacing)
+            index = finish + 3
+            continue
+        let inner = next_tag(source, &index) else break
+        let name = tag_name(inner)
+        if name == "/text":
+            break
+        if name == "tspan" and positioned(inner):
+            trim_space(drawing, &run, &spacing)
+            spacing.inked = false
+        let opens = name == "tspan" and not strings.ends_with(inner, "/")
+        if opens or name == "/tspan":
+            if opens and depth >= tspan_limit:
+                ignored += 1
+                continue
+            if not opens and ignored > 0:
+                ignored -= 1
+                continue
+            try end_run(drawing, &run)
+            var placing = ""
+            if opens:
+                styles[depth] = style
+                depth += 1
+                style = styled(inner, style, gradient_ids)
+                placing = inner
+            elif depth > 0:
+                depth -= 1
+                style = styles[depth]
+            let previous = run
+            run = try begin_run(drawing, placing, style, &previous, false, drawing.element)
+            run.shown.transform = frame.transform
+    trim_space(drawing, &run, &spacing)
+    try end_run(drawing, &run)
+    return index

@@ -102,40 +102,63 @@ func composite(acc: f32[], width: usize, span: Span, shade: const Shade*, ramp: 
 ## stops in sRGB first. The drawing is placed as `rasterize` places it, scaled uniformly
 ## from the viewBox and centred. Each element's fill, then its stroke, composites
 ## source-over in document order onto a transparent start, each as one shape by the
-## nonzero rule, anti-aliased by exact area coverage.
+## nonzero rule, anti-aliased by exact area coverage. Text is not drawn; see
+## rasterize_rgba_elements.
 pub func rasterize_rgba(drawing: const Drawing*, width: u32, height: u32, pixels: f32[], current: Color) -> !:
-    let acc = try accumulator(width, height)
-    defer free(acc) in memory.heap
     if pixels.length != (usize)width * (usize)height * 4:
         error(invalid, "the pixel buffer must hold width * height * 4 floats")
     for index in 0..<pixels.length:
         pixels[index] = 0.0
+    try rasterize_rgba_elements(drawing, width, height, pixels, current, 0, drawing.element)
+
+## As rasterize_rgba, but only shape elements `first..<last` (as contour_element counts
+## them), composited over what `pixels` already holds. A caller that sets text draws
+## the elements before each text run's `order`, then the run, and so on, then the rest.
+pub func rasterize_rgba_elements(drawing: const Drawing*, width: u32, height: u32, pixels: f32[], current: Color,
+                                 first: usize, last: usize) -> !:
+    let acc = try accumulator(width, height)
+    defer free(acc) in memory.heap
+    if pixels.length != (usize)width * (usize)height * 4:
+        error(invalid, "the pixel buffer must hold width * height * 4 floats")
     let ramp = try alloc f32[ramp_size * 4] in memory.heap
     defer free(ramp) in memory.heap
     let w = (usize)width
     let h = (usize)height
     let fit = placement(drawing, width, height)
     let current_linear = to_linear(current)
-    var first: usize = 0
-    while first < drawing.contour_used:
-        # The element's contours run from `first` to `last`, sharing one style.
-        let head = drawing.contours[first]
-        var last = first + 1
-        while last < drawing.contour_used and drawing.contours[last].element == head.element:
-            last += 1
-        if head.fill.painted:
-            for index in first..<last:
-                if drawing.contours[index].length >= 3:
-                    trace_fill(acc, w, h, drawing, drawing.contours[index], fit)
-            let shade = shade_of(drawing, head.fill, head.fill_opacity, current_linear, fit, ramp)
-            composite(acc, w, element_span(drawing, first, last, fit, 0.0, w, h), &shade, ramp, pixels)
-        if head.stroke.painted:
-            for index in first..<last:
-                if drawing.contours[index].length >= 1:
-                    try trace_stroke(acc, w, h, drawing, drawing.contours[index], fit)
-            # Miters reach out to the limit times the half width, square caps √2 times.
-            let reach = math.max(1.5, head.pen.miter_limit if head.pen.join == Join.miter else 1.0)
-            let span = element_span(drawing, first, last, fit, stroke_half(head, fit) * reach, w, h)
-            let shade = shade_of(drawing, head.stroke, head.stroke_opacity, current_linear, fit, ramp)
-            composite(acc, w, span, &shade, ramp, pixels)
-        first = last
+    var start: usize = 0
+    while start < drawing.contour_used:
+        # The element's contours run from `start` to `end`, sharing one style.
+        let head = drawing.contours[start]
+        var end = start + 1
+        while end < drawing.contour_used and drawing.contours[end].element == head.element:
+            end += 1
+        if head.element >= first and head.element < last:
+            try composite_element(drawing, acc, w, h, start, end, fit, current_linear, ramp, pixels)
+        start = end
+
+## Composite the element of contours `first..<last`: its fill, then its stroke.
+func composite_element(drawing: const Drawing*, acc: f32[], w: usize, h: usize, first: usize, last: usize, fit: Placement,
+                       current_linear: Color, ramp: f32[], pixels: f32[]) -> !:
+    let head = drawing.contours[first]
+    if head.fill.painted:
+        for index in first..<last:
+            if drawing.contours[index].length >= 3:
+                trace_fill(acc, w, h, drawing, drawing.contours[index], fit)
+        let shade = shade_of(drawing, head.fill, head.fill_opacity, current_linear, fit, ramp)
+        composite(acc, w, element_span(drawing, first, last, fit, 0.0, w, h), &shade, ramp, pixels)
+    if head.stroke.painted:
+        for index in first..<last:
+            if drawing.contours[index].length >= 1:
+                try trace_stroke(acc, w, h, drawing, drawing.contours[index], fit)
+        # Miters reach out to the limit times the half width, square caps √2 times.
+        let reach = math.max(1.5, head.pen.miter_limit if head.pen.join == Join.miter else 1.0)
+        let span = element_span(drawing, first, last, fit, stroke_half(head, fit) * reach, w, h)
+        let shade = shade_of(drawing, head.stroke, head.stroke_opacity, current_linear, fit, ramp)
+        composite(acc, w, span, &shade, ramp, pixels)
+
+## The transform from viewBox coordinates to the pixels of a `width` by `height`
+## bitmap, as both rasterisers place the drawing.
+pub func pixel_transform(drawing: const Drawing*, width: u32, height: u32) -> Matrix:
+    let fit = placement(drawing, width, height)
+    return Matrix(a = fit.scale, d = fit.scale, e = fit.offset_x, f = fit.offset_y)

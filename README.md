@@ -40,10 +40,31 @@ that `currentColor` means. Element by element in document order, the fill and
 then the stroke composite source-over, with the same exact-area anti-aliasing
 as the coverage rasteriser.
 
+## Text
+
+luce-svg has no fonts, so it does not draw `<text>`; it reads it into runs for a
+caller that has them (luce-image sets them with luce-fonts). `text_count()` and
+`text_run(index) -> TextRun` give each run of one style — the `<text>` itself or
+a `<tspan>` — with its characters (entities decoded, white space collapsed as
+browsers collapse it), the first value of `x`, `y`, `dx` and `dy`, whether it
+opens a `<text>` or starts an anchored chunk, `text-anchor`, the `font-family`
+list (`family_count()`, `family(i)`; generics as written), `font-size` (px, pt,
+pc, mm, cm, in, em, ex, rem, %, keywords) in the run's own units, `font-weight`,
+`font-style`, its fill (color, currentColor, or a gradient's first stop) and
+opacity, the `transform` (a `Matrix`) from its coordinates to the viewBox, and
+its `order`: how many shape elements paint before it.
+
+To draw text in paint order, clear the pixels, then for each run call
+`rasterize_rgba_elements(drawing, width, height, pixels, current, drawn, order)`
+for the shapes before it, set the run over them, and finish with the shapes up
+to `element_count()`. `pixel_transform(drawing, width, height)` maps the viewBox
+onto the bitmap as the rasterisers place it.
+
 ## Limits
 
-- `<text>` is skipped: luce-svg depends only on the standard library and has no
-  fonts. Convert text to paths before importing.
+- Text is read, not drawn (see above); only the first value of `x`, `y`, `dx`
+  and `dy` is used, and `rotate`, `textLength`, `textPath`, stroked text,
+  `dominant-baseline` and vertical writing are not read.
 - Every `spreadMethod` pads (reflect and repeat draw as pad).
 - Contents of `defs`, `clipPath`, `mask`, `symbol`, `pattern` and `marker` are
   not drawn; there is no `use`, clipping, masking, pattern paint, filter,

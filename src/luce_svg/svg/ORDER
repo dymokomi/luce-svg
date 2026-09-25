@@ -3,8 +3,11 @@ parse.lucb
 paths.lucb
 style.lucb
 gradient.lucb
+text.lucb
+text_runs.lucb
 coverage.lucb
 stroke.lucb
 rgba.lucb
 tests.lucb
 raster_tests.lucb
+text_tests.lucb

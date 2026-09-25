@@ -1,0 +1,160 @@
+#==============================================================================================
+#
+#   svg/text - Text elements, read as runs for the caller to set
+#
+#   DESCRIPTION:
+#       luce-svg has no fonts, so `<text>` is not drawn here: it is read into runs that a
+#       caller with a font engine sets. A run is a stretch of characters with one style —
+#       the `<text>` itself, or a `<tspan>` inside it — with its position attributes (the
+#       first value of x, y, dx and dy), its font (family list, size, weight, style), its
+#       text-anchor, its fill and opacity, the transform from its coordinates to the
+#       viewBox, and its place in paint order among the shapes. Character data has its
+#       entities decoded and its white space collapsed as browsers do. Font properties
+#       inherit through groups like the paints; stroked text draws only its fill.
+#
+#==============================================================================================
+
+## Where a text chunk's position sits along it: its start, its middle or its end.
+pub enum Anchor as u8:
+    start = 0
+    middle = 1
+    end = 2
+
+## The font properties an element sets or inherits. `families` is the raw font-family
+## list, a view into the source.
+struct Font:
+    var families: str = ""
+    var size: f64 = 16.0
+    var weight: u32 = 400
+    var italic: bool = false
+    var anchor: Anchor = Anchor.start
+
+## A run as the drawing stores it: its family list and text as ranges of the drawing's
+## text bytes, the rest as TextRun has it.
+struct Run:
+    var family_start: usize = 0
+    var family_length: usize = 0
+    var text_start: usize = 0
+    var text_length: usize = 0
+    var shown: TextRun = TextRun()
+
+## One run of text, in the coordinates of its `<text>` element; `transform` maps them to
+## the viewBox. Runs are in document order. A caller keeps a pen: at each `<text>` (a
+## run with `opens` set) it starts at (0, 0); each run moves it to `x` and `y` where they are set, then by `dx`
+## and `dy`, sets `text` there on the baseline and advances past it. A run with `chunk`
+## set starts an anchored chunk, which runs up to the next such run: the whole chunk
+## shifts back by its width times 0, ½ or 1 as its first run's `anchor` says.
+pub struct TextRun:
+    ## The characters, UTF-8, entities decoded and white space collapsed.
+    pub var text: str = ""
+    ## The font-family list, names unquoted and comma separated ("" for the default).
+    pub var families: str = ""
+    pub var x: f64 = 0.0
+    pub var y: f64 = 0.0
+    pub var has_x: bool = false
+    pub var has_y: bool = false
+    pub var dx: f64 = 0.0
+    pub var dy: f64 = 0.0
+    pub var opens: bool = false
+    pub var chunk: bool = false
+    pub var anchor: Anchor = Anchor.start
+    ## The em size in the run's own units, the weight (100..900) and whether it slants.
+    pub var size: f64 = 16.0
+    pub var weight: u32 = 400
+    pub var italic: bool = false
+    ## The fill: painted or not, the caller's currentColor or the sRGB `color` (a
+    ## gradient's first stop), at `opacity` (fill-opacity times every enclosing opacity).
+    pub var filled: bool = true
+    pub var current: bool = false
+    pub var color: Color = Color()
+    pub var opacity: f64 = 1.0
+    pub var transform: Matrix = Matrix()
+    ## How many shape elements paint before this run; see rasterize_rgba_elements.
+    pub var order: usize = 0
+
+    ## How many families the list names.
+    pub func family_count() -> usize:
+        if self.families.length == 0:
+            return 0
+        var count: usize = 1
+        for byte in self.families.bytes:
+            if byte == ',':
+                count += 1
+        return count
+
+    ## Family `index` of the list (a generic such as "sans-serif" stays as written).
+    pub func family(index: usize) -> str:
+        var at: usize = 0
+        var start: usize = 0
+        for position in 0..<self.families.length + 1:
+            if position == self.families.length or self.families.bytes[position] == ',':
+                if at == index:
+                    return (str)self.families.bytes[start..<position]
+                at += 1
+                start = position + 1
+        return ""
+
+# mark: Font properties =======================================================================
+
+## `base`, the parent's font, with whatever font properties `tag` sets.
+func fonted(tag: str, base: Font) -> Font:
+    var font = base
+    if let families = property(tag, "font-family"):
+        if families != "inherit":
+            font.families = families
+    if let size = property(tag, "font-size"):
+        font.size = font_size(size, base.size)
+    if let weight = property(tag, "font-weight"):
+        font.weight = font_weight(weight, base.weight)
+    if let slant = property(tag, "font-style"):
+        if slant != "inherit":
+            font.italic = slant == "italic" or slant == "oblique"
+    if let anchor = property(tag, "text-anchor"):
+        if anchor == "middle":
+            font.anchor = Anchor.middle
+        elif anchor == "end":
+            font.anchor = Anchor.end
+        elif anchor == "start":
+            font.anchor = Anchor.start
+    return font
+
+## A font-size: a keyword, or a number in px (or none), pt, pc, mm, cm, in, em, ex, rem
+## or %, relative ones against `parent`. Anything unreadable keeps `parent`.
+func font_size(value: str, parent: f64) -> f64:
+    let keywords: str[9] = ["xx-small", "x-small", "small", "medium", "large", "x-large", "xx-large", "larger", "smaller"]
+    let sizes: f64[9] = [9.0, 10.0, 13.0, 16.0, 18.0, 24.0, 32.0, parent * 1.2, parent / 1.2]
+    for index in 0..<keywords.length:
+        if value == keywords[index]:
+            return sizes[index]
+    # The number, without an exponent, so "2em" reads as 2 em.
+    let data = value.bytes
+    var pos: usize = 0
+    while pos < data.length and (is_digit(data[pos]) or data[pos] == '.' or (pos == 0 and data[pos] == '+')):
+        pos += 1
+    let number = strings.parse_f64((str)data[..<pos]) catch _: recover -1.0
+    if number <= 0.0:
+        return parent
+    let suffix = (str)data[pos..]
+    let units: str[10] = ["", "px", "pt", "pc", "mm", "cm", "in", "em", "ex", "rem"]
+    let scales: f64[10] = [1.0, 1.0, 4.0 / 3.0, 16.0, 96.0 / 25.4, 96.0 / 2.54, 96.0, parent, parent * 0.5, 16.0]
+    for index in 0..<units.length:
+        if suffix == units[index]:
+            return number * scales[index]
+    if suffix == "%":
+        return number * parent / 100.0
+    return parent
+
+## A font-weight: normal, bold, bolder, lighter or a number (1..1000), else `parent`.
+func font_weight(value: str, parent: u32) -> u32:
+    if value == "normal":
+        return 400
+    if value == "bold":
+        return 700
+    if value == "bolder":
+        return 400 if parent < 350 else (700 if parent < 550 else 900)
+    if value == "lighter":
+        return 100 if parent < 550 else (400 if parent < 750 else 700)
+    let number = strings.parse_f64(value) catch _: recover 0.0
+    if number >= 1.0 and number <= 1000.0:
+        return (u32)number
+    return parent

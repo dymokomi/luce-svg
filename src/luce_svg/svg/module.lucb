@@ -11,19 +11,23 @@
 #       an 8-bit coverage mask for icons, which the caller tints, and straight-alpha linear
 #       RGBA for artwork. Enough of the SVG grammar is covered for icons and plain
 #       illustrations (M L H V C S Q T A Z, rect, circle, ellipse, line, polyline, polygon,
-#       g, linearGradient, radialGradient; no text, patterns, clipping or masks).
-#       Fragments, in ORDER:
+#       g, linearGradient, radialGradient; no patterns, clipping or masks). Text is not
+#       drawn: `<text>` and `<tspan>` are read into runs, each with its place in paint
+#       order, for a caller with fonts to set (text.lucb). Fragments, in ORDER:
 #
 #       module.lucb    the Drawing, its contours and their paints
 #       parse.lucb     the document grammar: tags, attributes, transforms, groups
 #       paths.lucb     path data and basic shapes, flattened to points
 #       style.lucb     styles, their inheritance, and paint and color parsing
 #       gradient.lucb  gradient definitions, their placement on shapes, and color ramps
+#       text.lucb      text runs and font properties
+#       text_runs.lucb reading a `<text>` element's content into runs
 #       coverage.lucb  the exact-area coverage rasteriser and the 8-bit mask
 #       stroke.lucb    stroke outlines: segments, joins, caps and dashes
 #       rgba.lucb      compositing painted elements into linear RGBA
 #       tests.lucb     the parser and color tests
 #       raster_tests.lucb  the rasteriser tests
+#       text_tests.lucb    the text run tests
 #
 #==============================================================================================
 
@@ -58,13 +62,17 @@ struct Paint:
     var space: Matrix = Matrix()
 
 ## An affine transform mapping (x, y) to (a·x + c·y + e, b·x + d·y + f).
-struct Matrix:
-    var a: f64 = 1.0
-    var b: f64 = 0.0
-    var c: f64 = 0.0
-    var d: f64 = 1.0
-    var e: f64 = 0.0
-    var f: f64 = 0.0
+pub struct Matrix:
+    pub var a: f64 = 1.0
+    pub var b: f64 = 0.0
+    pub var c: f64 = 0.0
+    pub var d: f64 = 1.0
+    pub var e: f64 = 0.0
+    pub var f: f64 = 0.0
+
+    ## Where the transform takes (`x`, `y`).
+    pub func map(x: f64, y: f64) -> Point:
+        return apply(self, x, y)
 
 func identity() -> Matrix:
     return Matrix()
@@ -111,6 +119,11 @@ pub struct Drawing:
     var gradient_used: usize = 0
     var stops: Stop[]
     var stop_used: usize = 0
+    ## Text runs, their families and characters in one byte buffer.
+    var runs: Run[]
+    var run_used: usize = 0
+    var text_bytes: u8[]
+    var text_used: usize = 0
     ## The style and element number the next contours are added with.
     var style: Style = Style()
     var element: usize = 0
@@ -141,6 +154,22 @@ pub struct Drawing:
             self.stops = try grown(self.stops, self.stop_used, 8)
         self.stops[self.stop_used] = value
         self.stop_used += 1
+
+    mutating func add_run(value: Run) -> !:
+        if self.run_used >= self.runs.length:
+            self.runs = try grown(self.runs, self.run_used, 8)
+        self.runs[self.run_used] = value
+        self.run_used += 1
+
+    mutating func add_text_byte(value: u8) -> !:
+        if self.text_used >= self.text_bytes.length:
+            self.text_bytes = try grown(self.text_bytes, self.text_used, 256)
+        self.text_bytes[self.text_used] = value
+        self.text_used += 1
+
+    mutating func add_text_bytes(values: const u8[]) -> !:
+        for value in values:
+            try self.add_text_byte(value)
 
     ## Close an outline that has at least one point, painted in the current style; a
     ## `line` passes `fillable` false, since only its stroke is ever drawn.
@@ -218,6 +247,22 @@ pub struct Drawing:
     pub func contour_stroke_current(index: usize) -> bool:
         return self.contours[index].stroke.current
 
+    ## How many shape elements the drawing holds; contours' `element` counts up to it.
+    pub func element_count() -> usize:
+        return self.element
+
+    ## How many text runs the drawing holds, in document order.
+    pub func text_count() -> usize:
+        return self.run_used
+
+    ## Text run `index`; its strings are views into the drawing, valid while it is open.
+    pub func text_run(index: usize) -> TextRun:
+        let run = self.runs[index]
+        var shown = run.shown
+        shown.families = (str)self.text_bytes[run.family_start..<run.family_start + run.family_length]
+        shown.text = (str)self.text_bytes[run.text_start..<run.text_start + run.text_length]
+        return shown
+
     ## A point of the shared buffer, in viewBox units.
     pub func point(index: usize) -> Point:
         return self.points[index]
@@ -232,14 +277,24 @@ pub struct Drawing:
             free(self.gradients) in memory.heap
         if self.stops.length > 0:
             free(self.stops) in memory.heap
+        if self.runs.length > 0:
+            free(self.runs) in memory.heap
+        if self.text_bytes.length > 0:
+            free(self.text_bytes) in memory.heap
         var empty_points: Point[]
         var empty_contours: Contour[]
         var empty_gradients: Gradient[]
         var empty_stops: Stop[]
+        var empty_runs: Run[]
+        var empty_bytes: u8[]
         self.points = empty_points
         self.contours = empty_contours
         self.gradients = empty_gradients
         self.stops = empty_stops
+        self.runs = empty_runs
+        self.text_bytes = empty_bytes
+        self.run_used = 0
+        self.text_used = 0
         self.point_used = 0
         self.contour_used = 0
         self.gradient_used = 0

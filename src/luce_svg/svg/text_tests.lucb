@@ -1,0 +1,78 @@
+#==============================================================================================
+#
+#   svg/text_tests - The text run tests
+#
+#==============================================================================================
+
+test "a text element becomes one run with its position, font and fill":
+    let drawing = try parse("<svg viewBox=\"0 0 100 50\"><rect width=\"10\" height=\"10\"/><text x=\"10 20\" y=\"40\" dx=\"2\" font-family=\"'Helvetica Neue', Arial, sans-serif\" font-size=\"12pt\" font-weight=\"bold\" font-style=\"italic\" text-anchor=\"middle\" fill=\"#ff0000\" fill-opacity=\"0.5\">\n  Hello   &amp;\n world  </text><circle r=\"2\"/></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.text_count() == 1 and native.element_count() == 2)
+    let run = native.text_run(0)
+    assert(run.text == "Hello & world")
+    assert(run.has_x and run.x == 10.0 and run.has_y and run.y == 40.0 and run.dx == 2.0 and run.dy == 0.0)
+    assert(run.chunk and run.anchor == Anchor.middle)
+    assert(near(run.size, 16.0, 1e-9) and run.weight == 700 and run.italic)
+    assert(run.family_count() == 3 and run.family(0) == "Helvetica Neue" and run.family(1) == "Arial" and run.family(2) == "sans-serif")
+    assert(run.filled and not run.current and run.color.r == 1.0 and run.color.g == 0.0 and run.opacity == 0.5)
+    assert(run.order == 1)
+
+test "tspans make runs of their own style, and inherit the rest":
+    let drawing = try parse("<svg viewBox=\"0 0 100 50\"><g font-size=\"20\" fill=\"blue\" transform=\"translate(5 6)\"><text x=\"1\" y=\"2\" transform=\"scale(2)\">A <tspan fill=\"red\" font-size=\"50%\">B</tspan> C<tspan x=\"30\" dy=\"4\"> D</tspan></text></g></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.text_count() == 4)
+    let a = native.text_run(0)
+    let b = native.text_run(1)
+    let c = native.text_run(2)
+    let d = native.text_run(3)
+    assert(a.text == "A " and b.text == "B" and c.text == " C" and d.text == "D")
+    assert(a.chunk and not b.chunk and not c.chunk and d.chunk)
+    assert(a.opens and not b.opens and not d.opens)
+    assert(a.size == 20.0 and b.size == 10.0 and c.size == 20.0)
+    assert(a.color.b == 1.0 and b.color.r == 1.0 and b.color.b == 0.0 and c.color.b == 1.0)
+    assert(not b.has_x and d.has_x and d.x == 30.0 and d.dy == 4.0 and not d.has_y)
+    let at = d.transform.map(1.0, 1.0)
+    assert(at.x == 7.0 and at.y == 8.0)
+    assert(a.family_count() == 0 and a.family(0) == "")
+
+test "character references, CDATA and comments inside text":
+    let drawing = try parse("<svg><text>&#65;&#x42;<!-- no -->&lt;<![CDATA[&x]]>&bogus; caf\u{e9}</text></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.text_count() == 1)
+    assert(native.text_run(0).text == "AB<&x&bogus; caf\u{e9}")
+    assert(not native.text_run(0).has_x and native.text_run(0).size == 16.0 and native.text_run(0).weight == 400)
+
+test "font sizes in units and keywords, and weights relative to the parent":
+    assert(near(font_size("2em", 10.0), 20.0, 1e-9) and near(font_size("1in", 10.0), 96.0, 1e-9))
+    assert(font_size("large", 10.0) == 18.0 and font_size("14", 10.0) == 14.0 and font_size("oops", 10.0) == 10.0)
+    assert(font_weight("bolder", 400) == 700 and font_weight("lighter", 700) == 400 and font_weight("300", 400) == 300)
+
+test "empty tspans hand their place on, and text leaves the shapes as they were":
+    let drawing = try parse("<svg viewBox=\"0 0 10 10\"><text><tspan x=\"3\"></tspan>Hi</text><text/><path d=\"M0 0 H4 V4 Z\"/></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.text_count() == 1 and native.contour_count() == 1 and native.contour_element(0) == 0)
+    let run = native.text_run(0)
+    assert(run.text == "Hi" and run.has_x and run.x == 3.0 and run.chunk and run.opens and run.order == 0)
+
+test "drawing the elements in two ranges matches drawing them at once":
+    let drawing = try parse("<svg viewBox=\"0 0 8 8\"><rect width=\"6\" height=\"6\" fill=\"red\"/><text>between</text><circle cx=\"5\" cy=\"5\" r=\"3\" fill=\"blue\" opacity=\"0.5\"/></svg>")
+    defer drawing.release()
+    let native = try drawing.get()
+    assert(native.text_run(0).order == 1)
+    let whole = try alloc f32[16 * 16 * 4] in memory.heap
+    defer free(whole) in memory.heap
+    let parts = try alloc f32[16 * 16 * 4] in memory.heap
+    defer free(parts) in memory.heap
+    try rasterize_rgba(native, 16, 16, whole, Color())
+    for index in 0..<parts.length:
+        parts[index] = 0.0
+    try rasterize_rgba_elements(native, 16, 16, parts, Color(), 0, 1)
+    try rasterize_rgba_elements(native, 16, 16, parts, Color(), 1, native.element_count())
+    for index in 0..<whole.length:
+        assert(whole[index] == parts[index])
+    let far = pixel_transform(native, 32, 16).map(8.0, 8.0)
+    assert(far.x == 24.0 and far.y == 16.0)
