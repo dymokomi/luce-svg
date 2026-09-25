@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-svg" {
     str owner = "dymokomi"
-    str version = "0.4.1"
+    str version = "0.4.2"
     str kind = "package"
     str language = "luce-base"
     str description = "A small SVG parser, flattener and rasteriser (coverage masks and linear RGBA) for Luce/Base."

@@ -139,6 +139,15 @@ test "a stroke scales with its element's transform, as it is in user space":
     assert((try alpha_at(scaled, 24, 12, 9)) > 0.9999 and (try alpha_at(scaled, 24, 12, 14)) > 0.9999)
     assert((try alpha_at(scaled, 24, 12, 7)) == 0.0 and (try alpha_at(scaled, 24, 12, 16)) == 0.0)
 
+test "no float residue is left to the right of a shape as faint coverage":
+    let drawing = try parse("<svg viewBox=\"0 0 64 40\"><rect x=\"30\" y=\"10\" width=\"21.9\" height=\"14.8\" rx=\"2\" fill=\"black\" stroke=\"white\" stroke-width=\"0.4\"/></svg>")
+    defer drawing.release()
+    var pixels: f32[640 * 400 * 4]
+    try rasterize_rgba(drawing.value(), 640, 400, pixels, Color())
+    for row in 0..<(usize)400:
+        for column in (usize)523..<(usize)640:
+            assert(pixels[(row * 640 + column) * 4 + 3] == 0.0)
+
 # mark: Gradients =============================================================================
 
 test "a linear gradient spans the shape's box and blends in sRGB before decoding":

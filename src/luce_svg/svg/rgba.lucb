@@ -77,7 +77,9 @@ func composite(acc: f32[], width: usize, span: Span, shade: const Shade*, ramp: 
             sum += acc[cell]
             acc[cell] = 0.0
             var cover = math.min(1.0, math.abs((f64)sum)) * shade.alpha
-            if column >= width or cover <= 0.0:
+            # The running sum leaves float residue (about 1e-7) past a shape's right
+            # edge; under half a 16-bit level it is no coverage, not a faint pixel.
+            if column >= width or cover < 1.0 / 131072.0:
                 continue
             var color = shade.color
             if shade.gradient:
