@@ -118,6 +118,27 @@ pub func rasterize_rgba(drawing: const Drawing*, width: u32, height: u32, pixels
 ## the elements before each text run's `order`, then the run, and so on, then the rest.
 pub func rasterize_rgba_elements(drawing: const Drawing*, width: u32, height: u32, pixels: f32[], current: Color,
                                  first: usize, last: usize) -> !:
+    try rasterize_placed(drawing, width, height, placement(drawing, width, height), pixels, current, first, last)
+
+## A window of the drawing as it lands in a `full_width` by `full_height` bitmap:
+## the `width` by `height` pixels from (`left`, `top`) of it, into `pixels` as
+## rasterize_rgba fills a whole bitmap. Each pixel covers exactly what the whole
+## bitmap's pixel there does, so a large bitmap can be drawn window by window, from
+## one parsed drawing, and a full bitmap need not exist (its sides may pass 4096).
+pub func rasterize_rgba_window(drawing: const Drawing*, full_width: u32, full_height: u32, left: u32, top: u32,
+                               width: u32, height: u32, pixels: f32[], current: Color) -> !:
+    if pixels.length != (usize)width * (usize)height * 4:
+        error(invalid, "the pixel buffer must hold width * height * 4 floats")
+    for index in 0..<pixels.length:
+        pixels[index] = 0.0
+    let whole = placement(drawing, full_width, full_height)
+    let fit = Placement(scale = whole.scale, offset_x = whole.offset_x - (f64)left, offset_y = whole.offset_y - (f64)top)
+    try rasterize_placed(drawing, width, height, fit, pixels, current, 0, drawing.element)
+
+## Shape elements `first..<last` placed by `fit` into a `width` by `height` bitmap,
+## composited over what `pixels` holds.
+func rasterize_placed(drawing: const Drawing*, width: u32, height: u32, fit: Placement, pixels: f32[], current: Color,
+                      first: usize, last: usize) -> !:
     let acc = try accumulator(width, height)
     defer free(acc) in memory.heap
     if pixels.length != (usize)width * (usize)height * 4:
@@ -126,7 +147,6 @@ pub func rasterize_rgba_elements(drawing: const Drawing*, width: u32, height: u3
     defer free(ramp) in memory.heap
     let w = (usize)width
     let h = (usize)height
-    let fit = placement(drawing, width, height)
     let current_linear = to_linear(current)
     var start: usize = 0
     while start < drawing.contour_used:

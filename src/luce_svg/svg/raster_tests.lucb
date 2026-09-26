@@ -216,3 +216,23 @@ test "a window of a drawing covers its pixels as the whole drawing does, edges c
             let b = pixel_at(part, 64, x, y)
             for channel in 0..<(usize)4:
                 assert(near(a[channel], b[channel], 1e-5))
+
+test "a window drawn from the whole drawing matches the same crop of the whole render":
+    let whole = try parse("<svg viewBox=\"0 0 160 80\"><polygon points=\"-50,20.2 180,24.7 -40,26.9\" fill=\"#ff0000\"/><ellipse cx=\"60\" cy=\"40\" rx=\"45\" ry=\"22\" fill=\"#00ff00\" stroke=\"#0000ff\" stroke-width=\"3\"/><rect x=\"80\" y=\"10\" width=\"30\" height=\"30\" transform=\"rotate(17 95 25)\" fill=\"#ffffff\"/></svg>")
+    defer whole.release()
+    var all: f32[160 * 80 * 4]
+    try rasterize_rgba(whole.value(), 160, 80, all, Color())
+    var part: f32[64 * 48 * 4]
+    try rasterize_rgba_window(whole.value(), 160, 80, 37, 11, 64, 48, part, Color())
+    for y in 0..<(usize)48:
+        for x in 0..<(usize)64:
+            let a = pixel_at(all, 160, x + 37, y + 11)
+            let b = pixel_at(part, 64, x, y)
+            for channel in 0..<(usize)4:
+                assert(near(a[channel], b[channel], 1e-6))
+    # A whole bitmap wider than any one bitmap may be still has windows.
+    let wide = try parse("<svg viewBox=\"0 0 20000 100\"><rect x=\"10\" y=\"10\" width=\"19980\" height=\"80\" fill=\"#ffffff\"/></svg>")
+    defer wide.release()
+    var strip: f32[32 * 32 * 4]
+    try rasterize_rgba_window(wide.value(), 20000, 100, 19968, 0, 32, 32, strip, Color())
+    assert(pixel_at(strip, 32, 0, 20)[3] == 1.0 and pixel_at(strip, 32, 31, 20)[3] == 0.0 and pixel_at(strip, 32, 0, 5)[3] == 0.0)
