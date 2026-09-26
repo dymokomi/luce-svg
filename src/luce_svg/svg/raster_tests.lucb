@@ -198,3 +198,21 @@ test "a missing or stopless gradient paints nothing, or the fallback written aft
     var pixels: f32[4 * 4 * 4]
     try rasterize_rgba(drawing.value(), 4, 4, pixels, Color())
     assert(near(pixel_at(pixels, 4, 1, 1)[0], 1.0, 1e-6) and pixel_at(pixels, 4, 1, 1)[1] == 0.0)
+
+test "a window of a drawing covers its pixels as the whole drawing does, edges crossing its sides included":
+    # A nearly flat sliver whose edges run far past both sides of the window in one row,
+    # a stroked ellipse, and a rotated square, all crossing the window's edges.
+    let whole = try parse("<svg viewBox=\"0 0 160 80\"><polygon points=\"-50,20.2 180,24.7 -40,26.9\" fill=\"#ff0000\"/><ellipse cx=\"60\" cy=\"40\" rx=\"45\" ry=\"22\" fill=\"#00ff00\" stroke=\"#0000ff\" stroke-width=\"3\"/><rect x=\"80\" y=\"10\" width=\"30\" height=\"30\" transform=\"rotate(17 95 25)\" fill=\"#ffffff\"/></svg>")
+    defer whole.release()
+    var all: f32[160 * 80 * 4]
+    try rasterize_rgba(whole.value(), 160, 80, all, Color())
+    let window = try parse("<svg viewBox=\"37 11 64 48\"><polygon points=\"-50,20.2 180,24.7 -40,26.9\" fill=\"#ff0000\"/><ellipse cx=\"60\" cy=\"40\" rx=\"45\" ry=\"22\" fill=\"#00ff00\" stroke=\"#0000ff\" stroke-width=\"3\"/><rect x=\"80\" y=\"10\" width=\"30\" height=\"30\" transform=\"rotate(17 95 25)\" fill=\"#ffffff\"/></svg>")
+    defer window.release()
+    var part: f32[64 * 48 * 4]
+    try rasterize_rgba(window.value(), 64, 48, part, Color())
+    for y in 0..<(usize)48:
+        for x in 0..<(usize)64:
+            let a = pixel_at(all, 160, x + 37, y + 11)
+            let b = pixel_at(part, 64, x, y)
+            for channel in 0..<(usize)4:
+                assert(near(a[channel], b[channel], 1e-5))

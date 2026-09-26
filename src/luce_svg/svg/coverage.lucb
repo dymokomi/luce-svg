@@ -24,8 +24,64 @@ func placement(drawing: const Drawing*, width: u32, height: u32) -> Placement:
 
 ## Signed-area accumulation of one edge into `acc` (width + 1 cells per row), the
 ## exact-area method font rasterisers use: after a prefix sum along each row,
-## a cell holds the winding-weighted coverage of that pixel.
+## a cell holds the winding-weighted coverage of that pixel. The edge is first
+## cut where it crosses the bitmap's left and right sides: a piece to the left
+## counts only its winding, at the first column, and a piece to the right lands
+## in the spare cell. So a window of a drawing (a canvas cell) covers its pixels
+## exactly as the whole drawing does.
 func accumulate(acc: f32[], width: usize, height: usize, x0: f64, y0: f64, x1: f64, y1: f64):
+    if y0 == y1:
+        return
+    let right = (f64)width
+    # Where the edge crosses x = 0 and x = width, as fractions along it, in order.
+    var first = 2.0
+    var second = 2.0
+    if x1 != x0:
+        let at_left = (0.0 - x0) / (x1 - x0)
+        let at_right = (right - x0) / (x1 - x0)
+        if at_left > 0.0 and at_left < 1.0:
+            first = at_left
+        if at_right > 0.0 and at_right < 1.0:
+            if first > 1.0:
+                first = at_right
+            elif at_right < first:
+                second = first
+                first = at_right
+            else:
+                second = at_right
+    if first > 1.0:
+        accumulate_piece(acc, width, height, clamp_x(x0, right), y0, clamp_x(x1, right), y1)
+        return
+    accumulate_part(acc, width, height, x0, y0, x1, y1, 0.0, first)
+    if second > 1.0:
+        accumulate_part(acc, width, height, x0, y0, x1, y1, first, 1.0)
+        return
+    accumulate_part(acc, width, height, x0, y0, x1, y1, first, second)
+    accumulate_part(acc, width, height, x0, y0, x1, y1, second, 1.0)
+
+## The part of edge (`x0`, `y0`)–(`x1`, `y1`) from fraction `ta` to `tb`, which lies
+## wholly on one side of each of the bitmap's sides: to the left it counts only its
+## winding, at the first column; to the right it lands in the spare cell.
+func accumulate_part(acc: f32[], width: usize, height: usize, x0: f64, y0: f64, x1: f64, y1: f64, ta: f64, tb: f64):
+    let right = (f64)width
+    let ya = y0 + (y1 - y0) * ta
+    let yb = y0 + (y1 - y0) * tb
+    let xa = x0 + (x1 - x0) * ta
+    let xb = x0 + (x1 - x0) * tb
+    let middle = (xa + xb) * 0.5
+    if middle <= 0.0:
+        accumulate_piece(acc, width, height, 0.0, ya, 0.0, yb)
+    elif middle >= right:
+        accumulate_piece(acc, width, height, right, ya, right, yb)
+    else:
+        accumulate_piece(acc, width, height, clamp_x(xa, right), ya, clamp_x(xb, right), yb)
+
+## `x` held within 0..`right`, where a piece that only grazes a side is put.
+func clamp_x(x: f64, right: f64) -> f64:
+    return math.clamp(x, 0.0, right)
+
+## `accumulate` for an edge within the bitmap's columns.
+func accumulate_piece(acc: f32[], width: usize, height: usize, x0: f64, y0: f64, x1: f64, y1: f64):
     if y0 == y1:
         return
     let stride = width + 1
@@ -51,8 +107,9 @@ func accumulate(acc: f32[], width: usize, height: usize, x0: f64, y0: f64, x1: f
         let dy = row_bottom - row_top
         let x_next = x + dxdy * dy
         let base = row * stride
-        var xa = x
-        var xb = x_next
+        # The piece lies within the columns; rounding along it must not step outside.
+        var xa = math.clamp(x, 0.0, (f64)width)
+        var xb = math.clamp(x_next, 0.0, (f64)width)
         if xa > xb:
             let swap = xa
             xa = xb
