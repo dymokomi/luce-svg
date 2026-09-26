@@ -241,11 +241,6 @@ func entered(outer: Frame, tag: str, gradient_ids: const str[]) -> Frame:
 ## How deeply groups can nest; deeper groups draw with their parent's frame.
 let group_limit: usize = 32
 
-## Free the gradient ids collect_gradients returned.
-func release_ids(ids: str[]):
-    if ids.length > 0:
-        free(ids) in memory.heap
-
 ## Parse an SVG document into a flattened Drawing. Unsupported elements are ignored.
 pub func parse(source: str) -> interop.Reference[Drawing]!:
     var empty_points: Point[]
@@ -256,11 +251,14 @@ pub func parse(source: str) -> interop.Reference[Drawing]!:
     var empty_bytes: u8[]
     let native = try new Drawing(view_w = 0.0, view_h = 0.0, points = empty_points, point_used = 0, contours = empty_contours, contour_used = 0,
                                  gradients = empty_gradients, stops = empty_stops, runs = empty_runs, text_bytes = empty_bytes)
-    errdefer free(native)
-    errdefer native.close()
+    errdefer:
+        native.close()
+        free(native)
     let data = source.bytes
     let ids = try collect_gradients(native, source)
-    defer release_ids(ids)
+    defer:
+        if ids.length > 0:
+            free(ids) in memory.heap
     var frame = Frame()
     let saved = try alloc Frame[group_limit] in memory.heap
     defer free(saved) in memory.heap
