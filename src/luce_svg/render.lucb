@@ -1,0 +1,121 @@
+#==============================================================================================
+#
+#   render - An SVG file drawn as a picture, text and all
+#
+#   DESCRIPTION:
+#       What an image editor opening an SVG wants: the file parsed and flattened, then
+#       drawn in color at the drawing's own size — scaled up until its longer
+#       side is at least 1024 pixels, as a small icon would otherwise open as a
+#       speck — in linear light with straight alpha, `currentColor` black. Its text is
+#       set with the system's fonts (text.lucb), in paint order among the shapes.
+#
+#==============================================================================================
+
+import files
+import math
+import memory
+import c as c_api
+import strings
+import luce_svg.svg as svg
+from luce_svg.text import draw_with_text
+
+## The rasterised drawing: its size and its pixels (straight RGBA, linear
+## light, 4 floats a pixel, allocated in the heap; free them there).
+pub struct Rendered:
+    pub var width: usize
+    pub var height: usize
+    pub var pixels: f32[]
+
+## Whether `path` names an SVG file.
+pub func is_svg(path: str) -> bool:
+    if path.length < 4:
+        return false
+    let tail = (str)path.bytes[path.length - 4..]
+    return tail == ".svg" or tail == ".SVG"
+
+## The SVG at `path` drawn as pixels, refusing more than `max_pixels`.
+pub func render_svg(path: str, max_bytes: usize, max_pixels: usize) -> Rendered!:
+    var owned_path: str = ""
+    var bytes: u8[]
+    with memory.heap:
+        owned_path = try strings.copy(path)
+    defer strings.release(owned_path)
+    with memory.heap:
+        bytes = try files.read_limit((c_api.str)owned_path, max_bytes)
+    defer free(bytes) in memory.heap
+    let drawing = try svg.parse((str)bytes)
+    defer drawing.release()
+    let view_width = drawing.value().view_width()
+    let view_height = drawing.value().view_height()
+    if not (view_width > 0.0) or not (view_height > 0.0):
+        error(svg.invalid, "the SVG has no size")
+    let scale = math.max(1.0, 1024.0 / math.max(view_width, view_height))
+    let width = (usize)math.ceil(view_width * scale)
+    let height = (usize)math.ceil(view_height * scale)
+    if width * height > max_pixels or width > 65536 or height > 65536:
+        error(svg.invalid, "the SVG is too large to draw")
+    let pixels = try alloc f32[width * height * 4] in memory.heap
+    errdefer free(pixels) in memory.heap
+    for index in 0..<pixels.length:
+        pixels[index] = 0.0
+    try draw_with_text(drawing.value(), width, height, pixels, svg.Color(r = 0.0, g = 0.0, b = 0.0))
+    return Rendered(width = width, height = height, pixels = pixels)
+
+test "an SVG opens drawn in color, a small one scaled up":
+    let path = "/tmp/luce-svg-render-test.svg"
+    try files.write_text(path, "<svg viewBox=\"0 0 32 16\"><rect width=\"16\" height=\"16\" fill=\"#ff0000\"/><circle cx=\"24\" cy=\"8\" r=\"8\" fill=\"blue\"/></svg>")
+    let rendered = try render_svg(path, 1048576, 16777216)
+    defer free(rendered.pixels) in memory.heap
+    assert(rendered.width == 1024 and rendered.height == 512)
+    let red = (100 * 1024 + 100) * 4
+    assert(rendered.pixels[red] > 0.99 and rendered.pixels[red + 2] < 0.01 and rendered.pixels[red + 3] > 0.99)
+    let blue = (256 * 1024 + 768) * 4
+    assert(rendered.pixels[blue + 2] > 0.99 and rendered.pixels[blue] < 0.01)
+    assert(is_svg("a.svg") and not is_svg("a.png"))
+
+## The box, in pixels, of `rendered`'s pixels near the linear color (`r`, `g`, `b`)
+## and opaque: left, top, right, bottom (right and bottom exclusive), and the count.
+struct Ink:
+    var left: usize = 0
+    var top: usize = 0
+    var right: usize = 0
+    var bottom: usize = 0
+    var count: usize = 0
+
+func ink_of(rendered: const Rendered*, r: f32, g: f32, b: f32) -> Ink:
+    var found = Ink(left = rendered.width, top = rendered.height)
+    for y in 0..<rendered.height:
+        for x in 0..<rendered.width:
+            let slot = (y * rendered.width + x) * 4
+            let p = rendered.pixels
+            if p[slot + 3] > 0.9 and math.abs((f64)(p[slot] - r)) < 0.05 and math.abs((f64)(p[slot + 1] - g)) < 0.05 and math.abs((f64)(p[slot + 2] - b)) < 0.05:
+                found.left = x if x < found.left else found.left
+                found.top = y if y < found.top else found.top
+                found.right = x + 1 if x + 1 > found.right else found.right
+                found.bottom = y + 1 if y + 1 > found.bottom else found.bottom
+                found.count += 1
+    return found
+
+test "SVG text is set in its color where it stands, in paint order":
+    let path = "/tmp/luce-svg-text-test.svg"
+    # 1024 by 512 pixels: 5.12 pixels a unit. Red text on blue, a green bar over its end,
+    # and centred text in a group scaled by two.
+    try files.write_text(path, "<svg viewBox=\"0 0 200 100\"><rect width=\"200\" height=\"100\" fill=\"blue\"/><text x=\"20\" y=\"40\" font-family=\"NoSuchFont, sans-serif\" font-size=\"30\" fill=\"#ff0000\">HHHH</text><rect x=\"60\" y=\"0\" width=\"10\" height=\"50\" fill=\"lime\"/><g transform=\"scale(2)\"><text x=\"50\" y=\"45\" text-anchor=\"middle\" font-family=\"serif\" font-size=\"10\" font-weight=\"bold\" fill=\"white\">MMM</text></g></svg>")
+    let rendered = try render_svg(path, 1048576, 16777216)
+    defer free(rendered.pixels) in memory.heap
+    assert(rendered.width == 1024 and rendered.height == 512)
+    # "HHHH" at 30 units stands on its baseline at y 40 (204.8 px) from x 20 (102.4 px):
+    # capitals about 21 units tall, four of them about 80 units wide.
+    let red = ink_of(&rendered, 1.0, 0.0, 0.0)
+    assert(red.count > 5000)
+    assert(red.left >= 100 and red.left <= 115 and red.bottom >= 200 and red.bottom <= 208)
+    assert(red.top >= 80 and red.top <= 110 and red.right >= 450 and red.right <= 560)
+    # The bar painted after the text covers it.
+    for y in 110..<200:
+        let slot = (y * 1024 + 330) * 4
+        assert(rendered.pixels[slot] < 0.01 and rendered.pixels[slot + 1] > 0.99)
+    # The centred text straddles x 100 units (512 px), baseline 90 units (460.8 px).
+    let white = ink_of(&rendered, 1.0, 1.0, 1.0)
+    assert(white.count > 2000 and white.bottom >= 455 and white.bottom <= 466)
+    let middle = (white.left + white.right) // 2
+    assert(middle >= 497 and middle <= 527 and white.left < 450 and white.right > 575)

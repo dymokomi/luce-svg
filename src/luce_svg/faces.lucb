@@ -1,0 +1,181 @@
+#==============================================================================================
+#
+#   faces - Faces for SVG text: families, styles and one kept face
+#
+#   DESCRIPTION:
+#       Picks the face an SVG text run asks for. Its font-family list is tried in order
+#       against the installed families, without regard to case; a generic family
+#       (sans-serif, serif, monospace, and cursive, fantasy and system-ui as sans-serif)
+#       tries the usual faces of macOS, Windows and Linux in turn, and when nothing on
+#       the list is installed the generic sans-serif stands in. Of the family's styles
+#       the one nearest the run's weight, with its slant, and not condensed or expanded,
+#       is taken. The last face loaded is kept, since neighbouring runs mostly share one.
+#
+#==============================================================================================
+
+import memory
+import strings
+import fonts
+import luce_svg.svg as svg
+
+## How many faces each generic family tries.
+let generic_width: usize = 6
+
+## The faces tried for sans-serif, serif and monospace, a row of `generic_width` each.
+let generic_families: str[18] = ["Helvetica", "Arial", "DejaVu Sans", "Liberation Sans", "Noto Sans", "Segoe UI",
+                                 "Times New Roman", "Times", "DejaVu Serif", "Liberation Serif", "Noto Serif", "Georgia",
+                                 "Menlo", "Consolas", "DejaVu Sans Mono", "Liberation Mono", "Courier New", "Courier"]
+
+## The installed families, listed on first use, and the face loaded last with what it
+## was loaded for (`families` is a view into the drawing, which outlives the cache).
+pub struct FaceCache:
+    var installed: fonts.Names*? = none
+    var loaded: fonts.TypeFace*? = none
+    var families: str = ""
+    var weight: u32 = 0
+    var italic: bool = false
+    var size: f64 = 0.0
+
+    ## The face for `run` at `size` output pixels to the em.
+    pub mutating func face(run: const svg.TextRun*, size: f64) -> fonts.TypeFace*!:
+        if let kept = self.loaded:
+            if self.families == run.families and self.weight == run.weight and self.italic == run.italic and self.size == size:
+                return kept
+            self.drop_face()
+        let family = try self.family_for(run)
+        let style = try style_for(family, run.weight, run.italic)
+        defer strings.release(style)
+        let boxed = try new fonts.TypeFace(family, style, size) in memory.heap
+        self.loaded = boxed
+        self.families = run.families
+        self.weight = run.weight
+        self.italic = run.italic
+        self.size = size
+        return boxed
+
+    ## Free the kept face and the family list.
+    pub mutating func close():
+        self.drop_face()
+        if let names = self.installed:
+            names.close()
+            free(names) in memory.heap
+            self.installed = none
+
+    mutating func drop_face():
+        if let kept = self.loaded:
+            kept.close()
+            free(kept) in memory.heap
+            self.loaded = none
+
+    ## The installed family `run` resolves to, spelled as installed.
+    mutating func family_for(run: const svg.TextRun*) -> str!:
+        if self.installed == none:
+            let listed = try fonts.families()
+            let boxed = try new fonts.Names in memory.heap
+            *boxed = listed
+            self.installed = boxed
+        for index in 0..<run.family_count():
+            let name = run.family(index)
+            let kind = generic_kind(name)
+            if kind < 0:
+                if let found = self.find(name):
+                    return found
+            elif let found = self.find_generic((usize)kind):
+                return found
+        if let found = self.find_generic(0):
+            return found
+        return generic_families[0]
+
+    ## The installed spelling of `name`, matched without regard to case.
+    func find(name: str) -> str?:
+        let names = self.installed else return none
+        for index in 0..<names.length():
+            let installed = names.at(index) catch _:
+                return none
+            if same_folded(installed, name):
+                return installed
+        return none
+
+    ## The first installed face of generic family `kind`.
+    func find_generic(kind: usize) -> str?:
+        for index in 0..<generic_width:
+            if let found = self.find(generic_families[kind * generic_width + index]):
+                return found
+        return none
+
+## Which generic family `name` is: 0 sans-serif, 1 serif, 2 monospace, -1 none.
+func generic_kind(name: str) -> i64:
+    if same_folded(name, "serif"):
+        return 1
+    if same_folded(name, "monospace"):
+        return 2
+    let sans: str[4] = ["sans-serif", "cursive", "fantasy", "system-ui"]
+    for index in 0..<sans.length:
+        if same_folded(name, sans[index]):
+            return 0
+    return -1
+
+## Of `family`'s styles, the one nearest `weight` and `italic`, copied into the heap.
+func style_for(family: str, weight: u32, italic: bool) -> str!:
+    var names = try fonts.styles(family)
+    defer names.close()
+    var best = "Italic" if italic else "Regular"
+    var best_score = 1.0e9
+    for index in 0..<names.length():
+        let name = try names.at(index)
+        let named = weight_named(name)
+        var score = (f64)(named - weight if named > weight else weight - named)
+        if holds(name, "italic") or holds(name, "oblique"):
+            score += 0.0 if italic else 1000.0
+        elif italic:
+            score += 1000.0
+        if holds(name, "condensed") or holds(name, "narrow") or holds(name, "expanded") or holds(name, "wide"):
+            score += 50.0
+        if score < best_score:
+            best = name
+            best_score = score
+    var copied = ""
+    with memory.heap:
+        copied = try strings.copy(best)
+    return copied
+
+## The weight a style's name suggests (400 when it names none).
+func weight_named(name: str) -> u32:
+    let words: str[14] = ["thin", "hairline", "extralight", "extra light", "ultralight", "light", "medium", "semibold",
+                          "semi bold", "demibold", "extrabold", "extra bold", "ultrabold", "heavy"]
+    let weights: u32[14] = [100, 100, 200, 200, 200, 300, 500, 600, 600, 600, 800, 800, 800, 900]
+    for index in 0..<words.length:
+        if holds(name, words[index]):
+            return weights[index]
+    if holds(name, "black"):
+        return 900
+    if holds(name, "bold"):
+        return 700
+    return 400
+
+## Whether `text` holds `word`, ASCII letters without regard to case.
+func holds(text: str, word: str) -> bool:
+    if word.length > text.length:
+        return false
+    for start in 0..<(text.length - word.length + 1):
+        if folded_equal(text.bytes[start..<start + word.length], word.bytes):
+            return true
+    return false
+
+## Whether `a` and `b` match, ASCII letters without regard to case.
+func same_folded(a: str, b: str) -> bool:
+    return folded_equal(a.bytes, b.bytes)
+
+func folded_equal(a: const u8[], b: const u8[]) -> bool:
+    if a.length != b.length:
+        return false
+    for index in 0..<a.length:
+        var x = a[index]
+        var y = b[index]
+        if x >= 'A' and x <= 'Z':
+            x += 32
+        if y >= 'A' and y <= 'Z':
+            y += 32
+        if x != y:
+            return false
+    return true

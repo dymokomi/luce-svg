@@ -37,6 +37,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/luce-bin"
           ln -s "$(command -v clang)" "$RUNNER_TEMP/luce-bin/cc"
           echo "$RUNNER_TEMP/luce-bin" >> "$GITHUB_PATH"
+      - name: Install cairo and a font for SVG text (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcairo2-dev fonts-dejavu-core
       - run: cd luce-base && ./build.sh
       - run: ./test.sh
         working-directory: luce-svg

@@ -1,0 +1,223 @@
+#==============================================================================================
+#
+#   text - Setting an SVG's text runs with the system's fonts
+#
+#   DESCRIPTION:
+#       The parser reads `<text>` into runs; this sets them with luce-fonts
+#       and blends them into the rasterised drawing. Runs are set in paint order: the
+#       shape elements before a run are composited first, so later shapes cover text and
+#       text covers earlier shapes. Each run's family list is tried in order against the
+#       installed families, generic families (sans-serif, serif, monospace…) standing for
+#       the usual faces of each platform, and the style nearest its weight and slant is
+#       chosen. The run is set at its size in output pixels and placed by its full
+#       transform: text that is only moved and scaled is copied pixel for pixel, rotated
+#       or skewed text is resampled. Text anchors shift each chunk by its measured width.
+#       A run whose font cannot be loaded or set is left out rather than failing the file.
+#
+#==============================================================================================
+
+import math
+import memory
+import strings
+import fonts
+import luce_svg.svg as svg
+import transfer
+from luce_svg.faces import FaceCache
+
+## Where the next run goes, in the coordinates of its `<text>`.
+struct Pen:
+    var x: f64 = 0.0
+    var y: f64 = 0.0
+
+## What a run is drawn into: the bitmap, how the drawing is placed on it, and the
+## sRGB color `currentColor` means.
+struct Target:
+    var pixels: f32[]
+    var width: usize
+    var height: usize
+    var place: svg.Matrix
+    var current: svg.Color
+
+## Draw `drawing` into `pixels` (`width` by `height`, straight linear RGBA, cleared by
+## the caller), its shapes and its text interleaved in paint order.
+pub func draw_with_text(drawing: const svg.Drawing*, width: usize, height: usize, pixels: f32[], current: svg.Color) -> !:
+    let target = Target(pixels = pixels, width = width, height = height, place = svg.pixel_transform(drawing, (u32)width, (u32)height), current = current)
+    var cache = FaceCache()
+    defer cache.close()
+    var pen = Pen()
+    var drawn: usize = 0
+    var index: usize = 0
+    let count = drawing.text_count()
+    while index < count:
+        let order = drawing.text_run(index).order
+        if order > drawn:
+            try svg.rasterize_rgba_elements(drawing, (u32)width, (u32)height, pixels, current, drawn, order)
+            drawn = order
+        var next = index + 1
+        while next < count and not drawing.text_run(next).chunk:
+            next += 1
+        set_chunk(drawing, index, next, &pen, &cache, &target) catch _:
+            recover ()
+        index = next
+    try svg.rasterize_rgba_elements(drawing, (u32)width, (u32)height, pixels, current, drawn, drawing.element_count())
+
+## Set runs `first..<last`, one anchored chunk, moving `pen` past them.
+func set_chunk(drawing: const svg.Drawing*, first: usize, last: usize, pen: Pen*, cache: FaceCache*, target: const Target*) -> !:
+    let head = drawing.text_run(first)
+    if head.opens:
+        *pen = Pen()
+    if head.has_x:
+        pen.x = head.x
+    if head.has_y:
+        pen.y = head.y
+    # Measure the chunk first when its anchor needs its width.
+    var shift = 0.0
+    if head.anchor != svg.Anchor.start:
+        var extent = 0.0
+        for index in first..<last:
+            let run = drawing.text_run(index)
+            extent += run.dx + try advance(cache, &run, target)
+        shift = extent * (0.5 if head.anchor == svg.Anchor.middle else 1.0)
+    for index in first..<last:
+        let run = drawing.text_run(index)
+        pen.x += run.dx
+        pen.y += run.dy
+        let width = try advance(cache, &run, target)
+        if run.filled and run.opacity > 0.0:
+            try draw_run(cache, &run, pen.x - shift, pen.y, target)
+        pen.x += width
+
+## The full transform of `run`, from its coordinates to output pixels.
+func run_transform(run: const svg.TextRun*, target: const Target*) -> svg.Matrix:
+    let outer = target.place
+    let inner = run.transform
+    return svg.Matrix(a = outer.a * inner.a + outer.c * inner.b, b = outer.b * inner.a + outer.d * inner.b,
+                      c = outer.a * inner.c + outer.c * inner.d, d = outer.b * inner.c + outer.d * inner.d,
+                      e = outer.a * inner.e + outer.c * inner.f + outer.e, f = outer.b * inner.e + outer.d * inner.f + outer.f)
+
+## The size in output pixels `run` is set at: its em size times its transform's scale,
+## within what luce-fonts sets; 0 when too small to see.
+func pixel_size(run: const svg.TextRun*, target: const Target*) -> f64:
+    let m = run_transform(run, target)
+    let size = run.size * math.sqrt(math.abs(m.a * m.d - m.b * m.c))
+    if not (size >= 1.0):
+        return 0.0
+    return math.min(size, 2000.0)
+
+## How far `run` moves the pen, in its own coordinates.
+func advance(cache: FaceCache*, run: const svg.TextRun*, target: const Target*) -> f64!:
+    let size = pixel_size(run, target)
+    if size == 0.0:
+        return 0.0
+    let face = try cache.face(run, size)
+    return try face.measure(run.text) * run.size / size
+
+## Set `run` with its baseline starting at (`x`, `y`) and blend it into the target.
+func draw_run(cache: FaceCache*, run: const svg.TextRun*, x: f64, y: f64, target: const Target*) -> !:
+    let size = pixel_size(run, target)
+    if size == 0.0:
+        return
+    let face = try cache.face(run, size)
+    var laid = try fonts.set_text(face, run.text, fonts.Setting())
+    defer laid.close()
+    # Bitmap pixels to output pixels: unscale to the run's units, put the baseline
+    # origin at the pen, then the run's full transform.
+    let per_pixel = run.size / size
+    let m = run_transform(run, target)
+    let placing = svg.Matrix(a = per_pixel, d = per_pixel, e = x - laid.origin_x * per_pixel, f = y - (laid.origin_y + face.ascent) * per_pixel)
+    let g = svg.Matrix(a = m.a * placing.a, b = m.b * placing.a, c = m.c * placing.d, d = m.d * placing.d,
+                       e = m.a * placing.e + m.c * placing.f + m.e, f = m.b * placing.e + m.d * placing.f + m.f)
+    var color = svg.Color()
+    if run.current:
+        color = target.current
+    else:
+        color = run.color
+    let ink = Ink(r = transfer.srgb_decode(color.r), g = transfer.srgb_decode(color.g), b = transfer.srgb_decode(color.b), opacity = run.opacity)
+    blend_bitmap(&laid.bitmap, g, ink, target)
+
+## A run's linear color and opacity.
+struct Ink:
+    var r: f64
+    var g: f64
+    var b: f64
+    var opacity: f64
+
+## Blend coverage `bitmap`, placed by `g` (bitmap pixels to output pixels), source-over
+## in `ink`. A move and no more copies pixels straight across; anything else samples
+## the coverage bilinearly at each output pixel's centre.
+func blend_bitmap(bitmap: const fonts.Bitmap*, g: svg.Matrix, ink: Ink, target: const Target*):
+    let columns = (usize)bitmap.width
+    let rows = (usize)bitmap.height
+    let straight = math.abs(g.b) < 1e-9 and math.abs(g.c) < 1e-9 and math.abs(g.a - 1.0) < 1e-6 and math.abs(g.d - 1.0) < 1e-6
+    if straight:
+        let left = (i64)math.round(g.e)
+        let top = (i64)math.round(g.f)
+        for row in 0..<rows:
+            for column in 0..<columns:
+                let cover = bitmap.pixels[row * columns + column]
+                if cover > 0:
+                    blend(target, left + (i64)column, top + (i64)row, (f64)cover / 255.0, ink)
+        return
+    let determinant = g.a * g.d - g.b * g.c
+    if math.abs(determinant) < 1e-12:
+        return
+    # The output box the bitmap lands in, and the inverse map back into it.
+    var low_x = math.infinity
+    var low_y = math.infinity
+    var high_x = -math.infinity
+    var high_y = -math.infinity
+    for corner in 0..<4:
+        let p = g.map((f64)columns if corner % 2 == 1 else 0.0, (f64)rows if corner >= 2 else 0.0)
+        low_x = math.min(low_x, p.x)
+        low_y = math.min(low_y, p.y)
+        high_x = math.max(high_x, p.x)
+        high_y = math.max(high_y, p.y)
+    let back = svg.Matrix(a = g.d / determinant, b = -g.b / determinant, c = -g.c / determinant, d = g.a / determinant,
+                          e = (g.c * g.f - g.d * g.e) / determinant, f = (g.b * g.e - g.a * g.f) / determinant)
+    let x0 = (i64)math.max(0.0, math.floor(low_x))
+    let y0 = (i64)math.max(0.0, math.floor(low_y))
+    let x1 = (i64)math.min((f64)target.width, math.ceil(high_x))
+    let y1 = (i64)math.min((f64)target.height, math.ceil(high_y))
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            let at = back.map((f64)x + 0.5, (f64)y + 0.5)
+            let cover = sample(bitmap, at.x - 0.5, at.y - 0.5)
+            if cover > 0.0:
+                blend(target, x, y, cover, ink)
+            x += 1
+        y += 1
+
+## The bitmap's coverage (0..1) at (`x`, `y`), between pixel centres; 0 outside.
+func sample(bitmap: const fonts.Bitmap*, x: f64, y: f64) -> f64:
+    let left = math.floor(x)
+    let top = math.floor(y)
+    let fx = x - left
+    let fy = y - top
+    let a = texel(bitmap, left, top)
+    let b = texel(bitmap, left + 1.0, top)
+    let c = texel(bitmap, left, top + 1.0)
+    let d = texel(bitmap, left + 1.0, top + 1.0)
+    return ((a * (1.0 - fx) + b * fx) * (1.0 - fy) + (c * (1.0 - fx) + d * fx) * fy) / 255.0
+
+func texel(bitmap: const fonts.Bitmap*, x: f64, y: f64) -> f64:
+    if x < 0.0 or y < 0.0 or x >= (f64)bitmap.width or y >= (f64)bitmap.height:
+        return 0.0
+    return (f64)bitmap.pixels[(usize)y * (usize)bitmap.width + (usize)x]
+
+## Blend `ink` at `cover` over output pixel (`x`, `y`), straight alpha, if it is inside.
+func blend(target: const Target*, x: i64, y: i64, cover: f64, ink: Ink):
+    if x < 0 or y < 0 or x >= (i64)target.width or y >= (i64)target.height:
+        return
+    let alpha = math.min(1.0, cover) * ink.opacity
+    let slot = ((usize)y * target.width + (usize)x) * 4
+    let pixels = target.pixels
+    let below = (f64)pixels[slot + 3] * (1.0 - alpha)
+    let total = alpha + below
+    if total <= 0.0:
+        return
+    pixels[slot] = (f32)((ink.r * alpha + (f64)pixels[slot] * below) / total)
+    pixels[slot + 1] = (f32)((ink.g * alpha + (f64)pixels[slot + 1] * below) / total)
+    pixels[slot + 2] = (f32)((ink.b * alpha + (f64)pixels[slot + 2] * below) / total)
+    pixels[slot + 3] = (f32)total

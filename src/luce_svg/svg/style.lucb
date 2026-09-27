@@ -194,12 +194,7 @@ func same_folded(a: str, b: str) -> bool:
 
 ## `color` decoded from sRGB to linear light, channel by channel.
 func to_linear(color: Color) -> Color:
-    return Color(r = linear_channel(color.r), g = linear_channel(color.g), b = linear_channel(color.b))
-
-func linear_channel(value: f64) -> f64:
-    if value <= 0.04045:
-        return value / 12.92
-    return math.pow((value + 0.055) / 1.055, 2.4)
+    return Color(r = transfer.srgb_decode(color.r), g = transfer.srgb_decode(color.g), b = transfer.srgb_decode(color.b))
 
 ## The CSS named colors, sorted, with their 0xRRGGBB values in `color_values`.
 let color_names: str[148] = ["aliceblue", "antiquewhite", "aqua", "aquamarine", "azure", "beige",

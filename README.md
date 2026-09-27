@@ -6,8 +6,9 @@ flattens curves and arcs to polylines, and produces a `Drawing`: a viewBox size
 plus contours over a flat point buffer, in viewBox coordinates. Each contour
 records its element (an element's subpaths fill together by the nonzero rule)
 and its paints: fill and stroke as sRGB colors, currentColor or gradients,
-opacities, and its pen (width, caps, joins, miter limit, dashes). It depends
-only on luce-std.
+opacities, and its pen (width, caps, joins, miter limit, dashes). The parser
+depends on luce-std and luce-color (sRGB decoding); the picture renderer adds
+luce-fonts for text.
 
 ## Paints and colors
 
@@ -40,10 +41,23 @@ that `currentColor` means. Element by element in document order, the fill and
 then the stroke composite source-over, with the same exact-area anti-aliasing
 as the coverage rasteriser.
 
+## SVG files as pictures
+
+`svg_render` (module `render`) is what an image editor opening an SVG wants:
+`is_svg(path)` and `render_svg(path, max_bytes, max_pixels) -> Rendered`, the
+file drawn in color at its own size, scaled up until its longer side is at least
+1024 pixels, in linear light with straight alpha (`Rendered.pixels`, 4 floats a
+pixel in the heap; free them there), `currentColor` black. Its `<text>` is set
+with the system's fonts through luce-fonts, in paint order among the shapes
+(`text.lucb`, with faces chosen in `faces.lucb`): a run's family list is tried in
+order, generic families stand for each platform's usual faces, and the style
+nearest its weight and slant is taken; a run whose font cannot be set is left
+out. This moved here from luce-image (2026-09-27).
+
 ## Text
 
-luce-svg has no fonts, so it does not draw `<text>`; it reads it into runs for a
-caller that has them (luce-image sets them with luce-fonts). `text_count()` and
+The parser reads `<text>` into runs; `svg_render` sets them, and a caller with
+its own fonts can too. `text_count()` and
 `text_run(index) -> TextRun` give each run of one style — the `<text>` itself or
 a `<tspan>` — with its characters (entities decoded, white space collapsed as
 browsers collapse it), the first value of `x`, `y`, `dx` and `dy`, whether it
@@ -62,7 +76,7 @@ onto the bitmap as the rasterisers place it.
 
 ## Limits
 
-- Text is read, not drawn (see above); only the first value of `x`, `y`, `dx`
+- The parser only reads text (see above); only the first value of `x`, `y`, `dx`
   and `dy` is used, and `rotate`, `textLength`, `textPath`, stroked text,
   `dominant-baseline` and vertical writing are not read.
 - Every `spreadMethod` pads (reflect and repeat draw as pad).

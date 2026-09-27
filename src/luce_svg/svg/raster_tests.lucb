@@ -157,7 +157,7 @@ test "a linear gradient spans the shape's box and blends in sRGB before decoding
     try rasterize_rgba(drawing.value(), 10, 1, pixels, Color())
     for x in 0..<(usize)10:
         let entry = math.round(((f64)x + 0.5) / 10.0 * 255.0)
-        let expected = linear_channel(entry / 255.0)
+        let expected = transfer.srgb_decode(entry / 255.0)
         let got = pixel_at(pixels, 10, x, 0)
         assert(near(got[0], expected, 1e-6) and got[0] == got[2] and near(got[3], 1.0, 1e-6))
 
@@ -171,7 +171,7 @@ test "a gradient inherits stops by href, in user space with its transform and st
     assert(near(left[0], 1.0, 1e-6) and left[2] == 0.0 and near(left[3], 1.0, 1e-6))
     let mix = 230.0 / 255.0
     let right = pixel_at(pixels, 10, 9, 0)
-    assert(near(right[0], linear_channel(1.0 - mix), 1e-6) and near(right[2], linear_channel(mix), 1e-6) and near(right[3], 1.0 - 0.5 * mix, 1e-5))
+    assert(near(right[0], transfer.srgb_decode(1.0 - mix), 1e-6) and near(right[2], transfer.srgb_decode(mix), 1e-6) and near(right[3], 1.0 - 0.5 * mix, 1e-5))
 
 test "a radial gradient stretches over its box and honours its focal point":
     let stops = "<stop offset=\"0\" stop-color=\"white\"/><stop offset=\"1\" stop-color=\"black\"/>"
@@ -182,7 +182,7 @@ test "a radial gradient stretches over its box and honours its focal point":
     try rasterize_rgba(wide.value(), 20, 10, pixels, Color())
     # Pixel (19, 4) is 0.95 across and 0.1 up the ellipse: t = √(0.95² + 0.1²).
     let t = math.sqrt(0.95 * 0.95 + 0.1 * 0.1)
-    assert(near(pixel_at(pixels, 20, 19, 4)[0], linear_channel(1.0 - math.round(t * 255.0) / 255.0), 1e-6))
+    assert(near(pixel_at(pixels, 20, 19, 4)[0], transfer.srgb_decode(1.0 - math.round(t * 255.0) / 255.0), 1e-6))
     assert(pixel_at(pixels, 20, 0, 0)[0] == 0.0 and near(pixel_at(pixels, 20, 0, 0)[3], 1.0, 1e-6))
     let focal = try parse(try format(buffer, f"<svg viewBox=\"0 0 10 10\"><radialGradient id=\"r\" fx=\"0.1\">{stops}</radialGradient><rect width=\"10\" height=\"10\" fill=\"url(#r)\"/></svg>"))
     defer focal.release()
