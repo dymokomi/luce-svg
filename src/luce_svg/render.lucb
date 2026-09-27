@@ -108,7 +108,8 @@ test "SVG text is set in its color where it stands, in paint order":
     # capitals about 21 units tall, four of them about 80 units wide.
     let red = ink_of(&rendered, 1.0, 0.0, 0.0)
     assert(red.count > 5000)
-    assert(red.left >= 100 and red.left <= 115 and red.bottom >= 200 and red.bottom <= 208)
+    # The H's left side bearing differs by face: Helvetica starts at 115, DejaVu Sans at 118.
+    assert(red.left >= 100 and red.left <= 125 and red.bottom >= 200 and red.bottom <= 208)
     assert(red.top >= 80 and red.top <= 110 and red.right >= 450 and red.right <= 560)
     # The bar painted after the text covers it.
     for y in 110..<200:
