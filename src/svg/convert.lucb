@@ -25,6 +25,8 @@ pub struct Options:
     pub var default_height: f64 = 100.0
     ## The user's languages for `systemLanguage`, comma separated.
     pub var languages: str = "en"
+    ## The directory relative image references resolve against; "" loads no files.
+    pub var resources: str = ""
 
 ## What the conversion of one element knows about where it stands.
 struct State:
@@ -296,6 +298,20 @@ func rect_in_bbox(rect: Rect, box: Rect) -> Rect:
 # mark: Conversion ============================================================================
 
 ## Convert `tree` into a picture with `options`.
+## Convert SVG `source`, an image inside a document, into `picture` as a detached group;
+## answer it with the image's size, or none when it does not parse or show.
+func convert_nested(source: str, options: Options, picture: Picture*) -> (u32, Rect)?!:
+    var tree = Tree()
+    defer tree.release()
+    build_tree(source, &tree) catch _:
+        return none
+    let servers = try new u32[tree.nodes.used] in memory.heap
+    var converter = Converter(tree = &tree, picture = picture, options = options, servers = servers)
+    defer converter.release()
+    let (size, view) = converter.document_size(tree.root_element())
+    let group = (try converter.document_group(size, view)) else return none
+    return (group, size)
+
 func convert_tree(tree: const Tree*, options: Options, picture: Picture*) -> !:
     let servers = try new u32[tree.nodes.used] in memory.heap
     var converter = Converter(tree = tree, picture = picture, options = options, servers = servers)
@@ -310,14 +326,21 @@ extend Converter:
         let (size, view) = self.document_size(svg)
         self.picture.width = size.w
         self.picture.height = size.h
+        if let group = try self.document_group(size, view):
+            self.picture.attach(0, group)
+
+    ## The root `svg` drawn at `size` with `view`: a detached group, or none when it is
+    ## not displayed.
+    mutating func document_group(size: Rect, view: Rect) -> u32?!:
+        let svg = self.tree.root_element()
         if not self.visible_element(svg):
-            return
+            return none
         var aspect = AspectRatio()
         if let text = self.attribute(svg, Attr.preserve_aspect_ratio):
             aspect = parse_aspect_ratio(text) else AspectRatio()
         let root_transform = view_box_transform(view, aspect, size.w, size.h)
         let state = State(view_box = view)
-        let group = try self.picture.append(0, Item(transform = root_transform))
+        let group = try self.picture.add_item(Item(transform = root_transform))
         # resvg's non-standard background-color on the root fills the viewBox first.
         if let text = self.attribute(svg, Attr.background_color):
             if let color = parse_rgba(text):
@@ -329,6 +352,7 @@ extend Converter:
                 let fill = FillPaint(brush = Brush(color = color.rgb(), opacity = color.a))
                 discard(try self.picture.append(group, Item(kind = ItemKind.shape, path = index, fill = fill)))
         try self.element(svg, &state, group)
+        return group
 
     ## The document's size and viewBox: width and height (100% of the viewBox, or of the
     ## default size without one), the missing one following the viewBox's aspect.
@@ -483,8 +507,11 @@ extend Converter:
             .image:
                 return item.view
             .group:
-                let inner = self.object_bounds(index) else return none
-                return transform_rect(inner, item.transform)
+                var inner = item.box
+                if inner == none:
+                    inner = self.object_bounds(index)
+                let found = inner else return none
+                return transform_rect(found, item.transform)
 
 ## Whether a tag is drawn by itself (or, for `use`, by what it references).
 func is_graphic(tag: Tag) -> bool:

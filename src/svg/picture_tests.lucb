@@ -176,3 +176,14 @@ test "markers sit on a path's vertices, turned along it, painted with context-fi
     assert(rgba_at(pixels, 40, 4, 8)[2] == 255 and rgba_at(pixels, 40, 34, 8)[2] == 255)
     assert(rgba_at(pixels, 40, 4, 11)[3] == 0 and rgba_at(pixels, 40, 20, 8)[3] == 0)
     assert(paint_order("markers stroke")[1] == 1 and paint_order("stroke stroke")[0] == 0 and paint_order("fill x")[0] == 0)
+
+test "images draw PNG data URLs pixelated or smooth, and SVG images as vectors":
+    let source = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\"><image width=\"20\" height=\"10\" image-rendering=\"pixelated\" href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8AAQv8BD/kD/YURmXYAAAAASUVORK5CYII=\"/><image x=\"20\" width=\"20\" height=\"20\" href=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0IiBoZWlnaHQ9IjQiPjxyZWN0IHdpZHRoPSI0IiBoZWlnaHQ9IjQiIGZpbGw9ImxpbWUiLz48L3N2Zz4=\"/></svg>"
+    let pixels = try draw_test(source, 40, 20)
+    defer free(pixels) in memory.heap
+    # The 2 by 1 PNG fills 20 by 10: red on the left half, blue on the right.
+    assert(rgba_at(pixels, 40, 3, 5)[0] == 255 and rgba_at(pixels, 40, 16, 5)[2] == 255 and rgba_at(pixels, 40, 5, 15)[3] == 0)
+    assert(rgba_at(pixels, 40, 30, 10)[1] == 255 and rgba_at(pixels, 40, 30, 10)[3] == 255)
+    var bytes = List[u8]()
+    defer bytes.release()
+    assert((try decode_base64("aGVs bG8=".bytes, &bytes)) and (str)bytes.view() == "hello")

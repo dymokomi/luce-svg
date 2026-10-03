@@ -40,7 +40,9 @@ func render_one(path: str, outdir: str, index: usize, drawing: bool) -> !:
     defer strings.release(input)
     let data = try files.read((c.str)input)
     defer free(data)
-    let drawn = (try draw_flattened((str)data)) if drawing else (try draw_full((str)data))
+    # Image files resolve against the test's own directory, as resvg's suite has them.
+    let slash = strings.find_last(path, "/") else 0
+    let drawn = (try draw_flattened((str)data)) if drawing else (try draw_full((str)data, (str)path.bytes[..<slash]))
     let size = drawn.size
     let bytes = drawn.bytes
     defer free(bytes) in memory.heap
@@ -63,8 +65,8 @@ struct Drawn:
     var size: (u32, u32)
     var bytes: u8[]
 
-func draw_full(source: str) -> Drawn!:
-    let picture = try svg.load(source)
+func draw_full(source: str, directory: str) -> Drawn!:
+    let picture = try svg.load(source, svg.Options(resources = directory))
     defer picture.release()
     let size = fitted(picture.value().width_px(), picture.value().height_px())
     let bytes = try alloc u8[(usize)size.0 * (usize)size.1 * 4] in memory.heap

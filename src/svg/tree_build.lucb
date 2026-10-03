@@ -44,6 +44,7 @@ func build_tree(source: str, tree: Tree*) -> !:
             if let id = tree.attribute((u32)index, Attr.id):
                 try tree.ids.push(IdEntry(id = id, node = (u32)index))
     try sort_ids(&tree.ids, false)
+    try break_cycles(tree)
 
 ## Read every `<style>` element (of type text/css, or untyped) into the tree's sheet.
 func collect_sheets(tree: Tree*) -> !:
@@ -319,3 +320,79 @@ func append_node(tree: Tree*, parent: u32, node: Node) -> u32!:
         tree.nodes.items[parent].first = index
     tree.nodes.items[parent].last = index
     return index
+
+# mark: Reference cycles ======================================================================
+
+## Break the reference cycles a document can make, as resvg does, by setting the
+## attribute that closes each to `none`: a pattern's content painting with the pattern,
+## and clip paths, masks and filters that apply themselves, directly or through what
+## they reference.
+func break_cycles(tree: Tree*) -> !:
+    for _ in 0..<1024:
+        let found = (try find_cycle(tree)) else return
+        set_none(tree, found.0, found.1)
+
+## Set attribute `name` of `node` to `none`.
+func set_none(tree: Tree*, node: u32, name: Attr):
+    let item = tree.nodes.items[node]
+    for at in item.attr_start..<item.attr_end:
+        if tree.attrs.items[at].name == name:
+            tree.attrs.items[at].value = "none"
+
+## The first (element, attribute) that closes a cycle, if any.
+func find_cycle(tree: const Tree*) -> (u32, Attr)?!:
+    let pairs: Tag[3] = [Tag.clip_path, Tag.mask, Tag.filter]
+    let names: Attr[3] = [Attr.clip_path, Attr.mask, Attr.filter]
+    var below = List[u32]()
+    defer below.release()
+    var inner = List[u32]()
+    defer inner.release()
+    for index in 1..<tree.nodes.used:
+        let node = (u32)index
+        if tree.nodes.items[node].kind != Kind.element:
+            continue
+        let tag = tree.tag(node)
+        for kind in 0..<pairs.length:
+            if tag != pairs[kind]:
+                continue
+            let name = names[kind]
+            below.used = 0
+            try descendants(tree, node, &below)
+            for child in below.view():
+                let target = tree.linked(child, name) else continue
+                if target == node:
+                    return (child, name)
+                inner.used = 0
+                try descendants(tree, target, &inner)
+                for deeper in inner.view():
+                    if tree.linked(deeper, name) == node:
+                        return (deeper, name)
+        if tag == Tag.pattern:
+            let id = tree.element_id(node)
+            if id.length == 0:
+                continue
+            for paint_name in [Attr.fill, Attr.stroke]:
+                below.used = 0
+                try descendants(tree, node, &below)
+                for child in below.view():
+                    let value = tree.attribute(child, paint_name) else continue
+                    let link = func_iri(value) else continue
+                    if link == id:
+                        return (child, paint_name)
+                    let target = tree.element_by_id(link) else continue
+                    inner.used = 0
+                    try descendants(tree, target, &inner)
+                    for deeper in inner.view():
+                        let other = tree.attribute(deeper, paint_name) else continue
+                        if (func_iri(other) else "") == id:
+                            return (deeper, paint_name)
+    return none
+
+## `node` and every element below it, in document order.
+func descendants(tree: const Tree*, node: u32, out: List[u32]*) -> !:
+    try out.push(node)
+    var child = tree.nodes.items[node].first
+    while child != 0:
+        if tree.nodes.items[child].kind == Kind.element:
+            try descendants(tree, child, out)
+        child = tree.nodes.items[child].next

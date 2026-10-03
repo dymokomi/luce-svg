@@ -8,7 +8,8 @@ records its element (an element's subpaths fill together by the nonzero rule)
 and its paints: fill and stroke as sRGB colors, currentColor or gradients,
 opacities, and its pen (width, caps, joins, miter limit, dashes). The parser
 depends on luce-std and luce-color (sRGB decoding); the picture renderer adds
-luce-fonts for text.
+luce-fonts for text, and the full renderer luce-png, luce-jpeg and luce-compress for
+images.
 
 ## The full renderer
 
@@ -51,6 +52,12 @@ the bitmap). It is built in four stages, each its own set of fragments:
   inheritance, both unit systems, viewBox and patternTransform) are drawn as a tile at
   the device's scale and repeated, sampled bicubically unless the tile lands on the
   pixel grid, as resvg samples them.
+- **Images**: `<image>` from data URLs (base64 or percent-encoded, the format from the
+  MIME type or sniffed) or from files relative to `Options.resources` (never from inside
+  an image that is itself an SVG); PNG and JPEG decode through luce-png and luce-jpeg,
+  SVG and gzip-compressed SVGZ images convert into the picture as vector groups. Fitted
+  by preserveAspectRatio (clipped when slicing), sampled as image-rendering asks. GIF
+  and WebP are recognised but not decoded.
 
 **Compositing is in sRGB**, as browsers and resvg composite: colors blend as their
 encoded values, so half-transparent black over white is 50 % grey. This is the default
@@ -163,16 +170,18 @@ their analytic areas to 0.05 %. Needs `brew install resvg` and
 
 ## resvg's test suite
 
-`tools/suite.py` measures the renderer against resvg's 1719 feature tests
+`tools/suite.py` measures the full renderer against resvg's 1719 integration tests
 (`crates/resvg/tests/tests` of https://github.com/linebender/resvg, cloned into
 `../.donors/resvg`; the suite is never committed here). `tools/suite.lucb` draws
 each test 300 pixels wide, as resvg drew its reference PNGs; a pixel differs when a
-premultiplied RGBA8 channel is off by more than 32, and a test passes when at most
-0.5 % of its pixels differ, which absorbs anti-aliasing differences but not a missing
-or misplaced feature. It prints a pass table per feature directory and category;
-`--save run.json` and `--compare run.json` track changes between runs,
-`--list-failing` names the failures, and `--only painting/fill` runs a subset.
+premultiplied RGBA8 channel is off by more than 40, and a test passes when at most
+0.5 % of its pixels differ. That absorbs anti-aliasing differences (tiny-skia samples
+four sub-scanlines a pixel, so its edge coverage is off the exact area by up to an
+eighth) but not a missing or misplaced feature. It prints a pass table per feature
+directory and category; `--save run.json` and `--compare run.json` track changes
+between runs, `--list-failing` names the failures, `--only painting/fill` runs a
+subset and `--drawing` measures the Drawing renderer.
 
-Baseline (2026-10-03, the `Drawing` renderer in linear light): 458 of 1719 —
-filters 75/397, masking 8/93, paint-servers 97/153, painting 116/306, shapes 90/133,
-structure 54/258, text 18/379.
+Baseline (2026-10-03, the Drawing renderer before this work, in linear light): 472 of
+1719 — filters 77/397, masking 8/93, paint-servers 99/153, painting 117/306, shapes
+91/133, structure 62/258, text 18/379.

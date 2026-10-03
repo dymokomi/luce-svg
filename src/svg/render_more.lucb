@@ -5,8 +5,34 @@
 #==============================================================================================
 
 extend Renderer:
+    ## An image: its raster's rectangle filled with the raster, edges padded.
     mutating func image(item: const Item*, transform: Matrix, canvas: Canvas*) -> !:
-        return
+        if not item.visible:
+            return
+        let raster = self.picture.rasters.items[item.raster]
+        var tile = try Canvas.make(0, 0, raster.width, raster.height)
+        defer tile.release()
+        for index in 0..<raster.width * raster.height:
+            let at = index * 4
+            let alpha = (f64)raster.pixels[at + 3] / 255.0
+            for channel in 0..<(usize)3:
+                var value = (f64)raster.pixels[at + channel] / 255.0
+                if self.linear:
+                    value = transfer.srgb_decode(value)
+                tile.pixels[at + channel] = (f32)(value * alpha)
+            tile.pixels[at + 3] = (f32)alpha
+        let inverse = invert(transform) else return
+        var area = Path()
+        defer area.release()
+        try area.rect(0.0, 0.0, (f64)raster.width, (f64)raster.height)
+        self.lines.clear()
+        try flatten(&area, transform, 1.0, &self.lines)
+        self.cover.outline(&self.lines)
+        if not self.cover.resolve(false, false):
+            return
+        let nearest = item.pixelated or (math.abs(transform.a - 1.0) < 1e-6 and math.abs(transform.b) < 1e-6 and math.abs(transform.c) < 1e-6 and math.abs(transform.d - 1.0) < 1e-6)
+        let shader = Shader(kind = BrushKind.pattern, linear = self.linear, inverse = inverse, tile = &tile, nearest = nearest, pad = true)
+        paint_coverage(canvas, &self.cover, &shader)
 
     mutating func apply_filters(item: const Item*, transform: Matrix, layer: Canvas*) -> !:
         return

@@ -5,9 +5,6 @@
 #==============================================================================================
 
 extend Converter:
-    mutating func image_element(node: u32, state: const State*, parent: u32) -> !:
-        return
-
     mutating func text_element(node: u32, state: const State*, parent: u32) -> !:
         return
 

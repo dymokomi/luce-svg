@@ -1,0 +1,271 @@
+#==============================================================================================
+#
+#   svg/images - The `image` element: data URLs, files, rasters and nested SVG
+#
+#   DESCRIPTION:
+#       An image's `href` is a data URL (base64 or percent-encoded, its MIME type naming
+#       the format, or sniffed from the bytes when it names none) or a file path,
+#       resolved against Options.resources when that is set (never inside an image
+#       that is itself an SVG). PNG and JPEG decode through luce-png and luce-jpeg into
+#       the picture's rasters; an SVG (or gzip-compressed SVGZ) image is converted into
+#       the same picture as a group of its own. GIF and WebP are recognised but not
+#       decoded. The image is fitted into its x, y, width and height (a missing width
+#       or height follows the image's aspect) by preserveAspectRatio, clipped to the
+#       box when it slices, and drawn with image-rendering's sampling.
+#
+#==============================================================================================
+
+from luce_std import files
+import c as c_api
+from luce_png import png
+from luce_jpeg import jpeg
+from luce_compress import flate
+
+## What an image's bytes hold.
+enum ImageFormat:
+    png_image
+    jpeg_image
+    svg_image
+    other
+
+extend Converter:
+    ## An `image` element into `parent`.
+    mutating func image_element(node: u32, state: const State*, parent: u32) -> !:
+        let href = strings.trim(self.attribute(node, Attr.href) else "")
+        if href.length == 0:
+            return
+        var bytes = List[u8]()
+        defer bytes.release()
+        var kind = ImageFormat.other
+        if strings.starts_with(href, "data:"):
+            kind = try data_url(href, &bytes)
+        else:
+            kind = try self.image_file(href, &bytes)
+        if kind == ImageFormat.other or bytes.used == 0:
+            return
+        if kind == ImageFormat.svg_image:
+            try self.svg_image(node, bytes.view(), state, parent)
+            return
+        let raster = (try decode_raster(bytes.view(), kind)) else return
+        let index = self.picture.rasters.used
+        try self.picture.rasters.push(raster)
+        let size = Rect(w = (f64)raster.width, h = (f64)raster.height)
+        let content = try self.picture.add_item(Item())
+        let rendering = strings.trim(self.find(node, Attr.image_rendering) else "auto")
+        let visible = (self.find(node, Attr.visibility) else "visible") == "visible"
+        discard(try self.picture.append(content, Item(kind = ItemKind.image, raster = index, view = size, visible = visible,
+                                                      pixelated = image_quality(rendering))))
+        try self.place_image(node, content, size, state, parent)
+
+    ## Read `href`, a path relative to the resources directory, into `bytes`.
+    mutating func image_file(href: str, bytes: List[u8]*) -> ImageFormat!:
+        if self.options.resources.length == 0:
+            return ImageFormat.other
+        var name: u8[4096]
+        let path = format(name, f"{self.options.resources}/{href}") catch _:
+            recover ""
+        if path.length == 0:
+            return ImageFormat.other
+        let data = files.read_limit((c_api.str)path, 268435456) catch _:
+            return ImageFormat.other
+        defer free(data)
+        for byte in data:
+            try bytes.push(byte)
+        if strings.ends_with(href, ".svg") or strings.ends_with(href, ".svgz"):
+            return ImageFormat.svg_image
+        let sniffed = sniff(data)
+        return sniffed
+
+    ## An SVG image: converted into the picture as a group, fitted like a raster.
+    mutating func svg_image(node: u32, data: const u8[], state: const State*, parent: u32) -> !:
+        var plain = List[u8]()
+        defer plain.release()
+        var text = data
+        if data.length > 2 and data[0] == 0x1F and data[1] == 0x8B:
+            if not try gunzip(data, &plain):
+                return
+            text = plain.view()
+        var options = self.options
+        options.resources = ""
+        let nested = (try convert_nested((str)text, options, self.picture)) else return
+        let size = Rect(w = nested.1.w, h = nested.1.h)
+        let content = try self.picture.add_item(Item())
+        self.picture.attach(content, nested.0)
+        try self.place_image(node, content, size, state, parent)
+
+    ## Fit `content` (an image `size` in its own pixels) into the element's box.
+    mutating func place_image(node: u32, content: u32, size: Rect, state: const State*, parent: u32) -> !:
+        let zero = Length()
+        let x = self.user_length(node, Attr.x, state, zero)
+        let y = self.user_length(node, Attr.y, state, zero)
+        var width = self.user_length(node, Attr.width, state, Length(number = size.w))
+        var height = self.user_length(node, Attr.height, state, Length(number = size.h))
+        let has_width = parse_length(self.attribute(node, Attr.width) else "") != none
+        let has_height = parse_length(self.attribute(node, Attr.height) else "") != none
+        if has_width and not has_height:
+            height = size.h * width / size.w
+        elif has_height and not has_width:
+            width = size.w * height / size.h
+        if not (width > 0.0) or not (height > 0.0) or not (size.w > 0.0) or not (size.h > 0.0):
+            return
+        var aspect = AspectRatio()
+        if let text = self.attribute(node, Attr.preserve_aspect_ratio):
+            aspect = parse_aspect_ratio(text) else AspectRatio()
+        let fit = view_box_transform(size, aspect, width, height)
+        self.picture.items.items[content].transform = multiply(Matrix(e = x, f = y), fit)
+        if aspect.slice and not aspect.stretch:
+            let clip = try self.rect_clip(Rect(x = x, y = y, w = width, h = height))
+            let outer = try self.picture.append(parent, Item(clip = clip, box = Rect(x = x, y = y, w = width, h = height)))
+            self.picture.attach(outer, content)
+        else:
+            self.picture.attach(parent, content)
+
+## Whether image-rendering asks for nearest-neighbour sampling.
+func image_quality(rendering: str) -> bool:
+    return rendering == "optimizeSpeed" or rendering == "crisp-edges" or rendering == "pixelated"
+
+## The format a file's first bytes announce.
+func sniff(data: const u8[]) -> ImageFormat:
+    if data.length >= 8 and data[0] == 0x89 and data[1] == 'P' and data[2] == 'N' and data[3] == 'G':
+        return ImageFormat.png_image
+    if data.length >= 3 and data[0] == 0xFF and data[1] == 0xD8 and data[2] == 0xFF:
+        return ImageFormat.jpeg_image
+    if data.length >= 6 and data[0] == 'G' and data[1] == 'I' and data[2] == 'F':
+        return ImageFormat.other
+    if data.length >= 12 and data[0] == 'R' and data[1] == 'I' and data[2] == 'F' and data[3] == 'F' and data[8] == 'W':
+        return ImageFormat.other
+    return ImageFormat.svg_image
+
+## Decode the data URL `href` into `bytes`; answer what it holds.
+func data_url(href: str, bytes: List[u8]*) -> ImageFormat!:
+    let comma = strings.find(href, ",") else return ImageFormat.other
+    let header = (str)href.bytes[5..<comma]
+    let body = href.bytes[comma + 1..]
+    var mime = header
+    var base64 = false
+    if let semicolon = strings.find(header, ";"):
+        mime = (str)header.bytes[..<semicolon]
+        base64 = strings.ends_with(header, ";base64")
+    mime = strings.trim(mime)
+    if base64:
+        if not try decode_base64(body, bytes):
+            return ImageFormat.other
+    else:
+        try percent_decode(body, bytes)
+    if mime == "image/png":
+        return ImageFormat.png_image
+    if mime == "image/jpeg" or mime == "image/jpg":
+        return ImageFormat.jpeg_image
+    if mime == "image/svg+xml":
+        return ImageFormat.svg_image
+    if mime == "" or mime == "text/plain":
+        return sniff(bytes.view())
+    return ImageFormat.other
+
+## Base64 into `out`, white space skipped; false on any other stray character.
+func decode_base64(text: const u8[], out: List[u8]*) -> bool!:
+    var buffer: u32 = 0
+    var bits: u32 = 0
+    for byte in text:
+        var value: u32 = 0
+        if byte >= 'A' and byte <= 'Z':
+            value = (u32)(byte - 'A')
+        elif byte >= 'a' and byte <= 'z':
+            value = (u32)(byte - 'a') + 26
+        elif byte >= '0' and byte <= '9':
+            value = (u32)(byte - '0') + 52
+        elif byte == '+' or byte == '-':
+            value = 62
+        elif byte == '/' or byte == '_':
+            value = 63
+        elif byte == '=':
+            break
+        elif is_space(byte):
+            continue
+        else:
+            return false
+        buffer = (buffer << 6) | value
+        bits += 6
+        if bits >= 8:
+            bits -= 8
+            try out.push((u8)((buffer >> bits) & 0xFF))
+            buffer &= (1 << bits) - 1
+    return true
+
+## Percent-decoding into `out`.
+func percent_decode(text: const u8[], out: List[u8]*) -> !:
+    var index: usize = 0
+    while index < text.length:
+        let byte = text[index]
+        if byte == '%' and index + 2 < text.length:
+            if let high = hex_digit(text[index + 1]):
+                if let low = hex_digit(text[index + 2]):
+                    try out.push((u8)(high * 16 + low))
+                    index += 3
+                    continue
+        try out.push(byte)
+        index += 1
+
+## A gzip stream inflated into `out`; false when it is not one.
+func gunzip(data: const u8[], out: List[u8]*) -> bool!:
+    if data.length < 18 or data[2] != 8:
+        return false
+    let flags = data[3]
+    var at: usize = 10
+    if (flags & 4) != 0:
+        at += 2 + (usize)data[at] + ((usize)data[at + 1] << 8)
+    if (flags & 8) != 0:
+        while at < data.length and data[at] != 0:
+            at += 1
+        at += 1
+    if (flags & 16) != 0:
+        while at < data.length and data[at] != 0:
+            at += 1
+        at += 1
+    if (flags & 2) != 0:
+        at += 2
+    if at >= data.length - 8:
+        return false
+    let size = (usize)data[data.length - 4] | ((usize)data[data.length - 3] << 8) | ((usize)data[data.length - 2] << 16) | ((usize)data[data.length - 1] << 24)
+    if size == 0 or size > 268435456:
+        return false
+    let output = try alloc u8[size] in memory.heap
+    defer free(output) in memory.heap
+    let used = flate.inflate_raw(data[at..<data.length - 8], output) catch _:
+        return false
+    discard(used)
+    for byte in output:
+        try out.push(byte)
+    return true
+
+## A PNG or JPEG decoded to straight RGBA bytes, or none when it does not decode.
+func decode_raster(data: const u8[], kind: ImageFormat) -> Raster?!:
+    var width: usize = 0
+    var height: usize = 0
+    if kind == ImageFormat.png_image:
+        let found = png.info(data) catch _:
+            return none
+        width = found.width
+        height = found.height
+    else:
+        let found = jpeg.info(data) catch _:
+            return none
+        width = found.width
+        height = found.height
+    if width == 0 or height == 0 or width * height > 67108864:
+        return none
+    let pixels = try alloc u8[width * height * 4] in memory.heap
+    errdefer free(pixels) in memory.heap
+    var decoded = true
+    if kind == ImageFormat.png_image:
+        png.decode_rgba8(data, pixels, png.DecodeOptions(threads = 1)) catch _:
+            decoded = false
+            recover ()
+    else:
+        jpeg.decode_rgba8(data, pixels, jpeg.Options(threads = 1)) catch _:
+            decoded = false
+            recover ()
+    if not decoded:
+        free(pixels) in memory.heap
+        return none
+    return Raster(width = width, height = height, pixels = pixels)

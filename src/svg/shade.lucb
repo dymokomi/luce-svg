@@ -30,6 +30,8 @@ struct Shader:
     ## device by a translation alone (as Skia does), else bicubically.
     var tile: const Canvas*? = none
     var nearest: bool = false
+    ## An image's edge pixels extend past it (pad) rather than the tile repeating.
+    var pad: bool = false
 
 ## Decode an encoded sRGB channel to linear light.
 func decode_channel(value: f64) -> f64:
@@ -130,14 +132,14 @@ func shader_color(shader: const Shader*, x: f64, y: f64, cover: f64) -> f32[4]:
             let tile = shader.tile else return [0.0, 0.0, 0.0, 0.0]
             let p = apply(shader.inverse, x, y)
             if shader.nearest:
-                let at = (wrap_index(p.y, tile.height) * tile.width + wrap_index(p.x, tile.width)) * 4
+                let at = (tile_index(p.y, tile.height, shader.pad) * tile.width + tile_index(p.x, tile.width, shader.pad)) * 4
                 let k = (f32)(shader.opacity * cover)
                 return [tile.pixels[at] * k, tile.pixels[at + 1] * k, tile.pixels[at + 2] * k, tile.pixels[at + 3] * k]
-            return sample_tile(tile, p, shader.opacity * cover)
+            return sample_tile(tile, p, shader.opacity * cover, shader.pad)
 
 ## The tile's color at pattern-space point `p` (tile pixels), the tile repeating in both
 ## directions, filtered bicubically as resvg samples patterns, scaled by `alpha`.
-func sample_tile(tile: const Canvas*, p: Point, alpha: f64) -> f32[4]:
+func sample_tile(tile: const Canvas*, p: Point, alpha: f64, padded: bool) -> f32[4]:
     if tile.width == 0 or tile.height == 0:
         return [0.0, 0.0, 0.0, 0.0]
     let fx = p.x + 0.5 - math.floor(p.x + 0.5)
@@ -146,9 +148,9 @@ func sample_tile(tile: const Canvas*, p: Point, alpha: f64) -> f32[4]:
     let wy: f64[4] = [cubic_far(1.0 - fy), cubic_near(1.0 - fy), cubic_near(fy), cubic_far(fy)]
     var sum: f64[4] = [0.0, 0.0, 0.0, 0.0]
     for j in 0..<(usize)4:
-        let row = wrap_index(p.y - 1.5 + (f64)j, tile.height)
+        let row = tile_index(p.y - 1.5 + (f64)j, tile.height, padded)
         for i in 0..<(usize)4:
-            let column = wrap_index(p.x - 1.5 + (f64)i, tile.width)
+            let column = tile_index(p.x - 1.5 + (f64)i, tile.width, padded)
             let weight = wx[i] * wy[j]
             let at = (row * tile.width + column) * 4
             for channel in 0..<(usize)4:
@@ -160,9 +162,11 @@ func sample_tile(tile: const Canvas*, p: Point, alpha: f64) -> f32[4]:
     out[3] = (f32)(a * alpha)
     return out
 
-## The pixel index `x` falls in, repeating over `size`.
-func wrap_index(x: f64, size: usize) -> usize:
+## The pixel index `x` falls in: clamped to 0..<`size` when `padded`, else repeating.
+func tile_index(x: f64, size: usize, padded: bool) -> usize:
     let n = (f64)size
+    if padded:
+        return (usize)math.clamp(math.floor(x), 0.0, n - 1.0)
     let wrapped = x - math.floor(x / n) * n
     let index = (usize)wrapped
     return index if index < size else size - 1

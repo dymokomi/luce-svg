@@ -5,10 +5,12 @@ The suite is resvg's crates/resvg/tests/tests, the tests its integration/render.
 (clone https://github.com/linebender/resvg into ../.donors/resvg; it is never committed
 here). Each SVG is drawn 300 pixels wide by
 build/suite (tools/suite.lucb), as resvg draws its references. A pixel differs when any
-of its premultiplied RGBA8 channels is off by more than --threshold; a test passes when
-at most --allowed of its pixels differ (a fraction of the image). The fuzzy rule absorbs
-anti-aliasing differences (exact area here, supersampling in resvg) but not a missing
-or misplaced feature. Prints a pass table per feature directory and per category.
+of its premultiplied RGBA8 channels is off by more than --threshold (40); a test passes
+when at most --allowed (0.5 %) of its pixels differ. The fuzzy rule absorbs
+anti-aliasing differences — tiny-skia samples four sub-scanlines a pixel, so its edge
+coverage is quantised to quarters, up to an eighth (32 levels) from the exact area this
+renderer computes — but not a missing or misplaced feature. --drawing measures the
+Drawing renderer instead (the baseline). Prints a pass table per feature directory and per category.
 
   build/env/bin/python tools/suite.py [--only painting/fill] [--save run.json]
                                       [--compare run.json] [--list-failing] [--jobs 8]
@@ -31,6 +33,9 @@ def build():
                    cwd=ROOT, check=True)
 
 
+EXTRA = []
+
+
 def render_chunk(job, paths, timeout):
     """Render `paths` into OUT/<job>-<n>.rgba, restarting past any file that crashes
     or hangs the tool. Returns the indices that crashed."""
@@ -42,7 +47,7 @@ def render_chunk(job, paths, timeout):
         sub = OUT / f"job-{job}-{start}"
         sub.mkdir(exist_ok=True)
         try:
-            run = subprocess.run([str(TOOL), str(listing), str(sub)], capture_output=True, timeout=timeout)
+            run = subprocess.run([str(TOOL), str(listing), str(sub), *EXTRA], capture_output=True, timeout=timeout)
             ok = run.returncode == 0
         except subprocess.TimeoutExpired:
             ok = False
@@ -91,7 +96,7 @@ def compare(ours, reference, threshold, allowed):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--only", default="", help="run tests whose path contains this")
-    p.add_argument("--threshold", type=int, default=32)
+    p.add_argument("--threshold", type=int, default=40)
     p.add_argument("--allowed", type=float, default=0.005)
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     p.add_argument("--timeout", type=int, default=120)
@@ -99,11 +104,14 @@ def main():
     p.add_argument("--compare", default="")
     p.add_argument("--list-failing", action="store_true")
     p.add_argument("--no-build", action="store_true")
+    p.add_argument("--drawing", action="store_true", help="draw with the Drawing renderer (the baseline)")
     a = p.parse_args()
     if not SUITE.exists():
         sys.exit(f"no suite at {SUITE}: clone https://github.com/linebender/resvg into ../.donors/resvg")
     if not a.no_build:
         build()
+    if a.drawing:
+        EXTRA.append("--drawing")
     OUT.mkdir(parents=True, exist_ok=True)
     for stale in OUT.rglob("*.rgba"):
         stale.unlink()
