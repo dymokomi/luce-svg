@@ -220,3 +220,14 @@ subset and `--drawing` measures the Drawing renderer.
 Baseline (2026-10-03, the Drawing renderer before this work, in linear light): 472 of
 1719 — filters 77/397, masking 8/93, paint-servers 99/153, painting 117/306, shapes
 91/133, structure 62/258, text 18/379.
+
+The full renderer (2026-10-03): 1308 of 1719 without a GlyphSource — filters 389/397,
+masking 88/93, paint-servers 151/153, painting 285/306, shapes 133/133, structure
+244/258, text 18/379 (text needs glyphs). With a GlyphSource over the browser's
+OpenType reader and the suite's fonts (a measurement tool kept outside this repository,
+run with `--tool` and `--tool-arg`): 1671 of 1719 — filters 396, masking 93,
+paint-servers 152, painting 305, shapes 133, structure 254, text 338. What still
+fails: GIF and WebP images (no decoders), `rgba()` with a percentage alpha (read as
+CSS Color 4 reads it; resvg rejects it), two transform-precision cases, and text that
+needs more of its source than that one gives — Arabic joining and Indic shaping,
+variable fonts, color fonts.
