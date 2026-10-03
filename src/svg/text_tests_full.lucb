@@ -28,6 +28,9 @@ struct BoxFont: GlyphSource:
     mutating func glyph_kerning(face: u32, left: u32, right: u32) -> f64:
         return -100.0 if left == 65 and right == 86 else 0.0
 
+    mutating func shape(face: u32, scalars: const u32[], rtl: bool, kerning: bool, small_caps: bool, out: GlyphRecord[]) -> usize?!:
+        return none
+
     mutating func glyph_outline(face: u32, glyph: u32, path: Path*) -> bool!:
         if glyph == 32:
             return false
@@ -99,3 +102,62 @@ test "a filter on text measures the text box, and tref needs an SVG element":
     assert(rgba_at(pixels, 30, 6, 1)[3] == 0 and rgba_at(pixels, 30, 18, 6)[3] == 0)
     # The tref links to a foreign element: nothing is drawn.
     assert(rgba_at(pixels, 30, 8, 22)[3] == 0)
+
+## The box font with a shaper that sets "fi" as one glyph 900 units wide.
+struct LigatureFont: GlyphSource:
+    var boxes: BoxFont = BoxFont()
+
+    mutating func select_face(query: FaceQuery) -> u32?:
+        return self.boxes.select_face(query)
+
+    mutating func fallback_face(face: u32, scalar: u32) -> u32?:
+        return none
+
+    mutating func face_metrics(face: u32) -> FaceMetrics:
+        return FaceMetrics()
+
+    mutating func glyph_index(face: u32, scalar: u32) -> u32:
+        return scalar
+
+    mutating func glyph_advance(face: u32, glyph: u32) -> f64:
+        return 900.0 if glyph == 0xFB01 else 600.0
+
+    mutating func glyph_kerning(face: u32, left: u32, right: u32) -> f64:
+        return 0.0
+
+    mutating func shape(face: u32, scalars: const u32[], rtl: bool, kerning: bool, small_caps: bool, out: GlyphRecord[]) -> usize?!:
+        var count: usize = 0
+        var at: usize = 0
+        while at < scalars.length:
+            let ligature = scalars[at] == 0x66 and at + 1 < scalars.length and scalars[at + 1] == 0x69
+            if count < out.length:
+                out[count] = GlyphRecord(glyph = 0xFB01 if ligature else scalars[at], cluster = at, advance = 900.0 if ligature else 600.0)
+            count += 1
+            at += 2 if ligature else 1
+        return count
+
+    mutating func glyph_outline(face: u32, glyph: u32, path: Path*) -> bool!:
+        try path.rect(0.0, 0.0, 900.0 if glyph == 0xFB01 else 600.0, 700.0)
+        return true
+
+test "bidi runs come in visual order: numbers inside right-to-left text read left to right":
+    # "ab " Hebrew alef bet " 12 cd": runs [0,3) L, [6,8) numbers, [3,6) Hebrew, [8,11) L.
+    let scalars: u32[11] = [0x61, 0x62, 0x20, 0x05D0, 0x05D1, 0x20, 0x31, 0x32, 0x20, 0x63, 0x64]
+    var runs = List[BidiRun]()
+    defer runs.release()
+    try bidi_runs(scalars[0..<11], &runs)
+    assert(runs.used == 4)
+    assert(runs.items[0].start == 0 and runs.items[0].end == 3 and not runs.items[0].rtl())
+    assert(runs.items[1].start == 6 and runs.items[1].end == 8 and runs.items[1].level == 2)
+    assert(runs.items[2].start == 3 and runs.items[2].end == 6 and runs.items[2].rtl())
+    assert(runs.items[3].start == 8 and runs.items[3].end == 11)
+
+test "a shaping source's ligature is one cluster":
+    var font = LigatureFont()
+    let picture = try load("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"30\" height=\"20\"><text x=\"0\" y=\"10\" font-size=\"10\">fix</text></svg>", Options(glyphs = &font))
+    defer picture.release()
+    let pixels = try alloc u8[30 * 20 * 4] in memory.heap
+    defer free(pixels) in memory.heap
+    try render(picture.value(), fit_transform(picture.value(), 30, 20), 30, 20, pixels)
+    # "fi" 9 px then "x" 6 px: ink ends at 15, not 18.
+    assert(rgba_at(pixels, 30, 14, 6)[3] == 255 and rgba_at(pixels, 30, 16, 6)[3] == 0)

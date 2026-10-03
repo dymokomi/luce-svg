@@ -25,6 +25,21 @@ struct List[T]:
         self.items[self.used] = value
         self.used += 1
 
+    ## Insert `value` before item `at` (at most `used`).
+    mutating func insert(at: usize, value: T) -> !:
+        try self.push(value)
+        var index = self.used - 1
+        while index > at:
+            self.items[index] = self.items[index - 1]
+            index -= 1
+        self.items[at] = value
+
+    ## Remove item `at`, moving the ones after it down.
+    mutating func remove(at: usize):
+        for index in at..<self.used - 1:
+            self.items[index] = self.items[index + 1]
+        self.used -= 1
+
     ## The items in use, as a span.
     func view() -> T[]:
         return self.items[..<self.used]

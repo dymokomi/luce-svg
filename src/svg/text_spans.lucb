@@ -117,6 +117,7 @@ extend Converter:
             var fonts = source
             span.face = fonts.select_face(self.face_query(node))
         span.kerning = not (self.found_length(node, Attr.kerning, state, -1.0) == 0.0 or strings.trim(self.find(node, Attr.font_kerning) else "") == "none")
+        span.small_caps = strings.trim(self.find(node, Attr.font_variant) else "") == "small-caps"
         span.letter_spacing = self.found_length(node, Attr.letter_spacing, state, 0.0)
         span.word_spacing = self.found_length(node, Attr.word_spacing, state, 0.0)
         if let text = self.attribute(node, Attr.text_length):

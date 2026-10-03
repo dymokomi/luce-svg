@@ -3,9 +3,8 @@
 #   svg/text_layout - Laying text out and turning it into shapes
 #
 #   DESCRIPTION:
-#       Each chunk's characters become clusters (a glyph with its advance, kerned against
-#       the one before), spaced by letter-spacing and word-spacing, stretched to
-#       textLength, then placed: along the line from the chunk's x and y (or where the
+#       Each chunk's characters are shaped into clusters (text_shape.lucb), spaced by
+#       letter-spacing and word-spacing, stretched to textLength, then placed: along the line from the chunk's x and y (or where the
 #       last chunk ended) shifted by the anchor, each by its dx, dy and rotate; or along
 #       a text path, each glyph centred on its point and turned with the path. Each span
 #       becomes a shape whose path is its glyphs' outlines, moved to its baseline, with
@@ -22,7 +21,9 @@ struct Cluster:
     ## counted there, though x and y count them).
     var order: usize = 0
     var span: usize = 0
-    var glyph: ShapedGlyph = ShapedGlyph()
+    ## The cluster's glyphs: `count` of the layout's glyphs from `first`.
+    var first: usize = 0
+    var count: usize = 0
     var advance: f64 = 0.0
     var width: f64 = 0.0
     var transform: Matrix = Matrix()
@@ -55,6 +56,8 @@ extend Converter:
         var fonts = source
         var clusters = List[Cluster]()
         defer clusters.release()
+        var glyphs = List[ClusterGlyph]()
+        defer glyphs.release()
         # Each span's outline, built over every chunk; then the decorations.
         let path_start = self.picture.paths.used
         for _ in 0..<content.spans.used:
@@ -78,7 +81,8 @@ extend Converter:
                 x = 0.0
                 y = 0.0
             clusters.used = 0
-            try self.shape_chunk(&content, &chunk, fonts, &clusters, &order)
+            glyphs.used = 0
+            try shape_chunk(&content, &chunk, fonts, &clusters, &glyphs, &order)
             if clusters.used == 0:
                 continue
             if content.vertical:
@@ -101,7 +105,8 @@ extend Converter:
                     span_ts = multiply(multiply(multiply(Matrix(e = x, f = y), rotation_matrix(90.0)), Matrix(e = -x, f = -y)), span_ts)
                 if chunk.path == 0:
                     span_ts = multiply(span_ts, Matrix(f = baseline_offset(&span, metrics, scale, content.vertical)))
-                try self.span_outlines(fonts, &content, span_index, clusters.view(), span_ts, &self.picture.paths.items[path_start + span_index], &box)
+                try self.span_outlines(fonts, glyphs.view(), span_index, clusters.view(), span_ts, &self.picture.paths.items[path_start + span_index],
+                                       &box)
                 try decorate(&span, metrics, scale, span_index, clusters.view(), span_ts, decorations.items[span_index * 3..<span_index * 3 + 3], &box)
             if content.vertical and chunk.path == 0:
                 end = Point(end.y, end.x)
@@ -135,36 +140,8 @@ extend Converter:
         discard(try self.picture.append(parent, Item(kind = ItemKind.shape, path = index, fill = decoration.fill, stroke = decoration.stroke,
                                                      visible = span.visible, paint_box = text_box, aliased = span.aliased)))
 
-    ## Shape `chunk`'s characters into clusters, skipping any whose span has no face;
-    ## `order` counts the drawn characters.
-    mutating func shape_chunk(content: const TextContent*, chunk: const TextChunk*, fonts: GlyphSource, clusters: List[Cluster]*,
-                              order: usize*) -> !:
-        var source = fonts
-        for index in chunk.char_start..<chunk.char_end:
-            var span_index = chunk.span_start
-            while span_index + 1 < chunk.span_end and content.spans.items[span_index].end <= index:
-                span_index += 1
-            let span = content.spans.items[span_index]
-            # Characters of hidden elements fall between a chunk's spans.
-            if index < span.start or index >= span.end:
-                continue
-            *order += 1
-            let face = span.face else continue
-            let glyph = shape_scalar(source, face, content.scalars.items[index], span.size)
-            var cluster = Cluster(index = index, order = *order - 1, span = span_index, glyph = glyph, advance = glyph.advance, width = glyph.advance,
-                                  ascent = glyph.ascent, descent = glyph.descent)
-            if clusters.used > 0:
-                let previous = &clusters.items[clusters.used - 1]
-                # The pair kerns as the previous glyph's span shapes it, at that span's size.
-                if previous.glyph.face == glyph.face and content.spans.items[previous.span].kerning:
-                    # A kerned glyph's shaped advance is its width, as a shaper reports it.
-                    let kern = source.glyph_kerning(glyph.face, previous.glyph.glyph, glyph.glyph) * previous.glyph.scale
-                    previous.advance += kern
-                    previous.width += kern
-            try clusters.push(cluster)
-
     ## Append the outlines of `span_index`'s visible clusters, through `span_ts`, to `out`.
-    mutating func span_outlines(fonts: GlyphSource, content: const TextContent*, span_index: usize, clusters: const Cluster[], span_ts: Matrix,
+    mutating func span_outlines(fonts: GlyphSource, glyphs: const ClusterGlyph[], span_index: usize, clusters: const Cluster[], span_ts: Matrix,
                                 out: Path*, box: Box*) -> !:
         var source = fonts
         var glyph_path = Path()
@@ -172,19 +149,19 @@ extend Converter:
         for cluster in clusters:
             if not cluster.visible:
                 continue
-            let placed = multiply(span_ts, cluster.transform)
+            let placed = multiply(multiply(span_ts, cluster.transform), cluster.path_transform)
             # Every visible cluster counts towards the text's box: its advance by its height.
             let height = cluster.ascent - cluster.descent
             if height > 0.0:
-                let r = transform_rect(Rect(y = -cluster.ascent, w = math.max(cluster.advance, 1.0), h = height), multiply(placed, cluster.path_transform))
-                box.add_rect(r)
+                box.add_rect(transform_rect(Rect(y = -cluster.ascent, w = math.max(cluster.advance, 1.0), h = height), placed))
             if cluster.span != span_index:
                 continue
-            glyph_path.release()
-            if not try source.glyph_outline(cluster.glyph.face, cluster.glyph.glyph, &glyph_path):
-                continue
-            let to_user = multiply(multiply(placed, cluster.path_transform), Matrix(a = cluster.glyph.scale, d = -cluster.glyph.scale))
-            try append_path(out, &glyph_path, to_user)
+            for glyph in glyphs[cluster.first..<cluster.first + cluster.count]:
+                glyph_path.release()
+                if not try source.glyph_outline(glyph.face, glyph.glyph, &glyph_path):
+                    continue
+                let s = glyph.scale
+                try append_path(out, &glyph_path, multiply(placed, Matrix(a = s, d = -s, e = s * glyph.x, f = s * glyph.y)))
 
 ## Append `path`'s verbs, mapped through `m`, to `out`.
 func append_path(out: Path*, path: const Path*, m: Matrix) -> !:
@@ -212,7 +189,7 @@ func append_path(out: Path*, path: const Path*, m: Matrix) -> !:
 func space_clusters(content: const TextContent*, clusters: Cluster[]):
     for at in 0..<clusters.length:
         let span = content.spans.items[clusters[at].span]
-        if at + 1 < clusters.length and span.letter_spacing != 0.0:
+        if at + 1 < clusters.length and span.letter_spacing != 0.0 and spaced_script(content.scalars.items[clusters[at].index]):
             clusters[at].advance += span.letter_spacing
             if not (clusters[at].advance > 0.0):
                 clusters[at].advance = 0.0

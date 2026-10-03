@@ -1,0 +1,220 @@
+#==============================================================================================
+#
+#   svg/text_bidi - Bidirectional text: which way each run of a chunk reads
+#
+#   DESCRIPTION:
+#       A chunk mixing scripts that read right to left (Hebrew, Arabic) with ones that
+#       read left to right is split into runs of one embedding level and the runs put
+#       in visual order, as the Unicode Bidirectional Algorithm (UAX #9) does for one
+#       left-to-right paragraph: characters get bidi classes, weak types resolve (W1-W7),
+#       neutrals take their neighbours' direction (N1-N2), levels follow (I1-I2), white
+#       space at the end of the line drops to the paragraph's level (L1) and runs at
+#       odd levels reverse (L2). Explicit embeddings and isolates are ignored, as SVG
+#       text in resvg ignores direction and unicode-bidi. Classes come from a table of
+#       the ranges that matter, not the full Unicode database: anything not listed
+#       reads left to right.
+#
+#==============================================================================================
+
+## Bidi classes, as UAX #9 names them.
+enum BidiClass as u8:
+    l = 0
+    r = 1
+    al = 2
+    en = 3
+    es = 4
+    et = 5
+    an = 6
+    cs = 7
+    nsm = 8
+    bn = 9
+    b = 10
+    s = 11
+    ws = 12
+    on = 13
+
+## A run of one level `start..<end` of the chunk, in logical order; odd levels read
+## right to left.
+struct BidiRun:
+    var start: usize = 0
+    var end: usize = 0
+    var level: u8 = 0
+
+    func rtl() -> bool:
+        return self.level % 2 == 1
+
+## Ranges of bidi classes, first match wins: start, end, class.
+let bidi_table: u32[402] = [
+    0x0000, 0x0008, 9, 0x0009, 0x0009, 11, 0x000A, 0x000A, 10, 0x000B, 0x000B, 11, 0x000C, 0x000C, 12, 0x000D, 0x000D, 10,
+    0x000E, 0x001B, 9, 0x001C, 0x001E, 10, 0x001F, 0x001F, 11, 0x0020, 0x0020, 12, 0x0021, 0x0022, 13, 0x0023, 0x0025, 5,
+    0x0026, 0x002A, 13, 0x002B, 0x002B, 4, 0x002C, 0x002C, 7, 0x002D, 0x002D, 4, 0x002E, 0x002F, 7, 0x0030, 0x0039, 3,
+    0x003A, 0x003A, 7, 0x003B, 0x0040, 13, 0x005B, 0x0060, 13, 0x007B, 0x007E, 13, 0x007F, 0x0084, 9, 0x0085, 0x0085, 10,
+    0x0086, 0x009F, 9, 0x00A0, 0x00A0, 7, 0x00A1, 0x00A1, 13, 0x00A2, 0x00A5, 5, 0x00A6, 0x00A9, 13, 0x00AB, 0x00AC, 13,
+    0x00AD, 0x00AD, 9, 0x00AE, 0x00AF, 13, 0x00B0, 0x00B1, 5, 0x00B2, 0x00B3, 3, 0x00B4, 0x00B4, 13, 0x00B6, 0x00B8, 13,
+    0x00B9, 0x00B9, 3, 0x00BB, 0x00BF, 13, 0x00D7, 0x00D7, 13, 0x00F7, 0x00F7, 13, 0x0300, 0x036F, 8, 0x0483, 0x0489, 8,
+    # Hebrew.
+    0x0591, 0x05BD, 8, 0x05BF, 0x05BF, 8, 0x05C1, 0x05C2, 8, 0x05C4, 0x05C5, 8, 0x05C7, 0x05C7, 8, 0x0590, 0x05FF, 1,
+    # Arabic.
+    0x0600, 0x0605, 6, 0x0606, 0x0607, 13, 0x0609, 0x060A, 5, 0x060C, 0x060C, 7, 0x060E, 0x060F, 13, 0x0610, 0x061A, 8,
+    0x064B, 0x065F, 8, 0x0660, 0x0669, 6, 0x066A, 0x066A, 5, 0x066B, 0x066C, 6, 0x0670, 0x0670, 8, 0x06D6, 0x06DC, 8,
+    0x06DD, 0x06DD, 6, 0x06DE, 0x06DE, 13, 0x06DF, 0x06E4, 8, 0x06E7, 0x06E8, 8, 0x06E9, 0x06E9, 13, 0x06EA, 0x06ED, 8,
+    0x06F0, 0x06F9, 3, 0x0711, 0x0711, 8, 0x0730, 0x074A, 8, 0x07A6, 0x07B0, 8, 0x0600, 0x07BF, 2,
+    # NKo, Samaritan, Mandaic; Arabic extended.
+    0x07EB, 0x07F3, 8, 0x07C0, 0x085F, 1, 0x08CA, 0x08E1, 8, 0x08E2, 0x08E2, 6, 0x08E3, 0x08FF, 8, 0x0860, 0x08FF, 2,
+    # Spaces, punctuation and symbols.
+    0x1680, 0x1680, 12, 0x2000, 0x200A, 12, 0x200B, 0x200D, 9, 0x200E, 0x200E, 0, 0x200F, 0x200F, 1, 0x2010, 0x2027, 13,
+    0x2028, 0x2028, 12, 0x2029, 0x2029, 10, 0x202A, 0x202E, 9, 0x202F, 0x202F, 7, 0x2030, 0x2034, 5, 0x2035, 0x2043, 13,
+    0x2044, 0x2044, 7, 0x2045, 0x205E, 13, 0x205F, 0x205F, 12, 0x2060, 0x206F, 9, 0x2070, 0x2070, 3, 0x2074, 0x2079, 3,
+    0x207A, 0x207B, 4, 0x207C, 0x207E, 13, 0x2080, 0x2089, 3, 0x208A, 0x208B, 4, 0x208C, 0x208E, 13, 0x20A0, 0x20CF, 5,
+    0x20D0, 0x20FF, 8, 0x2212, 0x2212, 4, 0x2213, 0x2213, 5, 0x2190, 0x2BFF, 13, 0x2E00, 0x2E7F, 13, 0x3000, 0x3000, 12,
+    0x3001, 0x3004, 13, 0x3008, 0x3020, 13,
+    # Presentation forms.
+    0xFB1E, 0xFB1E, 8, 0xFB1D, 0xFB4F, 1, 0xFD3E, 0xFD3F, 13, 0xFB50, 0xFDFF, 2, 0xFE00, 0xFE0F, 8, 0xFE20, 0xFE2F, 8,
+    0xFE50, 0xFE6F, 13, 0xFE70, 0xFEFE, 2, 0xFEFF, 0xFEFF, 9, 0xFF01, 0xFF02, 13, 0xFF03, 0xFF05, 5, 0xFF06, 0xFF0A, 13,
+    0xFF0B, 0xFF0B, 4, 0xFF0C, 0xFF0C, 7, 0xFF0D, 0xFF0D, 4, 0xFF0E, 0xFF0F, 7, 0xFF10, 0xFF19, 3, 0xFF1A, 0xFF1A, 7,
+    0xFF1B, 0xFF20, 13, 0xFF3B, 0xFF40, 13, 0xFF5B, 0xFF65, 13,
+    # Right-to-left scripts past the BMP, Arabic mathematical letters, symbols.
+    0x10800, 0x10FFF, 1, 0x1EE00, 0x1EEFF, 2, 0x1E800, 0x1EFFF, 1, 0x1F000, 0x1FAFF, 13]
+
+## The bidi class of `scalar`.
+func bidi_class(scalar: u32) -> BidiClass:
+    var at: usize = 0
+    while at < bidi_table.length:
+        if scalar >= bidi_table[at] and scalar <= bidi_table[at + 1]:
+            return (BidiClass)(u8)bidi_table[at + 2]
+        at += 3
+    return BidiClass.l
+
+## Whether `class` is a neutral for N1 and N2.
+func bidi_neutral(class: BidiClass) -> bool:
+    return class == BidiClass.b or class == BidiClass.s or class == BidiClass.ws or class == BidiClass.on
+
+## The direction a resolved class counts as for neutrals: numbers count as right to left.
+func bidi_strong(class: BidiClass) -> BidiClass:
+    return BidiClass.l if class == BidiClass.l else BidiClass.r
+
+## Split `scalars` (one left-to-right paragraph) into runs of one level, in visual order.
+func bidi_runs(scalars: const u32[], runs: List[BidiRun]*) -> !:
+    runs.used = 0
+    let count = scalars.length
+    if count == 0:
+        return
+    var types = List[BidiClass]()
+    defer types.release()
+    var any_rtl = false
+    for scalar in scalars:
+        let class = bidi_class(scalar)
+        any_rtl = any_rtl or class == BidiClass.r or class == BidiClass.al or class == BidiClass.an
+        try types.push(class)
+    if not any_rtl:
+        try runs.push(BidiRun(start = 0, end = count))
+        return
+    let t = types.items
+    # W1: marks (and, as X9 removes them, boundary neutrals) take the class before them.
+    var previous = BidiClass.l
+    for i in 0..<count:
+        if t[i] == BidiClass.nsm or t[i] == BidiClass.bn:
+            t[i] = previous
+        else:
+            previous = t[i]
+    # W2: European numbers after Arabic letters are Arabic numbers. W3: AL is R.
+    var last_strong = BidiClass.l
+    for i in 0..<count:
+        if t[i] == BidiClass.l or t[i] == BidiClass.r or t[i] == BidiClass.al:
+            last_strong = t[i]
+        elif t[i] == BidiClass.en and last_strong == BidiClass.al:
+            t[i] = BidiClass.an
+    for i in 0..<count:
+        if t[i] == BidiClass.al:
+            t[i] = BidiClass.r
+    # W4: one separator between two numbers of a kind joins them.
+    var i: usize = 1
+    while i + 1 < count:
+        if t[i - 1] == BidiClass.en and t[i + 1] == BidiClass.en and (t[i] == BidiClass.es or t[i] == BidiClass.cs):
+            t[i] = BidiClass.en
+        elif t[i - 1] == BidiClass.an and t[i + 1] == BidiClass.an and t[i] == BidiClass.cs:
+            t[i] = BidiClass.an
+        i += 1
+    # W5: terminators next to European numbers join them. W6: other separators are neutral.
+    i = 0
+    while i < count:
+        if t[i] != BidiClass.et:
+            i += 1
+            continue
+        var j = i
+        while j < count and t[j] == BidiClass.et:
+            j += 1
+        let joins = (i > 0 and t[i - 1] == BidiClass.en) or (j < count and t[j] == BidiClass.en)
+        for k in i..<j:
+            t[k] = BidiClass.en if joins else BidiClass.on
+        i = j
+    for k in 0..<count:
+        if t[k] == BidiClass.es or t[k] == BidiClass.cs:
+            t[k] = BidiClass.on
+    # W7: European numbers in left-to-right text read left to right.
+    last_strong = BidiClass.l
+    for k in 0..<count:
+        if t[k] == BidiClass.l or t[k] == BidiClass.r:
+            last_strong = t[k]
+        elif t[k] == BidiClass.en and last_strong == BidiClass.l:
+            t[k] = BidiClass.l
+    # N1, N2: neutrals between text of one direction take it, others the paragraph's.
+    i = 0
+    while i < count:
+        if not bidi_neutral(t[i]):
+            i += 1
+            continue
+        var j = i
+        while j < count and bidi_neutral(t[j]):
+            j += 1
+        let before = BidiClass.l if i == 0 else bidi_strong(t[i - 1])
+        let after = BidiClass.l if j == count else bidi_strong(t[j])
+        for k in i..<j:
+            t[k] = before if before == after else BidiClass.l
+        i = j
+    # I1: levels; L1: separators and trailing white space drop to the paragraph's level.
+    var levels = List[u8]()
+    defer levels.release()
+    for k in 0..<count:
+        try levels.push(0 if t[k] == BidiClass.l else (1 if t[k] == BidiClass.r else 2))
+    var trailing = true
+    var k = count
+    while k > 0:
+        k -= 1
+        let original = bidi_class(scalars[k])
+        if original == BidiClass.s or original == BidiClass.b:
+            levels.items[k] = 0
+            trailing = true
+        elif trailing and (original == BidiClass.ws or original == BidiClass.bn):
+            levels.items[k] = 0
+        else:
+            trailing = false
+    # Runs of one level in logical order, then L2: reverse every stretch at or above
+    # each odd-or-higher level, from the highest down to 1.
+    var start: usize = 0
+    var highest: u8 = 0
+    for at in 1..<count + 1:
+        if at == count or levels.items[at] != levels.items[start]:
+            try runs.push(BidiRun(start = start, end = at, level = levels.items[start]))
+            highest = highest if highest > levels.items[start] else levels.items[start]
+            start = at
+    var level = highest
+    while level >= 1:
+        var a: usize = 0
+        while a < runs.used:
+            if runs.items[a].level < level:
+                a += 1
+                continue
+            var b = a
+            while b < runs.used and runs.items[b].level >= level:
+                b += 1
+            var lo = a
+            var hi = b - 1
+            while lo < hi:
+                let swap = runs.items[lo]
+                runs.items[lo] = runs.items[hi]
+                runs.items[hi] = swap
+                lo += 1
+                hi -= 1
+            a = b
+        level -= 1

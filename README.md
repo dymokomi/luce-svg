@@ -82,11 +82,17 @@ the bitmap). It is built in four stages, each its own set of fragments:
   writing modes (CJK upright, other scripts turned a quarter). **luce-svg
   reads no font files**: glyphs come from a `GlyphSource` the caller passes in
   `Options.glyphs` — faces chosen by family list, weight, style and stretch, glyphs
-  by scalar with a fallback face, advances, pair kerning, metrics and outlines.
-  Without a source, text is laid out but draws nothing. The intended source is
-  luce-fonts once it carries the browser's OpenType reader and shaper; contextual
-  shaping (ligatures, Arabic and Indic scripts), bidirectional text, vertical glyph
-  substitutes and color fonts wait for that.
+  by scalar with a fallback face, advances, pair kerning, metrics and outlines, and
+  (optionally) `shape`, which shapes a run of one direction as HarfBuzz does
+  (ligatures, marks, contextual forms, small caps); a source that does not shape maps
+  a scalar at a time with pair kerning. luce-svg itself splits each chunk into bidi
+  runs (UAX #9 for one left-to-right paragraph, `text_bidi.lucb`), shapes the chunk
+  per span as usvg does, and forms clusters from the shaped glyphs. Without a source,
+  text is laid out but draws nothing. The intended source is luce-fonts once it
+  carries the browser's OpenType reader and shaper; Arabic joining and Indic
+  reordering need that shaper's complex-script shapers, and variable fonts
+  (font-variation-settings), vertical glyph substitutes and color fonts need
+  additions to the source interface.
 
 **Compositing is in sRGB**, as browsers and resvg composite: colors blend as their
 encoded values, so half-transparent black over white is 50 % grey. This is the default

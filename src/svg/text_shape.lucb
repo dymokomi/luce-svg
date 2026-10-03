@@ -1,0 +1,255 @@
+#==============================================================================================
+#
+#   svg/text_shape - Shaping a chunk's characters into glyph clusters
+#
+#   DESCRIPTION:
+#       As usvg shapes a chunk: its drawn characters split into bidi runs (text_bidi.lucb),
+#       and the whole chunk is shaped with the first span's face, run by run, glyphs in
+#       visual order; a glyph the face lacks is taken from the source's fallback face.
+#       Every later span with another face (or other kerning or small caps) shapes the
+#       whole chunk again and overwrites the glyphs of its own characters, cluster
+#       lengths kept in step, so a span shapes in the context of its neighbours.
+#       Consecutive glyphs of one cluster then become one cluster of the layout: its
+#       advance the sum of theirs, its width the widest, at its span's size.
+#
+#==============================================================================================
+
+# mark: Chunk text ============================================================================
+
+## A glyph of a cluster: its face and glyph, where it sits in the cluster (font units,
+## y down) and the scale from its face's units to pixels.
+struct ClusterGlyph:
+    var face: u32 = 0
+    var glyph: u32 = 0
+    var x: f64 = 0.0
+    var y: f64 = 0.0
+    var scale: f64 = 0.0
+
+## A shaped glyph of a chunk: its face, its record (`cluster` a position in the chunk's
+## text) and how many characters its cluster covers.
+struct ChunkGlyph:
+    var face: u32 = 0
+    var record: GlyphRecord = GlyphRecord()
+    var length: usize = 0
+
+## A chunk's drawn characters: their scalars, their index in the whole text, their span,
+## and the chunk's bidi runs in visual order.
+struct ChunkText:
+    var scalars: List[u32] = List[u32]()
+    var chars: List[usize] = List[usize]()
+    var spans: List[usize] = List[usize]()
+    var runs: List[BidiRun] = List[BidiRun]()
+
+    mutating func release():
+        self.scalars.release()
+        self.chars.release()
+        self.spans.release()
+        self.runs.release()
+
+## What a span shapes with; spans that agree shape alike.
+struct ShapeKey:
+    var face: u32 = 0
+    var kerning: bool = true
+    var small_caps: bool = false
+
+# mark: Shaping ===============================================================================
+
+## Shape `chunk`'s drawn characters into `clusters`, their glyphs into `glyphs`; `order`
+## counts the drawn characters of the text so far.
+func shape_chunk(content: const TextContent*, chunk: const TextChunk*, fonts: GlyphSource, clusters: List[Cluster]*, glyphs: List[ClusterGlyph]*,
+                 order: usize*) -> !:
+    var source = fonts
+    var text = ChunkText()
+    defer text.release()
+    for index in chunk.char_start..<chunk.char_end:
+        var span_index = chunk.span_start
+        while span_index + 1 < chunk.span_end and content.spans.items[span_index].end <= index:
+            span_index += 1
+        let span = content.spans.items[span_index]
+        # Characters of hidden elements fall between a chunk's spans.
+        if index < span.start or index >= span.end:
+            continue
+        try text.scalars.push(content.scalars.items[index])
+        try text.chars.push(index)
+        try text.spans.push(span_index)
+    let base = *order
+    *order += text.scalars.used
+    if text.scalars.used == 0:
+        return
+    try bidi_runs(text.scalars.view(), &text.runs)
+    var shaped = List[ChunkGlyph]()
+    defer shaped.release()
+    var again = List[ChunkGlyph]()
+    defer again.release()
+    var first: ShapeKey? = none
+    for span_index in chunk.span_start..<chunk.span_end:
+        let span = content.spans.items[span_index]
+        let face = span.face else continue
+        let key = ShapeKey(face = face, kerning = span.kerning, small_caps = span.small_caps)
+        if first == none:
+            try shape_text(source, key, &text, &shaped)
+            if shaped.used > 0:
+                first = key
+            continue
+        let base_key = first else continue
+        if key.face == base_key.face and key.kerning == base_key.kerning and key.small_caps == base_key.small_caps:
+            continue
+        again.used = 0
+        try shape_text(source, key, &text, &again)
+        try overwrite_span(&shaped, again.view(), &text, span_index)
+    # Consecutive glyphs of one cluster form a cluster of the layout.
+    var g: usize = 0
+    while g < shaped.used:
+        let position = shaped.items[g].record.cluster
+        var h = g
+        while h < shaped.used and shaped.items[h].record.cluster == position:
+            h += 1
+        let span_index = text.spans.items[position]
+        let span = content.spans.items[span_index]
+        let metrics = source.face_metrics(shaped.items[g].face)
+        let scale = span.size / math.max(metrics.units_per_em, 1.0)
+        var x = 0.0
+        var advance = 0.0
+        var width = 0.0
+        let start = glyphs.used
+        for at in g..<h:
+            let glyph = shaped.items[at]
+            let glyph_scale = scale if glyph.face == shaped.items[g].face else span.size / math.max(source.face_metrics(glyph.face).units_per_em, 1.0)
+            try glyphs.push(ClusterGlyph(face = glyph.face, glyph = glyph.record.glyph, x = x + glyph.record.x_offset, y = -glyph.record.y_offset,
+                                         scale = glyph_scale))
+            x += glyph.record.advance
+            let glyph_width = glyph.record.advance * glyph_scale
+            advance += glyph_width
+            width = math.max(width, glyph_width)
+        try clusters.push(Cluster(index = text.chars.items[position], order = base + position, span = span_index, first = start, count = h - g,
+                                  advance = advance, width = width, ascent = metrics.ascent * scale, descent = metrics.descent * scale))
+        g = h
+
+## Shape the whole chunk with `key`'s face into `out`, taking glyphs the face lacks from
+## fallback faces: all of them when a fallback has every glyph, else glyph by glyph
+## while the glyph counts agree.
+func shape_text(fonts: GlyphSource, key: ShapeKey, text: const ChunkText*, out: List[ChunkGlyph]*) -> !:
+    var source = fonts
+    try shape_with(source, key, text, out)
+    var tried = List[u32]()
+    defer tried.release()
+    try tried.push(key.face)
+    var other = List[ChunkGlyph]()
+    defer other.release()
+    while true:
+        var missing: u32? = none
+        for glyph in out.view():
+            if glyph.record.glyph == 0:
+                missing = text.scalars.items[glyph.record.cluster]
+                break
+        let scalar = missing else break
+        let fallback = source.fallback_face(key.face, scalar) else break
+        var seen = false
+        for face in tried.view():
+            seen = seen or face == fallback
+        if seen:
+            break
+        other.used = 0
+        try shape_with(source, ShapeKey(face = fallback, kerning = key.kerning, small_caps = key.small_caps), text, &other)
+        var complete = true
+        for glyph in other.view():
+            complete = complete and glyph.record.glyph != 0
+        if complete:
+            out.used = 0
+            for glyph in other.view():
+                try out.push(glyph)
+            break
+        if other.used != out.used:
+            break
+        for at in 0..<out.used:
+            if out.items[at].record.glyph == 0 and other.items[at].record.glyph != 0:
+                out.items[at] = other.items[at]
+        try tried.push(fallback)
+
+## Shape the chunk's runs, in visual order, with one face into `out`.
+func shape_with(fonts: GlyphSource, key: ShapeKey, text: const ChunkText*, out: List[ChunkGlyph]*) -> !:
+    var source = fonts
+    var records = List[GlyphRecord]()
+    defer records.release()
+    for run in text.runs.view():
+        let scalars = text.scalars.items[run.start..<run.end]
+        try run_records(source, key, scalars, run.rtl(), &records)
+        for at in 0..<records.used:
+            let record = records.items[at]
+            # The cluster runs to where the logically next glyph's starts.
+            var end = scalars.length
+            if not run.rtl() and at + 1 < records.used:
+                end = records.items[at + 1].cluster
+            elif run.rtl() and at > 0:
+                end = records.items[at - 1].cluster
+            var placed = record
+            placed.cluster = run.start + record.cluster
+            try out.push(ChunkGlyph(face = key.face, record = placed, length = end - record.cluster if end >= record.cluster else 0))
+
+## One run's glyph records, from the source's shaper or, without one, a glyph a scalar.
+func run_records(fonts: GlyphSource, key: ShapeKey, scalars: const u32[], rtl: bool, records: List[GlyphRecord]*) -> !:
+    var source = fonts
+    var room = math.imax((i64)scalars.length * 2, 8)
+    while true:
+        records.used = 0
+        while (i64)records.items.length < room:
+            try records.push(GlyphRecord())
+        records.used = 0
+        let shaped = try source.shape(key.face, scalars, rtl, key.kerning, key.small_caps, records.items)
+        if shaped == none:
+            try shape_simply(source, key.face, scalars, rtl, key.kerning, records)
+            return
+        let count = shaped else return
+        if count <= records.items.length:
+            records.used = count
+            return
+        room = (i64)count
+
+## Overwrite the glyphs of `span_index`'s characters in `shaped` with those `again` gives
+## them, as usvg does: a cluster that now covers more characters swallows the glyphs
+## after it, one that covers fewer brings the extra glyphs in.
+func overwrite_span(shaped: List[ChunkGlyph]*, again: const ChunkGlyph[], text: const ChunkText*, span_index: usize) -> !:
+    var taken = List[usize]()
+    defer taken.release()
+    var k: usize = 0
+    while k < again.length:
+        let glyph = again[k]
+        k += 1
+        if text.spans.items[glyph.record.cluster] != span_index:
+            continue
+        var found: usize? = none
+        for at in 0..<shaped.used:
+            if shaped.items[at].record.cluster == glyph.record.cluster:
+                found = at
+                break
+        let at = found else continue
+        var used = false
+        for index in taken.view():
+            used = used or index == at
+        if used:
+            continue
+        try taken.push(at)
+        let before = shaped.items[at].length
+        if before < glyph.length:
+            for _ in 1..<glyph.length:
+                if at + 1 < shaped.used:
+                    shaped.remove(at + 1)
+        elif before > glyph.length:
+            for j in 1..<before:
+                if k < again.length:
+                    try shaped.insert(at + j, again[k])
+                    k += 1
+        shaped.items[at] = glyph
+
+## Whether letter-spacing applies to `scalar`'s script: not to cursive scripts (Arabic,
+## Syriac, NKo, Mongolian, Devanagari, Bengali, Gurmukhi and others that join).
+func spaced_script(scalar: u32) -> bool:
+    let ranges: u32[34] = [0x0600, 0x06FF, 0x0700, 0x074F, 0x0750, 0x077F, 0x07C0, 0x07FF, 0x0840, 0x085F, 0x08A0, 0x08FF, 0x0900, 0x097F,
+                           0x0980, 0x09FF, 0x0A00, 0x0A7F, 0x1680, 0x169F, 0x1800, 0x18AF, 0xA800, 0xA82F, 0xA840, 0xA87F, 0xA8E0, 0xA8FF,
+                           0xFB50, 0xFDFF, 0xFE70, 0xFEFF, 0x10AC0, 0x10AFF]
+    var at: usize = 0
+    while at < ranges.length:
+        if scalar >= ranges[at] and scalar <= ranges[at + 1]:
+            return false
+        at += 2
+    return true

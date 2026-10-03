@@ -38,6 +38,7 @@ struct TextSpan:
     var face: u32? = none
     var size: f64 = 12.0
     var kerning: bool = true
+    var small_caps: bool = false
     var letter_spacing: f64 = 0.0
     var word_spacing: f64 = 0.0
     var text_length: f64? = none

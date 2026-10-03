@@ -38,6 +38,8 @@ text_chunks.lucb
 text_spans.lucb
 text_layout.lucb
 text_path_walk.lucb
+text_shape.lucb
+text_bidi.lucb
 convert_more.lucb
 canvas.lucb
 shade.lucb

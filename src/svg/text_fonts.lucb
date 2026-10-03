@@ -7,9 +7,10 @@
 #       renderer passes a GlyphSource in Options, and the text layout (text_layout.lucb)
 #       asks it for faces, glyphs, advances, kerning and outlines. A source might wrap
 #       luce-fonts' OpenType faces, a font set loaded from files, or a test's synthetic
-#       glyphs. Without one, text is laid out but draws nothing. Glyphs are mapped one
-#       scalar at a time with kerning between pairs (no contextual shaping yet); a scalar
-#       the face lacks is looked up in the source's fallback face.
+#       glyphs. Without one, text is laid out but draws nothing. A source that shapes
+#       (ligatures, marks, Arabic joining, Indic reordering) does so in `shape`; one that
+#       does not maps a scalar at a time with kerning between pairs. Scalars a face lacks
+#       are looked up in the source's fallback face.
 #
 #==============================================================================================
 
@@ -37,6 +38,16 @@ pub struct FaceQuery:
     ## Percent of normal width (50..200).
     pub var stretch: f64 = 100.0
 
+## A glyph as a shaper places it: its glyph, the index (in the run it was given) of the
+## first scalar of the cluster it belongs to, and its advance and offsets in font units
+## (y up).
+pub struct GlyphRecord:
+    pub var glyph: u32 = 0
+    pub var cluster: usize = 0
+    pub var advance: f64 = 0.0
+    pub var x_offset: f64 = 0.0
+    pub var y_offset: f64 = 0.0
+
 ## A source of faces and glyphs for SVG text. Faces and glyphs are numbered by the
 ## source; outlines are in font units with y up.
 pub interface GlyphSource:
@@ -58,29 +69,34 @@ pub interface GlyphSource:
     ## The kerning adjustment between two glyphs, in font units.
     mutating func glyph_kerning(face: u32, left: u32, right: u32) -> f64
 
+    ## Shape `scalars`, one run of one direction in logical order, with `face` as a
+    ## shaper such as HarfBuzz does (ligatures, marks, contextual forms; kerning when
+    ## `kerning`, the smcp feature when `small_caps`): write its glyphs into `out` in
+    ## visual order and answer how many there are, even when `out` holds fewer (it is
+    ## then called again with room for all). Glyph 0 marks a scalar the face lacks.
+    ## None when the source does not shape: glyphs are then mapped a scalar at a time.
+    mutating func shape(face: u32, scalars: const u32[], rtl: bool, kerning: bool, small_caps: bool, out: GlyphRecord[]) -> usize?!
+
     ## Append the glyph's outline to `path`; false when it has none.
     mutating func glyph_outline(face: u32, glyph: u32, path: Path*) -> bool!
 
-## One shaped scalar: its face, glyph and advance in pixels.
-struct ShapedGlyph:
-    var face: u32 = 0
-    var glyph: u32 = 0
-    var advance: f64 = 0.0
-    var ascent: f64 = 0.0
-    var descent: f64 = 0.0
-    var scale: f64 = 0.0
-
-## Map `scalar` through `face` (or its fallback) at `size` pixels to the em.
-func shape_scalar(source: GlyphSource, face: u32, scalar: u32, size: f64) -> ShapedGlyph:
-    var used = face
-    var glyph = source.glyph_index(face, scalar)
-    if glyph == 0:
-        if let other = source.fallback_face(face, scalar):
-            let found = source.glyph_index(other, scalar)
-            if found != 0:
-                used = other
-                glyph = found
-    let metrics = source.face_metrics(used)
-    let scale = size / math.max(metrics.units_per_em, 1.0)
-    return ShapedGlyph(face = used, glyph = glyph, advance = source.glyph_advance(used, glyph) * scale, ascent = metrics.ascent * scale,
-                       descent = metrics.descent * scale, scale = scale)
+## Shape `scalars` without a shaper: a glyph per scalar, kerned against the next when
+## `kerning`, reversed for right-to-left runs.
+func shape_simply(source: GlyphSource, face: u32, scalars: const u32[], rtl: bool, kerning: bool, out: List[GlyphRecord]*) -> !:
+    var fonts = source
+    let start = out.used
+    for at in 0..<scalars.length:
+        let glyph = fonts.glyph_index(face, scalars[at])
+        if kerning and out.used > start:
+            let previous = &out.items[out.used - 1]
+            previous.advance += fonts.glyph_kerning(face, previous.glyph, glyph)
+        try out.push(GlyphRecord(glyph = glyph, cluster = at, advance = fonts.glyph_advance(face, glyph)))
+    if rtl:
+        var lo = start
+        var hi = out.used
+        while lo + 1 < hi:
+            hi -= 1
+            let swap = out.items[lo]
+            out.items[lo] = out.items[hi]
+            out.items[hi] = swap
+            lo += 1
