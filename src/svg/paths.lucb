@@ -14,19 +14,19 @@
 
 ## Curves flatten to this many segments (arcs to twice this per turn): fine enough
 ## that a 24-unit icon drawn at 256 pixels keeps its chord error under a tenth of a pixel.
-let segments: i64 = 48
+let curve_segments: i64 = 48
 
 func cubic(drawing: Drawing*, transform: Matrix, x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) -> !:
-    for step in 1..<segments + 1:
-        let t = (f64)step / (f64)segments
+    for step in 1..<curve_segments + 1:
+        let t = (f64)step / (f64)curve_segments
         let u = 1.0 - t
         let bx = u * u * u * x0 + 3.0 * u * u * t * x1 + 3.0 * u * t * t * x2 + t * t * t * x3
         let by = u * u * u * y0 + 3.0 * u * u * t * y1 + 3.0 * u * t * t * y2 + t * t * t * y3
         try drawing.add_point(apply(transform, bx, by))
 
 func quadratic(drawing: Drawing*, transform: Matrix, x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> !:
-    for step in 1..<segments + 1:
-        let t = (f64)step / (f64)segments
+    for step in 1..<curve_segments + 1:
+        let t = (f64)step / (f64)curve_segments
         let u = 1.0 - t
         let bx = u * u * x0 + 2.0 * u * t * x1 + t * t * x2
         let by = u * u * y0 + 2.0 * u * t * y1 + t * t * y2
@@ -68,7 +68,7 @@ func arc(drawing: Drawing*, transform: Matrix, x0: f64, y0: f64, rx_in: f64, ry_
         delta += math.tau
     elif not sweep and delta > 0.0:
         delta -= math.tau
-    let steps = (i64)math.ceil(math.abs(delta) / (math.tau / (f64)(segments * 2))) + 1
+    let steps = (i64)math.ceil(math.abs(delta) / (math.tau / (f64)(curve_segments * 2))) + 1
     for step in 1..<steps + 1:
         let angle = start + delta * (f64)step / (f64)steps
         let ex = cx + rx * math.cos(angle) * cos_phi - ry * math.sin(angle) * sin_phi

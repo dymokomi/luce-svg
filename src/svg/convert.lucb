@@ -35,6 +35,9 @@ struct State:
     ## The width and height a `use` gives the `svg` it references, if any.
     var use_width: f64? = none
     var use_height: f64? = none
+    ## What context-fill and context-stroke paint with, inside a marker or a `use`.
+    var context_fill: Brush? = none
+    var context_stroke: Brush? = none
 
 ## The state of one conversion.
 struct Converter:

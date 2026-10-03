@@ -21,6 +21,9 @@ struct Renderer:
     var linear: bool = false
     ## The tile of the pattern being painted with, if any.
     var tile: Canvas = Canvas()
+    ## The innermost context element's transform and box, for context paints.
+    var context_transform: Matrix = Matrix()
+    var context_box: Rect? = none
 
     static func make(picture: const Picture*, width: usize, height: usize, linear: bool) -> Renderer!:
         return Renderer(picture = picture, cover = try Coverage.make(width, height), linear = linear)
@@ -53,6 +56,14 @@ struct Renderer:
     mutating func group(index: u32, parent_transform: Matrix, canvas: Canvas*) -> !:
         let item = self.picture.items.items[index]
         let transform = multiply(parent_transform, item.transform)
+        let saved_transform = self.context_transform
+        let saved_box = self.context_box
+        defer:
+            self.context_transform = saved_transform
+            self.context_box = saved_box
+        if item.context:
+            self.context_transform = transform
+            self.context_box = item.context_box
         let isolated = item.opacity < 1.0 or item.clip != 0 or item.mask != 0 or item.filter_count > 0 or item.blend != Blend.normal or item.isolate
         if not isolated:
             try self.children(index, transform, canvas)
@@ -120,9 +131,9 @@ struct Renderer:
                 let gradient = self.picture.gradients.items[brush.server]
                 if gradient.radial and gradient.spread != Spread.hold and math.abs(gradient.r - gradient.fr) < 1e-9 and math.abs(gradient.cx - gradient.fx) + math.abs(gradient.cy - gradient.fy) < 1e-9:
                     return none
-                var space = transform
+                var space = self.context_transform if brush.context else transform
                 if gradient.bbox_units:
-                    let box = self.picture.paths.items[item.path].bounds() else return none
+                    let box = (self.context_box if brush.context else self.picture.paths.items[item.path].bounds()) else return none
                     if not (box.w > 0.0) or not (box.h > 0.0):
                         return none
                     space = multiply(space, bbox_matrix(box))

@@ -258,7 +258,10 @@ func arc_segments(path: Path*, origin: Point, rx_in: f64, ry_in: f64, rotation: 
         delta += math.tau
     elif not sweep and delta > 0.0:
         delta -= math.tau
-    let count = (i64)math.ceil(math.abs(delta) / (math.pi * 0.5) - 1e-9)
+    # As many pieces as kurbo cuts for a tenth of a unit's tolerance (at least four a turn),
+    # so marker vertices fall where resvg puts them.
+    let per_turn = math.max(3.999999, math.pow(1.1163 * math.max(rx, ry) / 0.1, 1.0 / 6.0))
+    let count = (i64)math.ceil(per_turn * math.abs(delta) / math.tau)
     let pieces = count if count > 0 else 1
     let step = delta / (f64)pieces
     let k = 4.0 / 3.0 * math.tan(step / 4.0)

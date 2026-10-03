@@ -52,6 +52,9 @@ struct Brush:
     var color: Color = Color()
     var server: usize = 0
     var opacity: f64 = 1.0
+    ## A context-fill or context-stroke server: placed in the context element's space and
+    ## box (the shape a marker marks, or a `use`), not the painted shape's.
+    var context: bool = false
 
 ## A shape's fill.
 struct FillPaint:
@@ -151,6 +154,10 @@ struct Item:
     var mask: usize = 0
     var filter_start: usize = 0
     var filter_count: usize = 0
+    ## A group that is a context element: what context-fill and context-stroke inside it
+    ## are placed by is its space and `context_box`.
+    var context: bool = false
+    var context_box: Rect? = none
     ## A shape's path (an index into the picture's paths) and paints.
     var path: usize = 0
     var fill: FillPaint? = none

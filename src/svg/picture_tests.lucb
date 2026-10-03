@@ -167,3 +167,12 @@ test "transform-origin moves the origin of a transform":
     defer free(pixels) in memory.heap
     # Scaled about the viewport's centre (10, 10): the rect becomes 7.5..12.5.
     assert(rgba_at(pixels, 20, 10, 10)[3] == 255 and rgba_at(pixels, 20, 6, 6)[3] == 0 and rgba_at(pixels, 20, 3, 3)[3] == 0)
+
+test "markers sit on a path's vertices, turned along it, painted with context-fill":
+    let source = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\"><marker id=\"m\" markerWidth=\"4\" markerHeight=\"4\" refX=\"2\" refY=\"2\" markerUnits=\"userSpaceOnUse\" orient=\"auto\"><rect width=\"4\" height=\"2\" fill=\"context-stroke\"/></marker><path d=\"M5 10 H35\" stroke=\"blue\" stroke-width=\"0.1\" marker-start=\"url(#m)\" marker-end=\"url(#m)\"/></svg>"
+    let pixels = try draw_test(source, 40, 20)
+    defer free(pixels) in memory.heap
+    # Each marker covers x ± 2 above the line (y 8..10), in the stroke's blue.
+    assert(rgba_at(pixels, 40, 4, 8)[2] == 255 and rgba_at(pixels, 40, 34, 8)[2] == 255)
+    assert(rgba_at(pixels, 40, 4, 11)[3] == 0 and rgba_at(pixels, 40, 20, 8)[3] == 0)
+    assert(paint_order("markers stroke")[1] == 1 and paint_order("stroke stroke")[0] == 0 and paint_order("fill x")[0] == 0)

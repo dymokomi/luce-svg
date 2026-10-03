@@ -24,6 +24,17 @@ extend Converter:
         if state.clip_child and child_tag == Tag.symbol:
             return
         var use_state = *state
+        # Inside the copy, context-fill and context-stroke mean the use's own paints.
+        use_state.context_fill = none
+        use_state.context_stroke = none
+        if let fill = try self.fill_of(node, true, state):
+            var brush = fill.brush
+            brush.context = true
+            use_state.context_fill = brush
+        if let stroke = try self.stroke_of(node, true, state):
+            var brush = stroke.brush
+            brush.context = true
+            use_state.context_stroke = brush
         let zero = Length()
         var transform = self.transform_of(node, Attr.transform, state)
         var inner = Matrix(e = self.user_length(node, Attr.x, &use_state, zero), f = self.user_length(node, Attr.y, &use_state, zero))
@@ -45,6 +56,7 @@ extend Converter:
                 let group = try self.open_group(node, &use_state, outer)
                 try self.transformed_children(child, inner, &use_state, group)
                 self.picture.items.items[group].transform = Matrix()
+                self.mark_context(group)
                 try self.close_group(node, &use_state, outer, group, true)
                 if self.picture.items.items[outer].first == 0:
                     self.picture.items.items[outer].parent = 0
@@ -54,6 +66,7 @@ extend Converter:
             let group = try self.open_group(node, &use_state, parent)
             try self.transformed_children(child, multiply(transform, inner), &use_state, group)
             self.picture.items.items[group].transform = Matrix()
+            self.mark_context(group)
             try self.close_group(node, &use_state, parent, group, false)
             return
         transform = multiply(transform, inner)
@@ -76,7 +89,14 @@ extend Converter:
         else:
             try self.children(node, state, group)
         self.picture.items.items[group].transform = transform
+        if self.tree.tag(node) == Tag.use:
+            self.mark_context(group)
         try self.close_group(node, state, parent, group, not is_identity(transform))
+
+    ## Make `group` a context element: what context paints inside it are placed by.
+    mutating func mark_context(group: u32):
+        self.picture.items.items[group].context = true
+        self.picture.items.items[group].context_box = self.object_bounds(group)
 
     ## A nested `svg`: a viewport for its children.
     mutating func nested_svg(node: u32, state: const State*, parent: u32) -> !:

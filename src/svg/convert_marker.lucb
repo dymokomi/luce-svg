@@ -1,0 +1,344 @@
+#==============================================================================================
+#
+#   svg/convert_marker - Markers and paint order
+#
+#   DESCRIPTION:
+#       marker-start, marker-mid and marker-end place a copy of a marker's content at
+#       the first vertex of a shape's path, at every vertex in between, and at the last.
+#       Each copy is translated to its vertex, turned by the marker's orient (an angle,
+#       or along the path with `auto`, bisecting the angle at a corner, the start
+#       reversed with auto-start-reverse), scaled by the stroke width (markerUnits
+#       strokeWidth) or not, fitted by the marker's viewBox, offset by refX and refY,
+#       and clipped to the marker's box unless its overflow is visible. Inside a marker,
+#       context-fill and context-stroke are the marked shape's paints. paint-order puts
+#       the markers before, between or after the fill and stroke. As resvg's usvg does.
+#
+#==============================================================================================
+
+## A segment of a path, for walking its vertices: a move, line or close to `p`, or a
+## cubic through `p1` and `p2` to `p`.
+struct Segment:
+    var verb: Verb = Verb.move
+    var p1: Point = Point()
+    var p2: Point = Point()
+    var p: Point = Point()
+
+## What paint-order says: the three paints in order, 0 fill, 1 stroke, 2 markers.
+func paint_order(text: str) -> u8[3]:
+    var order: u8[3] = [0, 1, 2]
+    var scanner = Scanner(data = text.bytes)
+    var count: usize = 0
+    var seen: u8[3] = [0, 0, 0]
+    while count < 3:
+        scanner.skip_spaces()
+        let word = scanner.identifier()
+        if word.length == 0:
+            break
+        var kind: u8 = 3
+        if word == "fill":
+            kind = 0
+        elif word == "stroke":
+            kind = 1
+        elif word == "markers":
+            kind = 2
+        elif word == "normal" and count == 0:
+            return order
+        if kind == 3 or seen[kind] != 0:
+            return [0, 1, 2]
+        seen[kind] = 1
+        order[count] = kind
+        count += 1
+    scanner.skip_spaces()
+    if count == 0 or not scanner.at_end():
+        return [0, 1, 2]
+    # The paints not named follow in their usual order.
+    for kind: u8 in 0..<3:
+        if seen[kind] == 0 and count < 3:
+            order[count] = kind
+            count += 1
+    return order
+
+extend Converter:
+    ## Append shape item `item` to `parent` with its markers, in paint order.
+    mutating func shape_with_markers(node: u32, item: Item, state: const State*, parent: u32) -> !:
+        let order = paint_order(self.find(node, Attr.paint_order) else "normal")
+        var markers: u32? = none
+        let visible = (self.find(node, Attr.visibility) else "visible") == "visible"
+        if not state.clip_child and visible:
+            markers = try self.markers(node, &item, state)
+        let group = markers else 0
+        if group == 0:
+            discard(try self.picture.append(parent, item))
+            return
+        if order[0] == 2:
+            self.picture.attach(parent, group)
+            discard(try self.picture.append(parent, item))
+        elif order[1] == 2:
+            try self.single_paint(item, order[0], parent)
+            self.picture.attach(parent, group)
+            try self.single_paint(item, order[2], parent)
+        else:
+            discard(try self.picture.append(parent, item))
+            self.picture.attach(parent, group)
+
+    ## Append `item` with only its fill (`kind` 0) or only its stroke (1), if it has it.
+    mutating func single_paint(item: Item, kind: u8, parent: u32) -> !:
+        var copy = item
+        if kind == 0:
+            if item.fill == none:
+                return
+            copy.stroke = none
+        else:
+            if item.stroke == none:
+                return
+            copy.fill = none
+        discard(try self.picture.append(parent, copy))
+
+    ## The group of markers shape `node` (as `item`) carries, detached, or none.
+    mutating func markers(node: u32, item: const Item*, state: const State*) -> u32?!:
+        let names: Attr[3] = [Attr.marker_start, Attr.marker_mid, Attr.marker_end]
+        var any = false
+        for name in names:
+            if self.marker_node(node, name) != none:
+                any = true
+        if not any:
+            return none
+        let bounds = self.picture.paths.items[item.path].bounds()
+        let group = try self.picture.add_item(Item(context = true, context_box = bounds))
+        var marker_state = *state
+        marker_state.context_fill = none
+        marker_state.context_stroke = none
+        if let fill = item.fill:
+            var brush = fill.brush
+            brush.context = true
+            marker_state.context_fill = brush
+        if let stroke = item.stroke:
+            var brush = stroke.brush
+            brush.context = true
+            marker_state.context_stroke = brush
+        var segments = List[Segment]()
+        defer segments.release()
+        try path_segments(&self.picture.paths.items[item.path], &segments)
+        for kind in 0..<(usize)3:
+            let marker = self.marker_node(node, names[kind]) else continue
+            if self.entered(marker):
+                continue
+            try self.place_markers(node, marker, kind, segments.view(), &marker_state, group)
+        if self.picture.items.items[group].first == 0:
+            return none
+        return group
+
+    ## The marker element a marker property of `node` names, if it names one.
+    func marker_node(node: u32, name: Attr) -> u32?:
+        let text = self.find(node, name) else return none
+        let id = func_iri(text) else return none
+        let marker = self.tree.element_by_id(id) else return none
+        if self.tree.tag(marker) != Tag.marker:
+            return none
+        return marker
+
+    ## Place copies of `marker` at the vertices `kind` (0 start, 1 mid, 2 end) selects.
+    mutating func place_markers(shape: u32, marker: u32, kind: usize, segments: const Segment[], state: const State*, group: u32) -> !:
+        if segments.length == 0:
+            return
+        var stroke_scale = 1.0
+        if strings.trim(self.attribute(marker, Attr.marker_units) else "") != "userSpaceOnUse":
+            stroke_scale = self.found_length(shape, Attr.stroke_width, state, 1.0)
+            if not (stroke_scale > 0.0):
+                return
+        let zero = Length()
+        let three = Length(number = 3.0)
+        let r = Rect(x = self.user_length(marker, Attr.ref_x, state, zero), y = self.user_length(marker, Attr.ref_y, state, zero),
+                     w = self.user_length(marker, Attr.marker_width, state, three), h = self.user_length(marker, Attr.marker_height, state, three))
+        if not (r.w > 0.0) or not (r.h > 0.0):
+            return
+        let view = parse_view_box(self.attribute(marker, Attr.view_box) else "")
+        var aspect = AspectRatio()
+        if let text = self.attribute(marker, Attr.preserve_aspect_ratio):
+            aspect = parse_aspect_ratio(text) else AspectRatio()
+        var clip: usize = 0
+        let overflow = strings.trim(self.attribute(marker, Attr.overflow) else "hidden")
+        if overflow == "hidden" or overflow == "scroll":
+            let box = view else Rect(w = r.w, h = r.h)
+            clip = try self.rect_clip(box)
+        let orient = strings.trim(self.attribute(marker, Attr.orient) else "")
+        let last = segments.length - 1
+        for index in 0..<segments.length:
+            var chosen = false
+            var at = Point()
+            let segment = segments[index]
+            if kind == 0:
+                chosen = index == 0 and segment.verb == Verb.move
+                at = segment.p
+            elif kind == 1:
+                chosen = index > 0 and index < last and segment.verb != Verb.close
+                at = segment.p
+            else:
+                chosen = index == last and segment.verb != Verb.move
+                at = subpath_start(segments, index) if segment.verb == Verb.close else segment.p
+            if not chosen:
+                continue
+            var angle = 0.0
+            if orient == "auto" or orient == "auto-start-reverse":
+                angle = vertex_angle(segments, index)
+                if orient == "auto-start-reverse" and index == 0:
+                    angle = math.mod(angle + 180.0, 360.0)
+            else:
+                angle = parse_angle(orient) else 0.0
+            var ts = Matrix(e = at.x, f = at.y)
+            if angle != 0.0:
+                ts = multiply(ts, rotation_matrix(angle))
+            if let box = view:
+                let fit = view_box_transform(box, aspect, r.w * stroke_scale, r.h * stroke_scale)
+                ts = multiply(ts, Matrix(a = math.hypot(fit.a, fit.b), d = math.hypot(fit.c, fit.d)))
+            else:
+                ts = multiply(ts, Matrix(a = stroke_scale, d = stroke_scale))
+            ts = multiply(ts, Matrix(e = -r.x, f = -r.y))
+            let copy = try self.picture.add_item(Item(transform = ts, clip = clip))
+            try self.active.push(marker)
+            try self.children(marker, state, copy)
+            self.active.used -= 1
+            if self.picture.items.items[copy].first != 0:
+                self.picture.attach(group, copy)
+
+    ## A clip path of one rectangle; its index + 1.
+    mutating func rect_clip(rect: Rect) -> usize!:
+        let root = try self.picture.add_item(Item())
+        var path = Path()
+        errdefer path.release()
+        try path.rect(rect.x, rect.y, rect.w, rect.h)
+        let index = self.picture.paths.used
+        try self.picture.paths.push(path)
+        discard(try self.picture.append(root, Item(kind = ItemKind.shape, path = index, fill = FillPaint())))
+        try self.picture.clips.push(ClipServer(root = root))
+        return self.picture.clips.used
+
+## `path` as a list of segments.
+func path_segments(path: const Path*, out: List[Segment]*) -> !:
+    var at: usize = 0
+    var start = Point()
+    for verb in path.verbs.view():
+        match verb:
+            .move:
+                start = path.points.items[at]
+                try out.push(Segment(verb = Verb.move, p = start))
+                at += 1
+            .line:
+                try out.push(Segment(verb = Verb.line, p = path.points.items[at]))
+                at += 1
+            .cubic:
+                try out.push(Segment(verb = Verb.cubic, p1 = path.points.items[at], p2 = path.points.items[at + 1], p = path.points.items[at + 2]))
+                at += 3
+            .close:
+                try out.push(Segment(verb = Verb.close, p = start))
+
+## Where the subpath containing segment `index` began.
+func subpath_start(segments: const Segment[], index: usize) -> Point:
+    var at = index
+    while at > 0:
+        at -= 1
+        if segments[at].verb == Verb.move:
+            return segments[at].p
+    return Point()
+
+## The vertex before segment `index`.
+func previous_vertex(segments: const Segment[], index: usize) -> Point:
+    let segment = segments[index - 1]
+    if segment.verb == Verb.close:
+        return subpath_start(segments, index)
+    return segment.p
+
+func same_point(a: Point, b: Point) -> bool:
+    return math.abs(a.x - b.x) < 1e-6 and math.abs(a.y - b.y) < 1e-6
+
+## The direction, in degrees, a marker at segment `index` faces with orient auto.
+func vertex_angle(segments: const Segment[], index: usize) -> f64:
+    let last = segments.length - 1
+    if index == 0:
+        if segments.length < 2:
+            return 0.0
+        let first = segments[0]
+        let next = segments[1]
+        if first.verb != Verb.move:
+            return 0.0
+        if next.verb == Verb.line:
+            return line_angle(first.p, next.p)
+        if next.verb == Verb.cubic:
+            return line_angle(first.p, next.p) if same_point(first.p, next.p1) else line_angle(first.p, next.p1)
+        return 0.0
+    if index == last:
+        let before = segments[index - 1]
+        let here = segments[index]
+        match here.verb:
+            .move:
+                return 0.0
+            .line:
+                return line_angle(previous_vertex(segments, index), here.p)
+            .cubic:
+                return line_angle(here.p1, here.p) if same_point(here.p2, here.p) else line_angle(here.p2, here.p)
+            .close:
+                let next = subpath_start(segments, index)
+                if before.verb == Verb.line:
+                    return line_angle(before.p, next)
+                if before.verb == Verb.cubic:
+                    return curves_angle(previous_vertex(segments, index), before.p2, before.p, next, next)
+                return 0.0
+    let here = segments[index]
+    let next = segments[index + 1]
+    if here.verb == Verb.move:
+        if next.verb == Verb.line:
+            return line_angle(here.p, next.p)
+        if next.verb == Verb.cubic:
+            return line_angle(here.p, next.p1)
+        return 0.0
+    if here.verb == Verb.close:
+        return 0.0
+    if next.verb == Verb.move:
+        if here.verb == Verb.cubic and not same_point(here.p, here.p2):
+            return line_angle(here.p2, here.p)
+        return line_angle(previous_vertex(segments, index), here.p)
+    if next.verb == Verb.close:
+        let prev = previous_vertex(segments, index)
+        let start = subpath_start(segments, index)
+        if here.verb == Verb.line:
+            return bisector_angle(prev, here.p, here.p, start)
+        return line_angle(prev, start)
+    let prev = previous_vertex(segments, index)
+    if here.verb == Verb.line and next.verb == Verb.line:
+        return bisector_angle(prev, here.p, here.p, next.p)
+    if here.verb == Verb.cubic and next.verb == Verb.cubic:
+        return curves_angle(prev, here.p2, here.p, next.p1, next.p)
+    if here.verb == Verb.line:
+        return curves_angle(prev, prev, here.p, next.p1, next.p)
+    return curves_angle(prev, here.p2, here.p, next.p, next.p)
+
+func line_angle(a: Point, b: Point) -> f64:
+    return bisector_angle(a, b, a, b)
+
+## The angle at `p` between curves arriving from control `c1` (vertex `before`) and
+## leaving towards control `c2` (vertex `after`), falling back to the vertices where a
+## control point sits on `p`.
+func curves_angle(before: Point, c1: Point, p: Point, c2: Point, after: Point) -> f64:
+    if same_point(c1, p):
+        return bisector_angle(before, p, p, c2)
+    if same_point(p, c2):
+        return bisector_angle(c1, p, p, after)
+    return bisector_angle(c1, p, p, c2)
+
+## The angle halfway between the direction a1→a2 and the direction b1→b2, in degrees.
+func bisector_angle(a1: Point, a2: Point, b1: Point, b2: Point) -> f64:
+    let incoming = direction_angle(a2.x - a1.x, a2.y - a1.y)
+    let outgoing = direction_angle(b2.x - b1.x, b2.y - b1.y)
+    let half = (outgoing - incoming) * 0.5
+    var angle = incoming + half
+    if math.abs(half) > math.pi * 0.5:
+        angle -= math.pi
+    return normalized_angle(angle) * 180.0 / math.pi
+
+func direction_angle(x: f64, y: f64) -> f64:
+    let radians = math.atan2(y, x)
+    return 0.0 if math.is_nan(radians) else normalized_angle(radians)
+
+func normalized_angle(radians: f64) -> f64:
+    let value = math.mod(radians, math.tau)
+    return value + math.tau if value < 0.0 else value

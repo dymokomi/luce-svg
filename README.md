@@ -35,8 +35,11 @@ the bitmap). It is built in four stages, each its own set of fragments:
   viewBox, preserveAspectRatio and overflow clipping, transforms with
   `transform-origin` (lengths and keywords, as svgtypes reads them), fills and strokes (colors, `currentColor`, gradients with
   fallbacks, `fill-rule`, dashes, caps, joins including `miter-clip`, `paint-order`,
-  `shape-rendering`), groups only where one is needed (opacity, blend mode, isolation,
-  clip path, mask, filter).
+  `shape-rendering`), markers (start, mid and end; orient auto and
+  auto-start-reverse, markerUnits, viewBox, refX/refY, overflow clipping) with
+  `context-fill` and `context-stroke` (in markers and in `use`), `paint-order`, and
+  groups only where one is needed (opacity, blend mode, isolation, clip path, mask,
+  filter).
 - **Rendering** (`raster.lucb`, `scanline.lucb`, `stroker.lucb`, `canvas.lucb`,
   `shade.lucb`, `render_scene.lucb`): curves flattened to a twentieth of a device
   pixel, coverage from sixteen sub-scanlines a row with exact horizontal spans and true

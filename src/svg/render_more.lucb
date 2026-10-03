@@ -17,8 +17,9 @@ extend Renderer:
         let pattern = self.picture.patterns.items[brush.server]
         var rect = pattern.rect
         var content = Matrix()
+        let base = self.context_transform if brush.context else transform
         if pattern.bbox_units or pattern.content_bbox_units:
-            let box = self.picture.paths.items[item.path].bounds() else return none
+            let box = (self.context_box if brush.context else self.picture.paths.items[item.path].bounds()) else return none
             if not (box.w > 0.0) or not (box.h > 0.0):
                 return none
             if pattern.bbox_units:
@@ -27,7 +28,7 @@ extend Renderer:
                 content = Matrix(a = box.w, d = box.h)
         if let view = pattern.view_box:
             content = view_box_transform(view, pattern.aspect, rect.w, rect.h)
-        let pattern_space = multiply(transform, pattern.transform)
+        let pattern_space = multiply(base, pattern.transform)
         let sx = math.hypot(pattern_space.a, pattern_space.b)
         let sy = math.hypot(pattern_space.c, pattern_space.d)
         let tile_w = math.round(rect.w * sx)
