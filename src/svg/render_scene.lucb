@@ -1,0 +1,234 @@
+#==============================================================================================
+#
+#   svg/render_scene - Drawing a picture's render tree
+#
+#   DESCRIPTION:
+#       Walks the items of a Picture: a shape is flattened, rasterised into coverage
+#       (its fill by its fill rule, its stroke through the stroker) and painted; a group
+#       that needs isolation is drawn into a layer of its own, which its filters, clip
+#       path and mask then shape before it composites onto its parent with its opacity
+#       and blend mode, as resvg does. A clip path is the union of its shapes' coverage,
+#       intersected with its own clip path; a mask is its content drawn in a layer,
+#       limited to its region and turned into coverage by luminance or alpha.
+#
+#==============================================================================================
+
+## The state of drawing into canvases of one size.
+struct Renderer:
+    var picture: const Picture*
+    var cover: Coverage
+    var lines: Polylines = Polylines()
+    var linear: bool = false
+
+    static func make(picture: const Picture*, width: usize, height: usize, linear: bool) -> Renderer!:
+        return Renderer(picture = picture, cover = try Coverage.make(width, height), linear = linear)
+
+    mutating func release():
+        self.cover.release()
+        self.lines.release()
+
+    # mark: Traversal ===========================================================================
+
+    ## Draw the children of group `group` under `transform`.
+    mutating func children(group: u32, transform: Matrix, canvas: Canvas*) -> !:
+        var child = self.picture.items.items[group].first
+        while child != 0:
+            try self.item(child, transform, canvas)
+            child = self.picture.items.items[child].next
+
+    mutating func item(index: u32, transform: Matrix, canvas: Canvas*) -> !:
+        let item = self.picture.items.items[index]
+        match item.kind:
+            .shape:
+                try self.shape(&item, transform, canvas)
+            .image:
+                try self.image(&item, transform, canvas)
+            .group:
+                try self.group(index, transform, canvas)
+
+    ## A group: drawn straight into `canvas` unless it needs a layer of its own.
+    mutating func group(index: u32, parent_transform: Matrix, canvas: Canvas*) -> !:
+        let item = self.picture.items.items[index]
+        let transform = multiply(parent_transform, item.transform)
+        let isolated = item.opacity < 1.0 or item.clip != 0 or item.mask != 0 or item.filter_count > 0 or item.blend != Blend.normal or item.isolate
+        if not isolated:
+            try self.children(index, transform, canvas)
+            return
+        var layer = try Canvas.make(canvas.x, canvas.y, canvas.width, canvas.height)
+        defer layer.release()
+        try self.children(index, transform, &layer)
+        if item.filter_count > 0:
+            try self.apply_filters(&item, transform, &layer)
+        if item.clip != 0:
+            try self.apply_clip(item.clip - 1, transform, &layer)
+        if item.mask != 0:
+            try self.apply_mask(item.mask - 1, transform, &layer)
+        composite_layer(canvas, &layer, item.opacity, item.blend)
+
+    # mark: Shapes ==============================================================================
+
+    mutating func shape(item: const Item*, transform: Matrix, canvas: Canvas*) -> !:
+        if not item.visible:
+            return
+        if item.stroke_first:
+            try self.stroke_shape(item, transform, canvas)
+            try self.fill_shape(item, transform, canvas)
+        else:
+            try self.fill_shape(item, transform, canvas)
+            try self.stroke_shape(item, transform, canvas)
+
+    ## Rasterise the fill of `item` into the coverage; answer whether it touched anything.
+    mutating func fill_coverage(item: const Item*, evenodd: bool, transform: Matrix) -> bool!:
+        self.lines.clear()
+        try flatten(&self.picture.paths.items[item.path], transform, 1.0, &self.lines)
+        self.cover.outline(&self.lines)
+        return self.cover.resolve(evenodd, item.aliased)
+
+    mutating func fill_shape(item: const Item*, transform: Matrix, canvas: Canvas*) -> !:
+        let fill = item.fill else return
+        let shader = (try self.shader(fill.brush, item, transform)) else return
+        if not try self.fill_coverage(item, fill.evenodd, transform):
+            return
+        paint_coverage(canvas, &self.cover, &shader)
+
+    mutating func stroke_shape(item: const Item*, transform: Matrix, canvas: Canvas*) -> !:
+        let stroke = item.stroke else return
+        let shader = (try self.shader(stroke.brush, item, transform)) else return
+        let scale = max_stretch(transform)
+        self.lines.clear()
+        try flatten(&self.picture.paths.items[item.path], Matrix(), scale, &self.lines)
+        let shape = StrokeShape(width = stroke.width, cap = stroke.cap, join = stroke.join, miter_limit = stroke.miter_limit,
+                                dashes = self.picture.dashes.items[stroke.dash_start..<stroke.dash_start + stroke.dash_count],
+                                dash_offset = stroke.dash_offset)
+        var target = StrokeTarget(coverage = &self.cover, transform = transform, scale = scale)
+        defer target.release()
+        try stroke_lines(&self.lines, &shape, &target)
+        if not self.cover.resolve(false, item.aliased):
+            return
+        paint_coverage(canvas, &self.cover, &shader)
+
+    ## The shader `brush` makes for `item` drawn through `transform`, or none when it
+    ## paints nothing (a bounding-box server on a shape without area).
+    mutating func shader(brush: Brush, item: const Item*, transform: Matrix) -> Shader?!:
+        match brush.kind:
+            .solid:
+                return Shader(color = premultiplied(brush.color, brush.opacity, self.linear), linear = self.linear)
+            .linear, .radial:
+                let gradient = self.picture.gradients.items[brush.server]
+                var space = transform
+                if gradient.bbox_units:
+                    let box = self.picture.paths.items[item.path].bounds() else return none
+                    if not (box.w > 0.0) or not (box.h > 0.0):
+                        return none
+                    space = multiply(space, bbox_matrix(box))
+                space = multiply(space, gradient.transform)
+                let inverse = invert(space) else return none
+                let stops = self.picture.stops.items[gradient.stop_start..<gradient.stop_start + gradient.stop_count]
+                return Shader(kind = brush.kind, opacity = brush.opacity, linear = self.linear, gradient = gradient, stops = stops, inverse = inverse)
+            .pattern:
+                return try self.pattern_shader(brush, item, transform)
+
+    # mark: Clip paths and masks ================================================================
+
+    ## Scale `layer` by the coverage of clip path `index` under `transform`.
+    mutating func apply_clip(index: usize, transform: Matrix, layer: Canvas*) -> !:
+        let mask = try new f32[layer.width * layer.height] in memory.heap
+        defer free(mask) in memory.heap
+        try self.clip_coverage(index, transform, mask)
+        layer.multiply(mask)
+
+    ## Fill `mask` with the coverage of clip path `index` (which it must start cleared).
+    mutating func clip_coverage(index: usize, transform: Matrix, mask: f32[]) -> !:
+        let clip = self.picture.clips.items[index]
+        try self.union_children(clip.root, multiply(transform, clip.transform), mask)
+        if clip.clip != 0:
+            let outer = try new f32[mask.length] in memory.heap
+            defer free(outer) in memory.heap
+            try self.clip_coverage(clip.clip - 1, transform, outer)
+            for at in 0..<mask.length:
+                mask[at] *= outer[at]
+
+    ## Union the coverage of the shapes under `group` into `mask`.
+    mutating func union_children(group: u32, transform: Matrix, mask: f32[]) -> !:
+        var child = self.picture.items.items[group].first
+        while child != 0:
+            let item = self.picture.items.items[child]
+            match item.kind:
+                .shape:
+                    if item.visible:
+                        let fill = item.fill else FillPaint()
+                        if try self.fill_coverage(&item, fill.evenodd, transform):
+                            self.union_region(mask)
+                .group:
+                    let inner = multiply(transform, item.transform)
+                    if item.clip != 0:
+                        let part = try new f32[mask.length] in memory.heap
+                        defer free(part) in memory.heap
+                        try self.union_children(child, inner, part)
+                        let clip_part = try new f32[mask.length] in memory.heap
+                        defer free(clip_part) in memory.heap
+                        try self.clip_coverage(item.clip - 1, inner, clip_part)
+                        for at in 0..<mask.length:
+                            let c = part[at] * clip_part[at]
+                            mask[at] = mask[at] + c - mask[at] * c
+                    else:
+                        try self.union_children(child, inner, mask)
+                .image:
+                    continue
+            child = item.next
+
+    ## Union the coverage's resolved region into `mask`.
+    mutating func union_region(mask: f32[]):
+        let cover = &self.cover
+        for row in cover.row0..<cover.row1:
+            for column in cover.col0..<cover.col1:
+                let at = row * cover.width + column
+                let c = cover.values[at]
+                mask[at] = mask[at] + c - mask[at] * c
+
+    ## Scale `layer` by mask `index` under `transform`.
+    mutating func apply_mask(index: usize, transform: Matrix, layer: Canvas*) -> !:
+        let mask = self.picture.masks.items[index]
+        if self.picture.items.items[mask.root].first == 0:
+            layer.clear()
+            return
+        var content = try Canvas.make(layer.x, layer.y, layer.width, layer.height)
+        defer content.release()
+        try self.children(mask.root, transform, &content)
+        # Only the mask's region counts.
+        var region = Path()
+        defer region.release()
+        try region.rect(mask.rect.x, mask.rect.y, mask.rect.w, mask.rect.h)
+        self.lines.clear()
+        try flatten(&region, transform, 1.0, &self.lines)
+        self.cover.outline(&self.lines)
+        let values = try new f32[layer.width * layer.height] in memory.heap
+        defer free(values) in memory.heap
+        if self.cover.resolve(false, false):
+            for row in self.cover.row0..<self.cover.row1:
+                for column in self.cover.col0..<self.cover.col1:
+                    values[row * layer.width + column] = self.cover.values[row * self.cover.width + column]
+        content.multiply(values)
+        if mask.mask != 0:
+            try self.apply_mask(mask.mask - 1, transform, layer)
+        for at in 0..<values.length:
+            let p = at * 4
+            if mask.luminance:
+                values[at] = (f32)self.luminance(content.pixels[p], content.pixels[p + 1], content.pixels[p + 2], content.pixels[p + 3])
+            else:
+                values[at] = content.pixels[p + 3]
+        layer.multiply(values)
+
+    ## The luminance-times-alpha of a premultiplied working-space pixel.
+    func luminance(r: f32, g: f32, b: f32, a: f32) -> f64:
+        if a <= 0.0:
+            return 0.0
+        var red = (f64)r
+        var green = (f64)g
+        var blue = (f64)b
+        if self.linear:
+            let alpha = (f64)a
+            red = transfer.srgb_encode(red / alpha) * alpha
+            green = transfer.srgb_encode(green / alpha) * alpha
+            blue = transfer.srgb_encode(blue / alpha) * alpha
+        return math.clamp(red * 0.2126 + green * 0.7152 + blue * 0.0722, 0.0, 1.0)

@@ -108,7 +108,10 @@ test "colors parse from hex, rgb() and names, and paints are not colors":
     let white = parse_color("whitesmoke") else error(invalid, "a color did not parse")
     assert(near(white.r, 245.0 / 255.0, 1e-12))
     assert(parse_color("none") == none and parse_color("currentColor") == none and parse_color("#12") == none)
-    assert(parse_color("rgb(1, 2)") == none and parse_color("rgb(1, 2, 3, 4)") == none and parse_color("blurple") == none)
+    assert(parse_color("rgb(1, 2)") == none and parse_color("rgb(1, 2, 3, 4, 5)") == none and parse_color("blurple") == none)
+    # A fourth value is the alpha, which parse_color drops.
+    let faded = parse_color("rgb(255, 0, 0, 0.5)") else error(invalid, "a color did not parse")
+    assert(faded.r == 1.0 and faded.g == 0.0)
 
 test "paints come from attributes and style, inherit through groups, and default to a black fill":
     let drawing = try parse("<svg viewBox=\"0 0 24 24\"><rect width=\"2\" height=\"2\"/><g fill=\"red\" stroke=\"#00f\" opacity=\"0.5\"><g><circle r=\"2\" fill-opacity=\"0.5\"/></g><rect width=\"2\" height=\"2\" style=\"fill: currentColor; stroke:none\" fill=\"green\"/></g></svg>")

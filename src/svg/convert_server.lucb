@@ -1,0 +1,188 @@
+#==============================================================================================
+#
+#   svg/convert_server - Gradients as paint servers
+#
+#   DESCRIPTION:
+#       Converts a linearGradient or radialGradient into a GradientServer, once per
+#       element. A gradient takes each attribute it does not set from the gradients it
+#       references by `href` (a chain, cycles cut), and its stops from the first in the
+#       chain that has any. Stop offsets are numbers or percentages, kept in order and
+#       nudged apart where equal so every stop shows; a gradient with one stop paints its
+#       color, with none it does not paint, and a radial gradient with no radius paints
+#       its last stop. Lengths in bounding-box units stay fractions, resolved against
+#       the painted shape when it is drawn.
+#
+#==============================================================================================
+
+## A server cache entry for a node converted to nothing.
+let no_server: u32 = 0xFFFFFFFF
+
+extend Converter:
+    ## The paint server `node` converts to: kind 1 (gradient), 2 (pattern) or 3 (a plain
+    ## color, an index into server_colors) and its index; kind 0 when it cannot paint.
+    mutating func server(node: u32) -> (u32, usize)!:
+        let cached = self.servers[node]
+        if cached == no_server:
+            return (0, 0)
+        if cached != 0:
+            return (cached & 3, (usize)(cached >> 2))
+        var result: (u32, usize) = (0, 0)
+        let tag = self.tree.tag(node)
+        if tag == Tag.pattern:
+            if not self.entered(node):
+                result = try self.pattern_server(node)
+        else:
+            result = try self.gradient_server(node)
+        self.servers[node] = no_server if result.0 == 0 else ((u32)result.1 << 2) | result.0
+        return result
+
+    ## The gradient `node` converts to (see `server`).
+    mutating func gradient_server(node: u32) -> (u32, usize)!:
+        let state = State(view_box = self.root_view())
+        let holder = self.stops_holder(node) else return (0, 0)
+        let start = self.picture.stops.used
+        try self.stops(holder)
+        let count = self.picture.stops.used - start
+        if count == 0:
+            return (0, 0)
+        if count == 1:
+            let color = self.picture.stops.items[start].color
+            self.picture.stops.truncate(start)
+            return (3, try self.plain_color(color))
+        let radial = self.tree.tag(node) == Tag.radial_gradient
+        let units_text = self.attribute(self.gradient_source(node, Attr.gradient_units), Attr.gradient_units) else "objectBoundingBox"
+        let bbox_units = strings.trim(units_text) != "userSpaceOnUse"
+        let transform_source = self.gradient_source(node, Attr.gradient_transform)
+        var server = GradientServer(radial = radial, bbox_units = bbox_units, transform = self.transform_of(transform_source, Attr.gradient_transform, &state),
+                                    stop_start = start, stop_count = count)
+        let spread = strings.trim(self.attribute(self.gradient_source(node, Attr.spread_method), Attr.spread_method) else "pad")
+        server.spread = Spread.reflect if spread == "reflect" else (Spread.repeat if spread == "repeat" else Spread.hold)
+        let zero = Length()
+        let half = Length(number = 50.0, unit = Unit.percent)
+        if radial:
+            server.r = self.gradient_length(node, Attr.r, bbox_units, &state, half)
+            server.fr = math.max(0.0, self.gradient_length(node, Attr.fr, bbox_units, &state, zero))
+            if not (server.r > 0.0):
+                let last = self.picture.stops.items[start + count - 1].color
+                self.picture.stops.truncate(start)
+                return (3, try self.plain_color(last))
+            server.cx = self.gradient_length(node, Attr.cx, bbox_units, &state, half)
+            server.cy = self.gradient_length(node, Attr.cy, bbox_units, &state, half)
+            server.fx = self.gradient_length(node, Attr.fx, bbox_units, &state, Length(number = server.cx))
+            server.fy = self.gradient_length(node, Attr.fy, bbox_units, &state, Length(number = server.cy))
+        else:
+            server.x1 = self.gradient_length(node, Attr.x1, bbox_units, &state, zero)
+            server.y1 = self.gradient_length(node, Attr.y1, bbox_units, &state, zero)
+            server.x2 = self.gradient_length(node, Attr.x2, bbox_units, &state, Length(number = 100.0, unit = Unit.percent))
+            server.y2 = self.gradient_length(node, Attr.y2, bbox_units, &state, zero)
+        let index = self.picture.gradients.used
+        try self.picture.gradients.push(server)
+        return (1, index)
+
+    ## Remember a plain color a server became; answer its index.
+    mutating func plain_color(color: Rgba) -> usize!:
+        let index = self.server_colors.used
+        try self.server_colors.push(color)
+        return index
+
+    ## The viewBox of the root `svg`, which percentages in paint servers resolve against.
+    func root_view() -> Rect:
+        let svg = self.tree.root_element()
+        if let box = parse_view_box(self.attribute(svg, Attr.view_box) else ""):
+            return box
+        return Rect(w = self.picture.width, h = self.picture.height)
+
+    ## A gradient length attribute, from the gradient or the chain it references.
+    func gradient_length(node: u32, name: Attr, bbox_units: bool, state: const State*, default: Length) -> f64:
+        let source = self.gradient_source(node, name)
+        return self.length(source, name, bbox_units, state, default)
+
+    ## The gradient in `node`'s href chain that sets `name` (`node` when none does):
+    ## only gradients of the right kind pass on geometry; units, spread and transform
+    ## pass between both kinds.
+    func gradient_source(node: u32, name: Attr) -> u32:
+        if self.has(node, name):
+            return node
+        let shared = name == Attr.gradient_units or name == Attr.spread_method or name == Attr.gradient_transform
+        let wanted = self.tree.tag(node)
+        var at = node
+        for _ in 0..<64:
+            let next = self.tree.linked(at, Attr.href) else return node
+            if next == at or next == node:
+                return node
+            let tag = self.tree.tag(next)
+            let fits = (tag == Tag.linear_gradient or tag == Tag.radial_gradient) and (shared or tag == wanted)
+            if not fits:
+                return node
+            if self.has(next, name):
+                return next
+            at = next
+        return node
+
+    ## The first gradient in `node`'s href chain with stops, or none.
+    func stops_holder(node: u32) -> u32?:
+        var at = node
+        for _ in 0..<64:
+            let tag = self.tree.tag(at)
+            if tag != Tag.linear_gradient and tag != Tag.radial_gradient:
+                return none
+            var child = self.tree.first_child(at)
+            while child != 0:
+                if self.tree.is_element(child) and self.tree.tag(child) == Tag.stop:
+                    return at
+                child = self.tree.next_sibling(child)
+            let next = self.tree.linked(at, Attr.href) else return none
+            if next == at or next == node:
+                return none
+            at = next
+        return none
+
+    ## Add the stops of gradient `holder` to the picture, offsets made increasing.
+    mutating func stops(holder: u32) -> !:
+        let start = self.picture.stops.used
+        var previous = 0.0
+        var child = self.tree.first_child(holder)
+        while child != 0:
+            if self.tree.is_element(child) and self.tree.tag(child) == Tag.stop:
+                var offset = previous
+                if let text = self.attribute(child, Attr.offset):
+                    if let value = parse_length(text):
+                        if value.unit == Unit.plain:
+                            offset = value.number
+                        elif value.unit == Unit.percent:
+                            offset = value.number / 100.0
+                previous = offset
+                var color = Rgba()
+                if let text = self.attribute(child, Attr.stop_color):
+                    if strings.trim(text) == "currentColor":
+                        color = parse_rgba(self.find(child, Attr.color) else "black") else Rgba()
+                    else:
+                        color = parse_rgba(text) else Rgba()
+                color.a *= self.opacity(child, Attr.stop_opacity, 1.0)
+                try self.picture.stops.push(GradientStop(offset = math.clamp(offset, 0.0, 1.0), color = color))
+            child = self.tree.next_sibling(child)
+        # Three stops at one offset: the middle one can never show.
+        var index = start
+        while self.picture.stops.used >= 3 and index + 2 < self.picture.stops.used:
+            let a = self.picture.stops.items[index].offset
+            let b = self.picture.stops.items[index + 1].offset
+            let c = self.picture.stops.items[index + 2].offset
+            if a == b and b == c:
+                for at in index + 1..<self.picture.stops.used - 1:
+                    self.picture.stops.items[at] = self.picture.stops.items[at + 1]
+                self.picture.stops.used -= 1
+            else:
+                index += 1
+        let epsilon = 1.1920929e-7
+        let stops = self.picture.stops.items[start..<self.picture.stops.used]
+        for position in 0..<stops.length:
+            let at = position
+            if at + 1 < stops.length and stops[at].offset == 0.0 and stops[at + 1].offset == 0.0:
+                stops[at + 1].offset = epsilon
+        var at: usize = 1
+        while at < stops.length:
+            if stops[at - 1].offset >= stops[at].offset:
+                let before = stops[at - 1].offset
+                stops[at - 1].offset = math.clamp(before - epsilon, 0.0, 1.0)
+                stops[at].offset = math.clamp(before, 0.0, 1.0)
+            at += 1

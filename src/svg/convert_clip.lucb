@@ -1,0 +1,116 @@
+#==============================================================================================
+#
+#   svg/convert_clip - Clip paths and masks
+#
+#   DESCRIPTION:
+#       A clip path becomes a ClipServer whose content (its shapes, text and uses, never
+#       a `line`, filled black with clip-rule and never stroked) is in the clipped
+#       element's user space, or in its bounding box with clipPathUnits
+#       objectBoundingBox. A mask becomes a MaskServer: its region (by default the box
+#       grown by 10% each way), its content in user space or bounding-box units, and
+#       luminance or alpha as mask-type says. Either may itself be clipped or masked. An
+#       invalid one (a reference to the wrong element, a malformed transform, a
+#       bounding-box one on an element without a box, or one with no content) hides the
+#       element it applies to; a reference back into itself is ignored.
+#
+#==============================================================================================
+
+extend Converter:
+    ## The clip path `node` makes for an element with `object_box`: its index + 1, or 0
+    ## when it is invalid and hides the element.
+    mutating func clip_path(node: u32, state: const State*, object_box: Rect?) -> usize!:
+        if self.tree.tag(node) != Tag.clip_path:
+            return 0
+        var transform = Matrix()
+        if let text = self.attribute(node, Attr.transform):
+            let parsed = parse_transform_list(text) else return 0
+            if not invertible(parsed):
+                return 0
+            transform = self.transform_of(node, Attr.transform, state)
+        if strings.trim(self.attribute(node, Attr.clip_path_units) else "") == "objectBoundingBox":
+            let box = object_box else return 0
+            transform = multiply(transform, bbox_matrix(box))
+        var nested: usize = 0
+        if let link = self.link_attribute(node, Attr.clip_path):
+            if not self.entered(link):
+                try self.active.push(node)
+                nested = try self.clip_path(link, state, object_box)
+                self.active.used -= 1
+                if nested == 0:
+                    return 0
+        try self.active.push(node)
+        let root = try self.picture.add_item(Item())
+        let clip_state = State(clip_child = true, view_box = state.view_box)
+        try self.clip_children(node, &clip_state, root)
+        self.active.used -= 1
+        if self.picture.items.items[root].first == 0:
+            return 0
+        try self.picture.clips.push(ClipServer(transform = transform, clip = nested, root = root))
+        return self.picture.clips.used
+
+    ## The content of a clip path (or of a group inside one) into `parent`.
+    mutating func clip_children(node: u32, state: const State*, parent: u32) -> !:
+        var child = self.tree.first_child(node)
+        while child != 0:
+            try self.clip_child(child, state, parent)
+            child = self.tree.next_sibling(child)
+
+    mutating func clip_child(node: u32, state: const State*, parent: u32) -> !:
+        if not self.tree.is_element(node):
+            return
+        let tag = self.tree.tag(node)
+        if not is_graphic(tag) or not self.visible_element(node):
+            return
+        if tag == Tag.use:
+            try self.use_element(node, state, parent)
+            return
+        let group = try self.open_group(node, state, parent)
+        if is_shape_tag(tag) and tag != Tag.line:
+            if let path = try self.shape_path(node, tag, state):
+                try self.shape(node, path, state, group)
+        elif tag == Tag.text:
+            try self.text_element(node, state, group)
+        try self.close_group(node, state, parent, group, false)
+
+    ## The mask `node` makes for an element with `object_box`: its index + 1, or 0 when
+    ## it is invalid and hides the element.
+    mutating func mask_element(node: u32, state: const State*, object_box: Rect?) -> usize!:
+        if self.tree.tag(node) != Tag.mask:
+            return 0
+        let bbox_units = strings.trim(self.attribute(node, Attr.mask_units) else "") != "userSpaceOnUse"
+        let content_bbox = strings.trim(self.attribute(node, Attr.mask_content_units) else "") == "objectBoundingBox"
+        var rect = Rect(x = self.length(node, Attr.x, bbox_units, state, Length(number = -10.0, unit = Unit.percent)),
+                        y = self.length(node, Attr.y, bbox_units, state, Length(number = -10.0, unit = Unit.percent)),
+                        w = self.length(node, Attr.width, bbox_units, state, Length(number = 120.0, unit = Unit.percent)),
+                        h = self.length(node, Attr.height, bbox_units, state, Length(number = 120.0, unit = Unit.percent)))
+        if not (rect.w > 0.0) or not (rect.h > 0.0):
+            return 0
+        let luminance = strings.trim(self.attribute(node, Attr.mask_type) else "luminance") != "alpha"
+        if bbox_units:
+            if let box = object_box:
+                rect = rect_in_bbox(rect, box)
+            else:
+                # Nothing to measure the region by: the mask hides everything.
+                let empty = try self.picture.add_item(Item())
+                try self.picture.masks.push(MaskServer(rect = rect, luminance = true, root = empty))
+                return self.picture.masks.used
+        var nested: usize = 0
+        if let link = self.link_attribute(node, Attr.mask):
+            if not self.entered(link):
+                try self.active.push(node)
+                nested = try self.mask_element(link, state, object_box)
+                self.active.used -= 1
+                if nested == 0:
+                    return 0
+        try self.active.push(node)
+        defer self.active.used -= 1
+        let root = try self.picture.add_item(Item())
+        var content = root
+        if content_bbox:
+            let box = object_box else return 0
+            content = try self.picture.append(root, Item(transform = bbox_matrix(box)))
+        try self.children(node, state, content)
+        if self.picture.items.items[content].first == 0:
+            return 0
+        try self.picture.masks.push(MaskServer(rect = rect, luminance = luminance, mask = nested, root = root))
+        return self.picture.masks.used

@@ -24,6 +24,7 @@ enum Join as u8:
     miter = 0
     round = 1
     bevel = 2
+    miter_clip = 3
 
 ## How a stroke is drawn, in viewBox units: SVG's defaults are one unit wide, butt caps,
 ## miter joins with a limit of 4, and no dashes.

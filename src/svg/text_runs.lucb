@@ -37,7 +37,7 @@ func trim_space(drawing: Drawing*, run: const Run*, spacing: Spacing*):
 
 ## The first number of a coordinate list attribute, or none.
 func first_number(tag: str, name: str) -> f64?:
-    let value = attribute(tag, name) else return none
+    let value = tag_attribute(tag, name) else return none
     var pos: usize = 0
     if not at_number_or_space(value.bytes, &pos):
         return none

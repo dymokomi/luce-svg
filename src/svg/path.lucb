@@ -1,0 +1,451 @@
+#==============================================================================================
+#
+#   svg/path - Paths: building, path data, bounds and transforms
+#
+#   DESCRIPTION:
+#       A Path is a sequence of move, line, cubic and close verbs over points, the form
+#       every SVG shape becomes. Quadratic curves are raised to cubics and elliptical arcs
+#       are split into cubics of at most a quarter turn, so later stages see two kinds of
+#       segment. `parse_path_data` reads SVG path data with resvg's rules: relative
+#       commands, implicit line-tos after a move-to, reflected control points for S and
+#       T, an implicit move-to after a close, repeated closes dropped, and on an error
+#       everything up to it kept, as the specification asks. Bounds are tight: a curve
+#       counts its extrema, not its control points.
+#
+#==============================================================================================
+
+## What a path does next: start a subpath at one point, draw a line to one point, draw a
+## cubic curve through two control points to a third, or close the subpath.
+pub enum Verb:
+    move
+    line
+    cubic
+    close
+
+## A path: verbs and the points they use (move and line one each, cubic three, close
+## none). It owns its storage; `release` frees it.
+pub struct Path:
+    var verbs: List[Verb] = List[Verb]()
+    var points: List[Point] = List[Point]()
+    ## Where the last move started its subpath, and whether a subpath is open.
+    var start: Point = Point()
+    var open: bool = false
+
+    ## Free the path's storage; it is empty afterwards.
+    pub mutating func release():
+        self.verbs.release()
+        self.points.release()
+        self.open = false
+
+    ## How many verbs the path has.
+    pub func verb_count() -> usize:
+        return self.verbs.used
+
+    ## Verb `index`.
+    pub func verb(index: usize) -> Verb:
+        return self.verbs.items[index]
+
+    ## How many points the path has.
+    pub func point_count() -> usize:
+        return self.points.used
+
+    ## Point `index` (in verb order).
+    pub func point(index: usize) -> Point:
+        return self.points.items[index]
+
+    ## The current point: where the last verb ended.
+    pub func last_point() -> Point?:
+        if self.verbs.used == 0:
+            return none
+        if self.verbs.items[self.verbs.used - 1] == Verb.close:
+            return self.start
+        return self.points.items[self.points.used - 1]
+
+    ## Start a subpath at (`x`, `y`). A move right after a move replaces it.
+    pub mutating func move_to(x: f64, y: f64) -> !:
+        if self.verbs.used > 0 and self.verbs.items[self.verbs.used - 1] == Verb.move:
+            self.points.items[self.points.used - 1] = Point(x, y)
+        else:
+            try self.verbs.push(Verb.move)
+            try self.points.push(Point(x, y))
+        self.start = Point(x, y)
+        self.open = true
+
+    ## Make sure a subpath is open, starting one where the last ended.
+    mutating func ensure_open() -> !:
+        if not self.open:
+            let at = self.last_point() else Point()
+            try self.move_to(at.x, at.y)
+
+    ## A line to (`x`, `y`).
+    pub mutating func line_to(x: f64, y: f64) -> !:
+        try self.ensure_open()
+        try self.verbs.push(Verb.line)
+        try self.points.push(Point(x, y))
+
+    ## A cubic curve through (`x1`, `y1`) and (`x2`, `y2`) to (`x`, `y`).
+    pub mutating func cubic_to(x1: f64, y1: f64, x2: f64, y2: f64, x: f64, y: f64) -> !:
+        try self.ensure_open()
+        try self.verbs.push(Verb.cubic)
+        try self.points.push(Point(x1, y1))
+        try self.points.push(Point(x2, y2))
+        try self.points.push(Point(x, y))
+
+    ## A quadratic curve through (`x1`, `y1`) to (`x`, `y`), stored as the same cubic.
+    pub mutating func quad_to(x1: f64, y1: f64, x: f64, y: f64) -> !:
+        try self.ensure_open()
+        let origin = self.last_point() else Point()
+        try self.cubic_to(origin.x + (x1 - origin.x) * 2.0 / 3.0, origin.y + (y1 - origin.y) * 2.0 / 3.0,
+                          x + (x1 - x) * 2.0 / 3.0, y + (y1 - y) * 2.0 / 3.0, x, y)
+
+    ## An SVG elliptical arc from the current point to (`x`, `y`): radii `rx` and `ry`, the
+    ## x axis turned `rotation` degrees, the large or small arc, swept positively or not.
+    ## Radii too small to reach are scaled up; zero radii or coincident ends draw a line.
+    pub mutating func arc_to(rx: f64, ry: f64, rotation: f64, large: bool, sweep: bool, x: f64, y: f64) -> !:
+        let origin = self.last_point() else return
+        try arc_segments(&self, origin, rx, ry, rotation, large, sweep, x, y)
+
+    ## Close the current subpath; a close right after a close is dropped.
+    pub mutating func close() -> !:
+        if self.verbs.used == 0 or self.verbs.items[self.verbs.used - 1] == Verb.close:
+            return
+        try self.verbs.push(Verb.close)
+        self.open = false
+
+    ## A rectangle as one closed subpath.
+    pub mutating func rect(x: f64, y: f64, width: f64, height: f64) -> !:
+        try self.move_to(x, y)
+        try self.line_to(x + width, y)
+        try self.line_to(x + width, y + height)
+        try self.line_to(x, y + height)
+        try self.close()
+
+    ## The tight bounds of the path, or none when it has no points.
+    pub func bounds() -> Rect?:
+        return self.bounds_through(Matrix())
+
+    ## The tight bounds of the path mapped through `transform`.
+    pub func bounds_through(transform: Matrix) -> Rect?:
+        if self.points.used == 0:
+            return none
+        var box = Box()
+        var at: usize = 0
+        var current = Point()
+        for verb in self.verbs.view():
+            match verb:
+                .move, .line:
+                    current = apply(transform, self.points.items[at].x, self.points.items[at].y)
+                    box.add(current)
+                    at += 1
+                .cubic:
+                    let p1 = apply(transform, self.points.items[at].x, self.points.items[at].y)
+                    let p2 = apply(transform, self.points.items[at + 1].x, self.points.items[at + 1].y)
+                    let p3 = apply(transform, self.points.items[at + 2].x, self.points.items[at + 2].y)
+                    cubic_extrema(&box, current, p1, p2, p3)
+                    current = p3
+                    at += 3
+                .close:
+                    continue
+        return box.rect()
+
+    ## A copy of the path with every point mapped through `transform`.
+    pub func transformed(transform: Matrix) -> Path!:
+        var copy = Path()
+        errdefer copy.release()
+        for verb in self.verbs.view():
+            try copy.verbs.push(verb)
+        for p in self.points.view():
+            try copy.points.push(apply(transform, p.x, p.y))
+        copy.start = apply(transform, self.start.x, self.start.y)
+        copy.open = self.open
+        return copy
+
+    ## A copy of the path.
+    pub func copy() -> Path!:
+        return try self.transformed(Matrix())
+
+## A bounding box being grown point by point.
+struct Box:
+    var low: Point = Point(math.infinity, math.infinity)
+    var high: Point = Point(-math.infinity, -math.infinity)
+
+    mutating func add(p: Point):
+        self.low = Point(math.min(self.low.x, p.x), math.min(self.low.y, p.y))
+        self.high = Point(math.max(self.high.x, p.x), math.max(self.high.y, p.y))
+
+    mutating func add_rect(r: Rect):
+        self.add(Point(r.x, r.y))
+        self.add(Point(r.x + r.w, r.y + r.h))
+
+    func empty() -> bool:
+        return self.low.x > self.high.x
+
+    func rect() -> Rect?:
+        if self.empty():
+            return none
+        return Rect(x = self.low.x, y = self.low.y, w = self.high.x - self.low.x, h = self.high.y - self.low.y)
+
+## Grow `box` by the cubic from `p0` through `p1` and `p2` to `p3`: its ends and the
+## points where it turns back on either axis.
+func cubic_extrema(box: Box*, p0: Point, p1: Point, p2: Point, p3: Point):
+    box.add(p0)
+    box.add(p3)
+    for axis in 0..<(usize)2:
+        let a0 = p0.x if axis == 0 else p0.y
+        let a1 = p1.x if axis == 0 else p1.y
+        let a2 = p2.x if axis == 0 else p2.y
+        let a3 = p3.x if axis == 0 else p3.y
+        # The derivative's coefficients: a·t² + b·t + c.
+        let a = 3.0 * (-a0 + 3.0 * a1 - 3.0 * a2 + a3)
+        let b = 6.0 * (a0 - 2.0 * a1 + a2)
+        let c = 3.0 * (a1 - a0)
+        var roots: f64[2] = [-1.0, -1.0]
+        if math.abs(a) < 1e-12:
+            if math.abs(b) > 1e-12:
+                roots[0] = -c / b
+        else:
+            let discriminant = b * b - 4.0 * a * c
+            if discriminant >= 0.0:
+                let root = math.sqrt(discriminant)
+                roots[0] = (-b + root) / (2.0 * a)
+                roots[1] = (-b - root) / (2.0 * a)
+        for t in roots:
+            if t > 0.0 and t < 1.0:
+                box.add(cubic_point(p0, p1, p2, p3, t))
+
+## The point at `t` along a cubic.
+func cubic_point(p0: Point, p1: Point, p2: Point, p3: Point, t: f64) -> Point:
+    let u = 1.0 - t
+    let a = u * u * u
+    let b = 3.0 * u * u * t
+    let c = 3.0 * u * t * t
+    let d = t * t * t
+    return Point(a * p0.x + b * p1.x + c * p2.x + d * p3.x, a * p0.y + b * p1.y + c * p2.y + d * p3.y)
+
+# mark: Arcs ==================================================================================
+
+## Append the cubics of an SVG arc from `origin` to (`x`, `y`) to `path`.
+func arc_segments(path: Path*, origin: Point, rx_in: f64, ry_in: f64, rotation: f64, large: bool, sweep: bool, x: f64, y: f64) -> !:
+    var rx = math.abs(rx_in)
+    var ry = math.abs(ry_in)
+    if rx < 1e-12 or ry < 1e-12 or (origin.x == x and origin.y == y):
+        try path.line_to(x, y)
+        return
+    let phi = rotation * math.pi / 180.0
+    let cos_phi = math.cos(phi)
+    let sin_phi = math.sin(phi)
+    let dx = (origin.x - x) * 0.5
+    let dy = (origin.y - y) * 0.5
+    let x1p = cos_phi * dx + sin_phi * dy
+    let y1p = -sin_phi * dx + cos_phi * dy
+    let lambda = x1p * x1p / (rx * rx) + y1p * y1p / (ry * ry)
+    if lambda > 1.0:
+        let scale = math.sqrt(lambda)
+        rx *= scale
+        ry *= scale
+    let numerator = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p
+    let denominator = rx * rx * y1p * y1p + ry * ry * x1p * x1p
+    var factor = math.sqrt(numerator / denominator) if numerator > 0.0 and denominator > 0.0 else 0.0
+    if large == sweep:
+        factor = -factor
+    let cxp = factor * rx * y1p / ry
+    let cyp = -factor * ry * x1p / rx
+    let cx = cos_phi * cxp - sin_phi * cyp + (origin.x + x) * 0.5
+    let cy = sin_phi * cxp + cos_phi * cyp + (origin.y + y) * 0.5
+    let start = math.atan2((y1p - cyp) / ry, (x1p - cxp) / rx)
+    var delta = math.atan2((-y1p - cyp) / ry, (-x1p - cxp) / rx) - start
+    if sweep and delta < 0.0:
+        delta += math.tau
+    elif not sweep and delta > 0.0:
+        delta -= math.tau
+    let count = (i64)math.ceil(math.abs(delta) / (math.pi * 0.5) - 1e-9)
+    let pieces = count if count > 0 else 1
+    let step = delta / (f64)pieces
+    let k = 4.0 / 3.0 * math.tan(step / 4.0)
+    var angle = start
+    for piece in 0..<pieces:
+        let a0 = angle
+        let a1 = angle + step
+        let c0 = math.cos(a0)
+        let s0 = math.sin(a0)
+        let c1 = math.cos(a1)
+        let s1 = math.sin(a1)
+        # The unit-circle control points, then the ellipse's scale, rotation and centre.
+        let q1 = arc_point(cx, cy, rx, ry, cos_phi, sin_phi, c0 - k * s0, s0 + k * c0)
+        let q2 = arc_point(cx, cy, rx, ry, cos_phi, sin_phi, c1 + k * s1, s1 - k * c1)
+        var q3 = arc_point(cx, cy, rx, ry, cos_phi, sin_phi, c1, s1)
+        if piece == pieces - 1:
+            q3 = Point(x, y)
+        try path.cubic_to(q1.x, q1.y, q2.x, q2.y, q3.x, q3.y)
+        angle = a1
+
+func arc_point(cx: f64, cy: f64, rx: f64, ry: f64, cos_phi: f64, sin_phi: f64, u: f64, v: f64) -> Point:
+    let ex = rx * u
+    let ey = ry * v
+    return Point(cx + cos_phi * ex - sin_phi * ey, cy + sin_phi * ex + cos_phi * ey)
+
+# mark: Path data =============================================================================
+
+## Read SVG path data `text` into `path`. Data after an error is ignored, as SVG asks;
+## answers whether the whole text was read.
+pub func parse_path_data(text: str, path: Path*) -> bool!:
+    var scanner = Scanner(data = text.bytes)
+    var command: u8 = 0
+    # Where the current point and the subpath start are, and the last segment's control
+    # point for S and T (with which kind of segment it came origin).
+    var current = Point()
+    var subpath = Point()
+    var control = Point()
+    var control_kind: u8 = 0
+    var closed = false
+    var first = true
+    while true:
+        scanner.skip_spaces()
+        if scanner.at_end():
+            return true
+        let byte = scanner.peek()
+        var implicit = false
+        if is_alpha(byte):
+            command = byte
+            scanner.pos += 1
+        elif (is_digit(byte) or byte == '-' or byte == '+' or byte == '.') and command != 0:
+            if command == 'Z' or command == 'z':
+                return false
+            implicit = true
+        else:
+            return false
+        if first and command != 'M' and command != 'm':
+            return false
+        first = false
+        if implicit and (command == 'M' or command == 'm'):
+            command = 'L' if command == 'M' else 'l'
+        let relative = command >= 'a' and command <= 'z'
+        let lower = command + 32 if command >= 'A' and command <= 'Z' else command
+        # After a close, any command but a move starts again where the subpath began.
+        if closed and lower != 'm' and lower != 'z':
+            try path.move_to(subpath.x, subpath.y)
+        let base = current
+        var kind: u8 = 0
+        if lower == 'm':
+            var x = scanner.list_number() else return false
+            var y = scanner.list_number() else return false
+            if relative:
+                x += base.x
+                y += base.y
+            try path.move_to(x, y)
+            current = Point(x, y)
+            subpath = current
+        elif lower == 'l' or lower == 'h' or lower == 'v':
+            var x = current.x
+            var y = current.y
+            if lower == 'l':
+                x = scanner.list_number() else return false
+                y = scanner.list_number() else return false
+                if relative:
+                    x += base.x
+                    y += base.y
+            elif lower == 'h':
+                x = scanner.list_number() else return false
+                if relative:
+                    x += base.x
+            else:
+                y = scanner.list_number() else return false
+                if relative:
+                    y += base.y
+            try path.line_to(x, y)
+            current = Point(x, y)
+        elif lower == 'c' or lower == 's':
+            var p1 = current
+            if lower == 'c':
+                p1.x = scanner.list_number() else return false
+                p1.y = scanner.list_number() else return false
+                if relative:
+                    p1 = Point(p1.x + base.x, p1.y + base.y)
+            elif control_kind == 'c':
+                p1 = Point(2.0 * current.x - control.x, 2.0 * current.y - control.y)
+            var p2 = Point()
+            p2.x = scanner.list_number() else return false
+            p2.y = scanner.list_number() else return false
+            var p3 = Point()
+            p3.x = scanner.list_number() else return false
+            p3.y = scanner.list_number() else return false
+            if relative:
+                p2 = Point(p2.x + base.x, p2.y + base.y)
+                p3 = Point(p3.x + base.x, p3.y + base.y)
+            try path.cubic_to(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y)
+            control = p2
+            kind = 'c'
+            current = p3
+        elif lower == 'q' or lower == 't':
+            var p1 = current
+            if lower == 'q':
+                p1.x = scanner.list_number() else return false
+                p1.y = scanner.list_number() else return false
+                if relative:
+                    p1 = Point(p1.x + base.x, p1.y + base.y)
+            elif control_kind == 'q':
+                p1 = Point(2.0 * current.x - control.x, 2.0 * current.y - control.y)
+            var p2 = Point()
+            p2.x = scanner.list_number() else return false
+            p2.y = scanner.list_number() else return false
+            if relative:
+                p2 = Point(p2.x + base.x, p2.y + base.y)
+            try path.quad_to(p1.x, p1.y, p2.x, p2.y)
+            control = p1
+            kind = 'q'
+            current = p2
+        elif lower == 'a':
+            let rx = scanner.list_number() else return false
+            let ry = scanner.list_number() else return false
+            let rotation = scanner.list_number() else return false
+            let large = arc_flag(&scanner) else return false
+            let sweep = arc_flag(&scanner) else return false
+            var x = scanner.list_number() else return false
+            var y = scanner.list_number() else return false
+            if relative:
+                x += base.x
+                y += base.y
+            try path.arc_to(rx, ry, rotation, large, sweep, x, y)
+            current = Point(x, y)
+        elif lower == 'z':
+            try path.close()
+            current = subpath
+        else:
+            return false
+        control_kind = kind
+        closed = lower == 'z'
+
+## An arc flag: a single `0` or `1`, which needs no separator after it.
+func arc_flag(scanner: Scanner*) -> bool?:
+    scanner.skip_spaces()
+    let byte = scanner.peek()
+    if byte != '0' and byte != '1':
+        return none
+    scanner.pos += 1
+    scanner.skip_separator()
+    return byte == '1'
+
+## The points of a `points` attribute as a path: a move, then lines; an odd last number
+## is ignored and reading stops at the first error. None with fewer than two points.
+pub func parse_points(text: str, close: bool) -> Path?!:
+    var path = Path()
+    errdefer path.release()
+    var scanner = Scanner(data = text.bytes)
+    var count: usize = 0
+    while true:
+        scanner.skip_spaces()
+        if scanner.at_end():
+            break
+        let x = scanner.list_number() else break
+        let y = scanner.list_number() else break
+        if count == 0:
+            try path.move_to(x, y)
+        else:
+            try path.line_to(x, y)
+        count += 1
+    if count < 2:
+        path.release()
+        return none
+    if close:
+        try path.close()
+    return path

@@ -1,0 +1,434 @@
+#==============================================================================================
+#
+#   svg/names - The element and attribute names the document tree knows
+#
+#   DESCRIPTION:
+#       Generated from resvg's name lists (usvg's svgtree/names.rs), sorted so a name is
+#       found by binary search; each enum case's value is its place in its table. An
+#       attribute also carries flags: whether it is a presentation attribute (settable by
+#       CSS), whether it inherits, whether it accepts `inherit`, and the initial value that
+#       `inherit` falls back to when no ancestor sets it.
+#
+#==============================================================================================
+
+## An SVG element the tree keeps; any other element is dropped with its content.
+pub enum Tag as u8:
+    a = 0
+    circle = 1
+    clip_path = 2
+    defs = 3
+    ellipse = 4
+    fe_blend = 5
+    fe_color_matrix = 6
+    fe_component_transfer = 7
+    fe_composite = 8
+    fe_convolve_matrix = 9
+    fe_diffuse_lighting = 10
+    fe_displacement_map = 11
+    fe_distant_light = 12
+    fe_drop_shadow = 13
+    fe_flood = 14
+    fe_func_a = 15
+    fe_func_b = 16
+    fe_func_g = 17
+    fe_func_r = 18
+    fe_gaussian_blur = 19
+    fe_image = 20
+    fe_merge = 21
+    fe_merge_node = 22
+    fe_morphology = 23
+    fe_offset = 24
+    fe_point_light = 25
+    fe_specular_lighting = 26
+    fe_spot_light = 27
+    fe_tile = 28
+    fe_turbulence = 29
+    filter = 30
+    g = 31
+    image = 32
+    line = 33
+    linear_gradient = 34
+    marker = 35
+    mask = 36
+    path = 37
+    pattern = 38
+    polygon = 39
+    polyline = 40
+    radial_gradient = 41
+    rect = 42
+    stop = 43
+    style = 44
+    svg = 45
+    switch = 46
+    symbol = 47
+    text = 48
+    text_path = 49
+    tref = 50
+    tspan = 51
+    use = 52
+
+## An attribute the tree keeps (`xlink:href` is `href`); others are dropped.
+pub enum Attr as u16:
+    alignment_baseline = 0
+    amplitude = 1
+    azimuth = 2
+    background_color = 3
+    base_frequency = 4
+    baseline_shift = 5
+    bias = 6
+    class_name = 7
+    clip = 8
+    clip_path = 9
+    clip_rule = 10
+    clip_path_units = 11
+    color = 12
+    color_interpolation = 13
+    color_interpolation_filters = 14
+    color_profile = 15
+    color_rendering = 16
+    cx = 17
+    cy = 18
+    d = 19
+    diffuse_constant = 20
+    direction = 21
+    display = 22
+    divisor = 23
+    dominant_baseline = 24
+    dx = 25
+    dy = 26
+    edge_mode = 27
+    elevation = 28
+    enable_background = 29
+    exponent = 30
+    fill = 31
+    fill_opacity = 32
+    fill_rule = 33
+    filter = 34
+    filter_units = 35
+    flood_color = 36
+    flood_opacity = 37
+    font = 38
+    font_family = 39
+    font_feature_settings = 40
+    font_kerning = 41
+    font_optical_sizing = 42
+    font_size = 43
+    font_size_adjust = 44
+    font_stretch = 45
+    font_style = 46
+    font_synthesis = 47
+    font_variant = 48
+    font_variant_caps = 49
+    font_variant_east_asian = 50
+    font_variant_ligatures = 51
+    font_variant_numeric = 52
+    font_variant_position = 53
+    font_variation_settings = 54
+    font_weight = 55
+    fr = 56
+    fx = 57
+    fy = 58
+    glyph_orientation_horizontal = 59
+    glyph_orientation_vertical = 60
+    gradient_transform = 61
+    gradient_units = 62
+    height = 63
+    href = 64
+    id = 65
+    image_rendering = 66
+    input = 67
+    in2 = 68
+    inline_size = 69
+    intercept = 70
+    isolation = 71
+    k1 = 72
+    k2 = 73
+    k3 = 74
+    k4 = 75
+    kernel_matrix = 76
+    kernel_unit_length = 77
+    kerning = 78
+    length_adjust = 79
+    letter_spacing = 80
+    lighting_color = 81
+    limiting_cone_angle = 82
+    line_height = 83
+    marker_end = 84
+    marker_mid = 85
+    marker_start = 86
+    marker_height = 87
+    marker_units = 88
+    marker_width = 89
+    mask = 90
+    mask_border = 91
+    mask_border_mode = 92
+    mask_border_outset = 93
+    mask_border_repeat = 94
+    mask_border_slice = 95
+    mask_border_source = 96
+    mask_border_width = 97
+    mask_clip = 98
+    mask_composite = 99
+    mask_image = 100
+    mask_mode = 101
+    mask_origin = 102
+    mask_position = 103
+    mask_size = 104
+    mask_type = 105
+    mask_content_units = 106
+    mask_units = 107
+    mix_blend_mode = 108
+    mode = 109
+    num_octaves = 110
+    offset = 111
+    opacity = 112
+    operator = 113
+    order = 114
+    orient = 115
+    overflow = 116
+    paint_order = 117
+    path = 118
+    path_length = 119
+    pattern_content_units = 120
+    pattern_transform = 121
+    pattern_units = 122
+    points = 123
+    points_at_x = 124
+    points_at_y = 125
+    points_at_z = 126
+    preserve_alpha = 127
+    preserve_aspect_ratio = 128
+    primitive_units = 129
+    r = 130
+    radius = 131
+    ref_x = 132
+    ref_y = 133
+    required_extensions = 134
+    required_features = 135
+    result = 136
+    rotate = 137
+    rx = 138
+    ry = 139
+    scale = 140
+    seed = 141
+    shape_image_threshold = 142
+    shape_inside = 143
+    shape_margin = 144
+    shape_padding = 145
+    shape_rendering = 146
+    shape_subtract = 147
+    side = 148
+    slope = 149
+    space = 150
+    specular_constant = 151
+    specular_exponent = 152
+    spread_method = 153
+    start_offset = 154
+    std_deviation = 155
+    stitch_tiles = 156
+    stop_color = 157
+    stop_opacity = 158
+    stroke = 159
+    stroke_dasharray = 160
+    stroke_dashoffset = 161
+    stroke_linecap = 162
+    stroke_linejoin = 163
+    stroke_miterlimit = 164
+    stroke_opacity = 165
+    stroke_width = 166
+    style = 167
+    surface_scale = 168
+    system_language = 169
+    table_values = 170
+    target_x = 171
+    target_y = 172
+    text_align = 173
+    text_align_last = 174
+    text_anchor = 175
+    text_decoration = 176
+    text_decoration_color = 177
+    text_decoration_fill = 178
+    text_decoration_line = 179
+    text_decoration_stroke = 180
+    text_decoration_style = 181
+    text_indent = 182
+    text_orientation = 183
+    text_overflow = 184
+    text_rendering = 185
+    text_underline_position = 186
+    text_length = 187
+    transform = 188
+    transform_box = 189
+    transform_origin = 190
+    kind = 191
+    unicode_bidi = 192
+    unicode_range = 193
+    values = 194
+    vector_effect = 195
+    view_box = 196
+    visibility = 197
+    white_space = 198
+    width = 199
+    word_spacing = 200
+    writing_mode = 201
+    x = 202
+    x1 = 203
+    x2 = 204
+    x_channel_selector = 205
+    y = 206
+    y1 = 207
+    y2 = 208
+    y_channel_selector = 209
+    z = 210
+
+let tag_names: str[53] = [
+    "a", "circle", "clipPath", "defs", "ellipse", "feBlend",
+    "feColorMatrix", "feComponentTransfer", "feComposite", "feConvolveMatrix", "feDiffuseLighting", "feDisplacementMap",
+    "feDistantLight", "feDropShadow", "feFlood", "feFuncA", "feFuncB", "feFuncG",
+    "feFuncR", "feGaussianBlur", "feImage", "feMerge", "feMergeNode", "feMorphology",
+    "feOffset", "fePointLight", "feSpecularLighting", "feSpotLight", "feTile", "feTurbulence",
+    "filter", "g", "image", "line", "linearGradient", "marker",
+    "mask", "path", "pattern", "polygon", "polyline", "radialGradient",
+    "rect", "stop", "style", "svg", "switch", "symbol",
+    "text", "textPath", "tref", "tspan", "use",
+]
+
+let attr_names: str[211] = [
+    "alignment-baseline", "amplitude", "azimuth", "background-color", "baseFrequency", "baseline-shift",
+    "bias", "class", "clip", "clip-path", "clip-rule", "clipPathUnits",
+    "color", "color-interpolation", "color-interpolation-filters", "color-profile", "color-rendering", "cx",
+    "cy", "d", "diffuseConstant", "direction", "display", "divisor",
+    "dominant-baseline", "dx", "dy", "edgeMode", "elevation", "enable-background",
+    "exponent", "fill", "fill-opacity", "fill-rule", "filter", "filterUnits",
+    "flood-color", "flood-opacity", "font", "font-family", "font-feature-settings", "font-kerning",
+    "font-optical-sizing", "font-size", "font-size-adjust", "font-stretch", "font-style", "font-synthesis",
+    "font-variant", "font-variant-caps", "font-variant-east-asian", "font-variant-ligatures", "font-variant-numeric", "font-variant-position",
+    "font-variation-settings", "font-weight", "fr", "fx", "fy", "glyph-orientation-horizontal",
+    "glyph-orientation-vertical", "gradientTransform", "gradientUnits", "height", "href", "id",
+    "image-rendering", "in", "in2", "inline-size", "intercept", "isolation",
+    "k1", "k2", "k3", "k4", "kernelMatrix", "kernelUnitLength",
+    "kerning", "lengthAdjust", "letter-spacing", "lighting-color", "limitingConeAngle", "line-height",
+    "marker-end", "marker-mid", "marker-start", "markerHeight", "markerUnits", "markerWidth",
+    "mask", "mask-border", "mask-border-mode", "mask-border-outset", "mask-border-repeat", "mask-border-slice",
+    "mask-border-source", "mask-border-width", "mask-clip", "mask-composite", "mask-image", "mask-mode",
+    "mask-origin", "mask-position", "mask-size", "mask-type", "maskContentUnits", "maskUnits",
+    "mix-blend-mode", "mode", "numOctaves", "offset", "opacity", "operator",
+    "order", "orient", "overflow", "paint-order", "path", "pathLength",
+    "patternContentUnits", "patternTransform", "patternUnits", "points", "pointsAtX", "pointsAtY",
+    "pointsAtZ", "preserveAlpha", "preserveAspectRatio", "primitiveUnits", "r", "radius",
+    "refX", "refY", "requiredExtensions", "requiredFeatures", "result", "rotate",
+    "rx", "ry", "scale", "seed", "shape-image-threshold", "shape-inside",
+    "shape-margin", "shape-padding", "shape-rendering", "shape-subtract", "side", "slope",
+    "space", "specularConstant", "specularExponent", "spreadMethod", "startOffset", "stdDeviation",
+    "stitchTiles", "stop-color", "stop-opacity", "stroke", "stroke-dasharray", "stroke-dashoffset",
+    "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stroke-opacity", "stroke-width", "style",
+    "surfaceScale", "systemLanguage", "tableValues", "targetX", "targetY", "text-align",
+    "text-align-last", "text-anchor", "text-decoration", "text-decoration-color", "text-decoration-fill", "text-decoration-line",
+    "text-decoration-stroke", "text-decoration-style", "text-indent", "text-orientation", "text-overflow", "text-rendering",
+    "text-underline-position", "textLength", "transform", "transform-box", "transform-origin", "type",
+    "unicode-bidi", "unicode-range", "values", "vector-effect", "viewBox", "visibility",
+    "white-space", "width", "word-spacing", "writing-mode", "x", "x1",
+    "x2", "xChannelSelector", "y", "y1", "y2", "yChannelSelector",
+    "z",
+]
+
+## Per attribute: 1 presentation, 2 inherited, 4 accepts `inherit`.
+let attr_flags: u8[211] = [
+    5, 0, 0, 3, 0, 5, 0, 0, 0, 5, 7, 0, 7, 3, 7, 0,
+    3, 0, 0, 0, 0, 7, 5, 0, 5, 0, 0, 0, 0, 0, 0, 7,
+    7, 7, 5, 0, 5, 5, 0, 7, 0, 7, 7, 7, 3, 7, 7, 0,
+    7, 0, 0, 0, 0, 0, 3, 7, 0, 0, 0, 3, 3, 0, 0, 0,
+    0, 0, 7, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0,
+    7, 1, 0, 0, 7, 7, 7, 0, 0, 0, 5, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 3, 0, 0, 0,
+    5, 0, 0, 0, 5, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 7,
+    7, 7, 7, 7, 7, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 7,
+    5, 0, 0, 0, 0, 0, 0, 0, 3, 7, 0, 0, 1, 0, 1, 0,
+    3, 0, 0, 3, 0, 7, 3, 0, 7, 7, 0, 0, 0, 0, 0, 0,
+    0, 0, 0,
+]
+
+## Per attribute: what `inherit` resolves to when no ancestor sets it ("" for nothing).
+let attr_initial: str[211] = [
+    "", "", "", "", "", "baseline", "", "",
+    "", "none", "nonzero", "", "", "", "linearRGB", "",
+    "", "", "", "", "", "ltr", "inline", "",
+    "", "", "", "", "", "", "", "black",
+    "1", "nonzero", "none", "", "black", "1", "", "",
+    "", "", "", "medium", "", "normal", "normal", "",
+    "normal", "", "", "", "", "", "", "normal",
+    "", "", "", "", "", "", "", "",
+    "", "", "auto", "", "", "", "", "",
+    "", "", "", "", "", "", "", "",
+    "normal", "", "", "", "none", "none", "none", "",
+    "", "", "none", "", "", "", "", "",
+    "", "", "", "", "", "", "", "",
+    "", "", "", "", "", "", "", "",
+    "1", "", "", "", "visible", "", "", "",
+    "", "", "", "", "", "", "", "",
+    "", "", "", "", "", "", "", "",
+    "", "", "", "", "", "", "", "",
+    "", "", "auto", "", "", "", "", "",
+    "", "", "", "", "", "black", "1", "none",
+    "none", "0", "butt", "miter", "4", "1", "1", "",
+    "", "", "", "", "", "", "", "start",
+    "none", "", "", "", "", "", "", "",
+    "", "auto", "", "", "", "", "", "",
+    "", "", "", "", "", "visible", "", "",
+    "normal", "lr-tb", "", "", "", "", "", "",
+    "", "", "",
+]
+
+## The tag named `name`, or none for an element the tree does not keep.
+func tag_named(name: str) -> Tag?:
+    let index = find_name(tag_names, name) else return none
+    return (Tag)(u8)index
+
+## The attribute named `name` (`xlink:href` is `href`), or none.
+func attr_named(name: str) -> Attr?:
+    let index = find_name(attr_names, name) else return none
+    return (Attr)(u16)index
+
+## The name of `tag` as SVG spells it.
+pub func tag_name_of(tag: Tag) -> str:
+    return tag_names[(usize)(u8)tag]
+
+## The name of `attr` as SVG spells it.
+pub func attr_name_of(attr: Attr) -> str:
+    return attr_names[(usize)(u16)attr]
+
+func is_presentation(attr: Attr) -> bool:
+    return (attr_flags[(usize)(u16)attr] & 1) != 0
+
+func is_inherited(attr: Attr) -> bool:
+    return (attr_flags[(usize)(u16)attr] & 2) != 0
+
+func accepts_inherit(attr: Attr) -> bool:
+    return (attr_flags[(usize)(u16)attr] & 4) != 0
+
+## Binary search of the sorted `names` for `name`.
+func find_name(names: const str[], name: str) -> usize?:
+    var low: usize = 0
+    var high = names.length
+    while low < high:
+        let middle = (low + high) // 2
+        let order = compare_text(names[middle], name)
+        if order == 0:
+            return middle
+        if order < 0:
+            low = middle + 1
+        else:
+            high = middle
+    return none
+
+## Byte order of `a` against `b`: negative, zero or positive.
+func compare_text(a: str, b: str) -> i64:
+    let count = a.length if a.length < b.length else b.length
+    for index in 0..<count:
+        let x = a.bytes[index]
+        let y = b.bytes[index]
+        if x != y:
+            return (i64)x - (i64)y
+    return (i64)a.length - (i64)b.length

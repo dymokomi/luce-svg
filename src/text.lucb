@@ -17,8 +17,6 @@
 #==============================================================================================
 
 from luce_std import math
-import memory
-import strings
 from luce_fonts import fonts
 import svg
 from luce_color import transfer

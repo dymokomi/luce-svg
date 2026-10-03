@@ -10,6 +10,58 @@ opacities, and its pen (width, caps, joins, miter limit, dashes). The parser
 depends on luce-std and luce-color (sRGB decoding); the picture renderer adds
 luce-fonts for text.
 
+## The full renderer
+
+`load(source, options) -> interop.Reference[Picture]` reads a whole SVG document the
+way resvg (and so, closely, a browser) does, and `render(picture, transform, width,
+height, pixels)` draws it into straight-alpha sRGB RGBA bytes (`render_float` gives
+floats, encoded or in linear light; `fit_transform` stretches the picture's size over
+the bitmap). It is built in four stages, each its own set of fragments:
+
+- **XML** (`xml.lucb`): elements, attributes, text and CDATA, the five predefined
+  entities, character references and a DOCTYPE's own `<!ENTITY>`s (which may hold
+  markup), namespace prefixes (only SVG, XLink and XML matter), malformed markup an
+  error.
+- **The SVG tree** (`tree*.lucb`, `css.lucb`): only SVG elements are kept; every
+  element's attributes are cascaded from presentation attributes, `<style>` rules
+  (type, `*`, `.class`, `#id`, attribute tests, `:first-child`, descendant, child and
+  sibling combinators, ordered by specificity, `!important` honoured) and its `style`
+  attribute; `inherit` is resolved; `use` gets a copy of its target as its child; text
+  white space is collapsed as SVG 1.1 and Chrome do.
+- **Conversion** (`convert*.lucb`) into a render tree (`scene.lucb`) of groups, shapes
+  and images with every property resolved: lengths in every unit against the nearest
+  viewport, `display`, `visibility`, conditional processing (`switch`,
+  `systemLanguage`, `requiredFeatures`), `use`/`symbol`/nested `svg` viewports with
+  viewBox, preserveAspectRatio and overflow clipping, transforms with
+  `transform-origin`, fills and strokes (colors, `currentColor`, gradients with
+  fallbacks, `fill-rule`, dashes, caps, joins including `miter-clip`, `paint-order`,
+  `shape-rendering`), groups only where one is needed (opacity, blend mode, isolation,
+  clip path, mask, filter).
+- **Rendering** (`raster.lucb`, `scanline.lucb`, `stroker.lucb`, `canvas.lucb`,
+  `shade.lucb`, `render_scene.lucb`): curves flattened to a twentieth of a device
+  pixel, coverage from sixteen sub-scanlines a row with exact horizontal spans and true
+  nonzero and even-odd winding, strokes built in user space (so a skewed transform
+  skews them), gradients with pad, reflect and repeat spreads and two-point conical
+  radial gradients (the focal radius `fr` included), group layers composited with
+  opacity and all sixteen CSS blend modes, clip paths (nested, with clip-rule) and
+  masks (luminance or alpha, nested, with their region).
+
+**Compositing is in sRGB**, as browsers and resvg composite: colors blend as their
+encoded values, so half-transparent black over white is 50 % grey. This is the default
+of the full renderer only; `RenderOptions(linear = true)` composites in linear light
+instead. The Drawing renderer below keeps its linear-light compositing, unchanged for
+its callers (luce-image's pictures, luce-vector's tiles).
+
+The value parsers are public so other code can share one spec-correct reading:
+`parse_number`, `parse_length` (a `Length` with its `Unit`), `parse_angle`,
+`parse_transform_list` (all six functions), `parse_view_box`, `parse_aspect_ratio` and
+`view_box_transform`, `parse_path_data` into a `Path` (move, line, cubic, close;
+quadratics and arcs become cubics; tight `bounds`), `parse_points`, `iri` and
+`func_iri`, and `parse_rgba` (every CSS color: hex in four lengths, the named colors,
+`rgb`/`rgba`/`hsl`/`hsla` in both syntaxes, `hwb`, `lab`, `lch`, `oklab`, `oklch` and
+`color()` in the predefined spaces, converted with luce-color); `parse_color` reads the
+same colors without their alpha.
+
 ## Paints and colors
 
 `fill`, `stroke`, `fill-opacity`, `stroke-opacity`, `opacity` and the stroke
@@ -74,7 +126,7 @@ for the shapes before it, set the run over them, and finish with the shapes up
 to `element_count()`. `pixel_transform(drawing, width, height)` maps the viewBox
 onto the bitmap as the rasterisers place it.
 
-## Limits
+## Limits of the Drawing
 
 - The parser only reads text (see above); only the first value of `x`, `y`, `dx`
   and `dy` is used, and `rotate`, `textLength`, `textPath`, stroked text,
@@ -84,8 +136,7 @@ onto the bitmap as the rasterisers place it.
   not drawn; there is no `use`, clipping, masking, pattern paint, filter,
   `fill-rule="evenodd"` or image.
 - Group `opacity` fades each paint rather than compositing the group as a layer.
-- An unknown color name paints black; `rgba()`, `hsl()` and 4/8-digit hex are
-  not read.
+- In the Drawing, an unknown color name paints black and a color's alpha is dropped.
 
 Assets: rounded icons by Dy Mokomi (luciaos-assets), CC BY 4.0.
 

@@ -1,0 +1,222 @@
+#==============================================================================================
+#
+#   svg/tree_text - Text content in the tree, and the `font` shorthand
+#
+#   DESCRIPTION:
+#       Inside `<text>` the tree keeps text nodes and the elements that carry text:
+#       `tspan`, `textPath` (only as a direct child) and `tref`, which becomes a `tspan`
+#       holding the character data of the element it references; `a` is a `tspan` too.
+#       White space is handled as SVG 1.1 and Chrome do: line breaks and tabs become
+#       spaces, runs of spaces collapse unless `xml:space="preserve"`, and spaces at the
+#       start and end of the whole text, or doubled across a node boundary, are dropped.
+#
+#==============================================================================================
+
+extend Builder:
+    ## Build the content of `<text>` (XML `index`, tree `node`) and trim its spaces.
+    mutating func text(index: u32, node: u32) -> !:
+        let preserve = self.space_preserved(node, false)
+        try self.text_content(index, node, preserve)
+        try trim_text_nodes(self.tree, node, preserve)
+
+    ## Whether `xml:space` is preserve for `node`: its own value, else its ancestors', else
+    ## `default`.
+    func space_preserved(node: u32, default: bool) -> bool:
+        var at = node
+        while at != 0:
+            if let value = self.tree.attribute(at, Attr.space):
+                return value == "preserve"
+            at = self.tree.nodes.items[at].parent
+        return default
+
+    mutating func text_content(index: u32, parent: u32, preserve: bool) -> !:
+        let parent_is_text = self.tree.tag(parent) == Tag.text
+        var child = self.tree.xml.nodes.items[index].first
+        while child != 0:
+            let xml_node = self.tree.xml.nodes.items[child]
+            if not xml_node.element:
+                let text = try collapse_text(self.tree, xml_node.text, preserve)
+                discard(try append_node(self.tree, parent, Node(kind = Kind.text, text = text)))
+            elif let found = svg_tag(&self.tree.xml, child):
+                var tag = found
+                if tag == Tag.a:
+                    tag = Tag.tspan
+                let is_tref = tag == Tag.tref
+                if is_tref:
+                    tag = Tag.tspan
+                if (tag == Tag.tspan or tag == Tag.text_path) and (tag != Tag.text_path or parent_is_text):
+                    let node = try self.attributes(child, parent, tag, false)
+                    let inner = own_space(self.tree, node, preserve)
+                    if is_tref:
+                        if let target = self.xml_link(child):
+                            var gathered = TextBuilder()
+                            defer gathered.release()
+                            try gather_text(&self.tree.xml, target, &gathered)
+                            if gathered.bytes.used > 0:
+                                let raw = try gathered.finish(&self.tree.arena)
+                                let text = try collapse_text(self.tree, raw, inner)
+                                discard(try append_node(self.tree, node, Node(kind = Kind.text, text = text)))
+                    else:
+                        try self.text_content(child, node, inner)
+            child = self.tree.xml.nodes.items[child].next
+
+    ## `font: [style] [variant] [weight] [stretch] size[/line-height] family`, which first
+    ## resets every font property, then sets the ones it names.
+    mutating func font_shorthand(value: str, important: bool, parent: u32, tag: Tag, start: usize) -> !:
+        let data = value.bytes
+        var pos: usize = 0
+        var style = "normal"
+        var variant = "normal"
+        var weight = "normal"
+        var stretch = "normal"
+        var size = ""
+        while pos < data.length:
+            while pos < data.length and is_space(data[pos]):
+                pos += 1
+            let token_start = pos
+            while pos < data.length and not is_space(data[pos]):
+                pos += 1
+            let token = (str)data[token_start..<pos]
+            if token.length == 0:
+                break
+            if token == "italic" or token == "oblique":
+                style = token
+            elif token == "small-caps":
+                variant = token
+            elif token == "bold" or token == "bolder" or token == "lighter" or (token.length == 3 and is_digit(token.bytes[0])):
+                weight = token
+            elif strings.ends_with(token, "condensed") or strings.ends_with(token, "expanded"):
+                stretch = token
+            elif token == "normal":
+                continue
+            else:
+                size = token
+                break
+        if size.length == 0:
+            return
+        if let slash = strings.find(size, "/"):
+            size = (str)size.bytes[..<slash]
+        let family = strings.trim((str)data[pos..])
+        if family.length == 0:
+            return
+        try self.insert(Attr.font_style, style, important, parent, tag, start)
+        try self.insert(Attr.font_variant, variant, important, parent, tag, start)
+        try self.insert(Attr.font_weight, weight, important, parent, tag, start)
+        try self.insert(Attr.font_stretch, stretch, important, parent, tag, start)
+        try self.insert(Attr.font_size, size, important, parent, tag, start)
+        try self.insert(Attr.font_family, family, important, parent, tag, start)
+
+## `xml:space` for an element inside text: its own value, else `inherited`.
+func own_space(tree: const Tree*, node: u32, inherited: bool) -> bool:
+    let value = tree.attribute(node, Attr.space) else return inherited
+    return value == "preserve"
+
+## All character data inside XML element `index`, in document order.
+func gather_text(xml: const Xml*, index: u32, out: TextBuilder*) -> !:
+    var child = xml.nodes.items[index].first
+    while child != 0:
+        if xml.nodes.items[child].element:
+            try gather_text(xml, child, out)
+        else:
+            try out.add_all(xml.nodes.items[child].text.bytes)
+        child = xml.nodes.items[child].next
+
+## `text` with line breaks and tabs made spaces and, unless `preserve`, runs of spaces
+## collapsed to one.
+func collapse_text(tree: Tree*, text: str, preserve: bool) -> str!:
+    let target = try tree.arena.reserve(text.length)
+    var used: usize = 0
+    var previous: u8 = 0
+    for raw in text.bytes:
+        let byte = ' ' if raw == '\r' or raw == '\n' or raw == '\t' else raw
+        if not preserve and byte == ' ' and previous == ' ':
+            continue
+        previous = byte
+        target[used] = byte
+        used += 1
+    return (str)target[..<used]
+
+## A text node found in a `<text>`, with how deep below it its element is.
+struct TextSlot:
+    var node: u32 = 0
+    var depth: usize = 0
+
+func collect_text_slots(tree: const Tree*, parent: u32, depth: usize, slots: List[TextSlot]*) -> !:
+    var child = tree.nodes.items[parent].first
+    while child != 0:
+        if tree.nodes.items[child].kind == Kind.text:
+            try slots.push(TextSlot(node = child, depth = depth))
+        elif tree.nodes.items[child].kind == Kind.element:
+            try collect_text_slots(tree, child, depth + 1, slots)
+        child = tree.nodes.items[child].next
+
+## Whether the element holding text node `node` preserves spaces.
+func slot_preserves(tree: const Tree*, node: u32, default: bool) -> bool:
+    return own_space(tree, tree.nodes.items[node].parent, default)
+
+func drop_first_space(tree: Tree*, node: u32):
+    let text = tree.nodes.items[node].text
+    if text.length > 0 and text.bytes[0] == ' ':
+        tree.nodes.items[node].text = (str)text.bytes[1..]
+
+func drop_last_space(tree: Tree*, node: u32):
+    let text = tree.nodes.items[node].text
+    if text.length > 0 and text.bytes[text.length - 1] == ' ':
+        tree.nodes.items[node].text = (str)text.bytes[..<text.length - 1]
+
+func first_byte(tree: const Tree*, node: u32) -> u8:
+    let text = tree.nodes.items[node].text
+    return text.bytes[0] if text.length > 0 else 0
+
+func last_byte(tree: const Tree*, node: u32) -> u8:
+    let text = tree.nodes.items[node].text
+    return text.bytes[text.length - 1] if text.length > 0 else 0
+
+## Trim the spaces at the ends of a `<text>` and between its nodes, as resvg does after
+## Chrome: the text's nodes are treated as one string.
+func trim_text_nodes(tree: Tree*, text_node: u32, preserve: bool) -> !:
+    var slots = List[TextSlot]()
+    defer slots.release()
+    try collect_text_slots(tree, text_node, 0, &slots)
+    if slots.used == 1:
+        if not preserve:
+            let node = slots.items[0].node
+            drop_first_space(tree, node)
+            drop_last_space(tree, node)
+        return
+    if slots.used < 2:
+        return
+    let last_pair = slots.used - 2
+    var last_non_empty: u32? = none
+    for index in 0..<slots.used - 1:
+        var node1 = slots.items[index].node
+        let depth1 = slots.items[index].depth
+        let node2 = slots.items[index + 1].node
+        let depth2 = slots.items[index + 1].depth
+        if tree.nodes.items[node1].text.length == 0:
+            if let earlier = last_non_empty:
+                node1 = earlier
+        let space1 = slot_preserves(tree, node1, preserve)
+        let space2 = slot_preserves(tree, node2, preserve)
+        let c1 = first_byte(tree, node1)
+        let c2 = last_byte(tree, node1)
+        let c3 = first_byte(tree, node2)
+        let c4 = last_byte(tree, node2)
+        if depth1 < depth2:
+            if c3 == ' ' and not space2:
+                drop_first_space(tree, node2)
+        elif c2 == ' ' and c3 == ' ':
+            if not space1 and not space2:
+                drop_last_space(tree, node1)
+            elif space1 and not space2:
+                drop_first_space(tree, node2)
+        let is_first = index == 0
+        let is_last = index == last_pair
+        if is_first and c1 == ' ' and not space1 and tree.nodes.items[node1].text.length > 0:
+            drop_first_space(tree, node1)
+        elif is_last and c4 == ' ' and tree.nodes.items[node2].text.length > 0 and not space2:
+            drop_last_space(tree, node2)
+        if is_last and c2 == ' ' and tree.nodes.items[node1].text.length > 0 and tree.nodes.items[node2].text.length == 0 and last_byte(tree, node1) == ' ':
+            drop_last_space(tree, node1)
+        if strings.trim(tree.nodes.items[node1].text).length > 0:
+            last_non_empty = node1

@@ -1,0 +1,321 @@
+#==============================================================================================
+#
+#   svg/tree_build - Building the SVG tree from XML, with the cascade
+#
+#   DESCRIPTION:
+#       Walks the XML tree and keeps its SVG elements. Each element's attributes are
+#       gathered in cascade order, a later one replacing an earlier one of the same name:
+#       presentation attributes first, then the declarations of every matching style rule
+#       in order of specificity, then the `style` attribute's; a value marked
+#       `!important` is never replaced by a later one. `inherit` takes the value
+#       the parent's chain resolved, or the property's initial value. A `<use>` gets the
+#       element it references built again as its child, with ids dropped; references
+#       back to the `use` or its own ancestry are refused, so no copy contains itself.
+#
+#==============================================================================================
+
+## How deeply elements, and `use` copies within copies, may nest; and how many nodes a
+## tree may hold.
+let depth_limit: usize = 1024
+let node_limit: usize = 1000000
+
+# mark: The document ==========================================================================
+
+## Parse `source` into `tree`: XML first, then the style sheets, then the SVG tree.
+func build_tree(source: str, tree: Tree*) -> !:
+    try parse_xml(source, &tree.xml)
+    let xml = &tree.xml
+    try collect_sheets(tree)
+    var xml_ids = List[IdEntry]()
+    defer xml_ids.release()
+    for index in 1..<xml.nodes.used:
+        if xml.nodes.items[index].element:
+            if let id = xml_attribute(xml, (u32)index, "id"):
+                try xml_ids.push(IdEntry(id = id, node = (u32)index))
+    try sort_ids(&xml_ids, true)
+    try tree.nodes.push(Node())
+    var builder = Builder(tree = tree, xml_ids = xml_ids.view())
+    try builder.children(0, 0, 0, false, 0)
+    let root = tree.root_element()
+    if root == 0 or tree.tag(root) != Tag.svg:
+        error(invalid, "the document's root element is not svg")
+    for index in 1..<tree.nodes.used:
+        if tree.nodes.items[index].kind == Kind.element:
+            if let id = tree.attribute((u32)index, Attr.id):
+                try tree.ids.push(IdEntry(id = id, node = (u32)index))
+    try sort_ids(&tree.ids, false)
+
+## Read every `<style>` element (of type text/css, or untyped) into the tree's sheet.
+func collect_sheets(tree: Tree*) -> !:
+    let xml = &tree.xml
+    for index in 1..<xml.nodes.used:
+        let node = xml.nodes.items[index]
+        if not node.element or node.name != "style" or not (node.space == Space.absent or node.space == Space.svg):
+            continue
+        if let kind = xml_attribute(xml, (u32)index, "type"):
+            if kind != "text/css" and kind != "":
+                continue
+        var child = node.first
+        while child != 0:
+            if not xml.nodes.items[child].element:
+                try parse_sheet(&tree.sheet, xml.nodes.items[child].text)
+            child = xml.nodes.items[child].next
+
+## Sort `ids` by id, stably, then keep one entry per id: the first when `first`, else the
+## last (an XML lookup takes the first element with an id, the tree the last).
+func sort_ids(ids: List[IdEntry]*, first: bool) -> !:
+    let items = ids.view()
+    if items.length < 2:
+        return
+    let scratch = try alloc IdEntry[items.length] in memory.heap
+    defer free(scratch) in memory.heap
+    var width: usize = 1
+    while width < items.length:
+        var start: usize = 0
+        while start < items.length:
+            let middle = math_min(start + width, items.length)
+            let end = math_min(start + 2 * width, items.length)
+            var a = start
+            var b = middle
+            var out = start
+            while out < end:
+                if a < middle and (b >= end or compare_text(items[a].id, items[b].id) <= 0):
+                    scratch[out] = items[a]
+                    a += 1
+                else:
+                    scratch[out] = items[b]
+                    b += 1
+                out += 1
+            start = end
+        memory.copy(items, scratch, items.length)
+        width *= 2
+    var kept: usize = 0
+    for index in 0..<items.length:
+        if kept > 0 and items[kept - 1].id == items[index].id:
+            if not first:
+                items[kept - 1] = items[index]
+            continue
+        items[kept] = items[index]
+        kept += 1
+    ids.truncate(kept)
+
+func math_min(a: usize, b: usize) -> usize:
+    return a if a < b else b
+
+# mark: Elements ==============================================================================
+
+## The SVG tag of an XML element in the SVG namespace (or none), if SVG has it.
+func svg_tag(xml: const Xml*, index: u32) -> Tag?:
+    let node = xml.nodes.items[index]
+    if not node.element or not (node.space == Space.absent or node.space == Space.svg):
+        return none
+    return tag_named(node.name)
+
+## The state of one tree build.
+struct Builder:
+    var tree: Tree*
+    var xml_ids: const IdEntry[]
+
+    ## Build the XML children of `xml_parent` under tree node `parent`.
+    mutating func children(xml_parent: u32, origin: u32, parent: u32, ignore_ids: bool, depth: usize) -> !:
+        var child = self.tree.xml.nodes.items[xml_parent].first
+        while child != 0:
+            try self.element(child, origin, parent, ignore_ids, depth)
+            child = self.tree.xml.nodes.items[child].next
+
+    ## Build XML element `index` under `parent`, with its content. `origin` is the `use`
+    ## being expanded, if any.
+    mutating func element(index: u32, origin: u32, parent: u32, ignore_ids: bool, depth: usize) -> !:
+        if depth > depth_limit:
+            error(invalid, "elements nest too deeply")
+        var tag = svg_tag(&self.tree.xml, index) else return
+        if tag == Tag.style:
+            return
+        if tag == Tag.a:
+            tag = Tag.g
+        let node = try self.attributes(index, parent, tag, ignore_ids)
+        if tag == Tag.text:
+            try self.text(index, node)
+        elif tag == Tag.use:
+            try self.expand_use(index, origin, node, depth)
+        else:
+            try self.children(index, origin, node, ignore_ids, depth + 1)
+
+    ## Append a tree node for XML element `index` with its cascaded attributes.
+    mutating func attributes(index: u32, parent: u32, tag: Tag, ignore_ids: bool) -> u32!:
+        let tree = self.tree
+        let xml = &tree.xml
+        let start = tree.attrs.used
+        var href_at: usize? = none
+        let element = xml.nodes.items[index]
+        for at in element.attr_start..<element.attr_end:
+            let raw = xml.attrs.items[at]
+            if raw.space == Space.other:
+                continue
+            let name = attr_named(raw.name) else continue
+            if ignore_ids and name == Attr.id:
+                continue
+            # These are honoured only from CSS and `style`.
+            if name == Attr.mix_blend_mode or name == Attr.isolation or name == Attr.font_kerning:
+                continue
+            if name == Attr.image_rendering and (raw.value == "smooth" or raw.value == "high-quality" or raw.value == "crisp-edges" or raw.value == "pixelated"):
+                continue
+            if name == Attr.href:
+                if raw.space != Space.absent and raw.space != Space.xlink:
+                    continue
+                # A plain `href` wins over `xlink:href`, wherever they stand.
+                if let previous = href_at:
+                    if raw.space == Space.absent:
+                        tree.attrs.items[previous].value = raw.value
+                    continue
+            let added = try self.append_attribute(parent, tag, name, raw.value, false)
+            if added and name == Attr.href:
+                href_at = tree.attrs.used - 1
+        let sheet = &tree.sheet
+        for rule in sheet.rules.view():
+            if rule_matches(sheet, rule, xml, index):
+                for d in rule.declaration_start..<rule.declaration_end:
+                    try self.declare(sheet.declarations.items[d], parent, tag, start)
+        if let style = xml_attribute(xml, index, "style"):
+            var declarations = List[Declaration]()
+            defer declarations.release()
+            try parse_declarations(&declarations, style)
+            for declaration in declarations.view():
+                try self.declare(declaration, parent, tag, start)
+        if tree.nodes.used >= node_limit:
+            error(invalid, "the document has too many elements")
+        return try append_node(tree, parent, Node(kind = Kind.element, tag = tag, attr_start = (u32)start, attr_end = (u32)tree.attrs.used))
+
+    ## Apply one CSS declaration to the element whose attributes start at `start`.
+    mutating func declare(declaration: Declaration, parent: u32, tag: Tag, start: usize) -> !:
+        let important = declaration.important
+        let value = declaration.value
+        if declaration.name == "marker":
+            try self.insert(Attr.marker_start, value, important, parent, tag, start)
+            try self.insert(Attr.marker_mid, value, important, parent, tag, start)
+            try self.insert(Attr.marker_end, value, important, parent, tag, start)
+        elif declaration.name == "font":
+            try self.font_shorthand(value, important, parent, tag, start)
+        elif let name = attr_named(declaration.name):
+            if is_presentation(name):
+                try self.insert(name, value, important, parent, tag, start)
+
+    ## Set `name` from CSS: it replaces a value set earlier unless that one is important
+    ## (important values are not replaced by later ones of any kind).
+    mutating func insert(name: Attr, value: str, important: bool, parent: u32, tag: Tag, start: usize) -> !:
+        let tree = self.tree
+        var existing: usize? = none
+        for at in start..<tree.attrs.used:
+            if tree.attrs.items[at].name == name:
+                existing = at
+                break
+        let added = try self.append_attribute(parent, tag, name, value, important)
+        if not added:
+            return
+        if let at = existing:
+            let last = tree.attrs.used - 1
+            if not tree.attrs.items[at].important:
+                tree.attrs.items[at] = tree.attrs.items[last]
+            tree.attrs.used -= 1
+
+    ## Append an attribute unless it is one the tree does not keep; `inherit` resolves here.
+    mutating func append_attribute(parent: u32, tag: Tag, name: Attr, value: str, important: bool) -> bool!:
+        if name == Attr.style or name == Attr.class_name:
+            return false
+        if tag == Tag.tspan and name == Attr.href:
+            return false
+        if accepts_inherit(name) and strings.trim(value) == "inherit":
+            return try self.inherit(parent, name)
+        try self.tree.attrs.push(Attribute(name = name, value = value, important = important))
+        return true
+
+    ## `name: inherit` under `parent`: an inherited property takes the nearest ancestor's
+    ## value, any other the parent's; failing that, the initial value.
+    mutating func inherit(parent: u32, name: Attr) -> bool!:
+        let tree = self.tree
+        var at = parent
+        while at != 0:
+            if let value = tree.attribute(at, name):
+                try tree.attrs.push(Attribute(name = name, value = value))
+                return true
+            if not is_inherited(name):
+                break
+            at = tree.nodes.items[at].parent
+        let initial = attr_initial[(usize)(u16)name]
+        if initial.length == 0:
+            return false
+        try tree.attrs.push(Attribute(name = name, value = initial))
+        return true
+
+    ## Expand `<use>` (XML `index`, tree `node`): build what it references as its child.
+    mutating func expand_use(index: u32, origin: u32, node: u32, depth: usize) -> !:
+        let xml = &self.tree.xml
+        let target_link = self.xml_link(index) else return
+        if target_link == index or target_link == origin:
+            return
+        if svg_tag(xml, target_link) == none:
+            return
+        # A `use` inside the target that references this `use`, or the target itself, is
+        # a cycle: the whole `use` is dropped.
+        var stack = List[u32]()
+        defer stack.release()
+        try stack.push(xml.nodes.items[target_link].first)
+        while stack.used > 0:
+            var child = stack.items[stack.used - 1]
+            stack.used -= 1
+            while child != 0:
+                if xml.nodes.items[child].element:
+                    if svg_tag(xml, child) == Tag.use:
+                        if let target = self.xml_link(child):
+                            if target == index or target == target_link:
+                                return
+                    if xml.nodes.items[child].first != 0:
+                        try stack.push(xml.nodes.items[child].first)
+                child = xml.nodes.items[child].next
+        try self.element(target_link, index, node, true, depth + 1)
+
+    ## The XML element an XML element's `href` (or else `xlink:href`) names.
+    func xml_link(index: u32) -> u32?:
+        let xml = &self.tree.xml
+        let element = xml.nodes.items[index]
+        var value: str? = none
+        for at in element.attr_start..<element.attr_end:
+            let raw = xml.attrs.items[at]
+            if raw.name == "href" and raw.space == Space.absent:
+                value = raw.value
+        if value == none:
+            for at in element.attr_start..<element.attr_end:
+                let raw = xml.attrs.items[at]
+                if raw.name == "href" and raw.space == Space.xlink:
+                    value = raw.value
+        let text = value else return none
+        let id = iri(text) else return none
+        return find_id(self.xml_ids, id)
+
+## The node of `id` in sorted `ids`.
+func find_id(ids: const IdEntry[], id: str) -> u32?:
+    var low: usize = 0
+    var high = ids.length
+    while low < high:
+        let middle = (low + high) // 2
+        let order = compare_text(ids[middle].id, id)
+        if order == 0:
+            return ids[middle].node
+        if order < 0:
+            low = middle + 1
+        else:
+            high = middle
+    return none
+
+## Append `node` as the last child of `parent`; answer its index.
+func append_node(tree: Tree*, parent: u32, node: Node) -> u32!:
+    var child = node
+    child.parent = parent
+    let index = (u32)tree.nodes.used
+    try tree.nodes.push(child)
+    if tree.nodes.items[parent].last != 0:
+        tree.nodes.items[tree.nodes.items[parent].last].next = index
+    else:
+        tree.nodes.items[parent].first = index
+    tree.nodes.items[parent].last = index
+    return index

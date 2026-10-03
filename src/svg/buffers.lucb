@@ -1,0 +1,100 @@
+#==============================================================================================
+#
+#   svg/buffers - Growable lists and a text arena
+#
+#   DESCRIPTION:
+#       The document tree, the scene and the renderer keep their records in `List`s, heap
+#       arrays that double as they fill, addressed by index so nothing points into them.
+#       Text that is not a plain view of the source (decoded entities, normalised
+#       attribute values, copied CSS declarations) is stored in an `Arena`: blocks that
+#       never move, so a `str` into one stays valid until the arena is released.
+#
+#==============================================================================================
+
+# mark: Lists =================================================================================
+
+## A growable heap array of `T`; `used` of `items` are in use.
+struct List[T]:
+    var items: T[]
+    var used: usize = 0
+
+    ## Append `value`.
+    mutating func push(value: T) -> !:
+        if self.used >= self.items.length:
+            self.items = try grown(self.items, self.used, 8)
+        self.items[self.used] = value
+        self.used += 1
+
+    ## The items in use, as a span.
+    func view() -> T[]:
+        return self.items[..<self.used]
+
+    ## Drop items past `length`.
+    mutating func truncate(length: usize):
+        if length < self.used:
+            self.used = length
+
+    ## Free the items; the list is empty afterwards.
+    mutating func release():
+        if self.items.length > 0:
+            free(self.items) in memory.heap
+        var empty: T[]
+        self.items = empty
+        self.used = 0
+
+# mark: The text arena ========================================================================
+
+## Bytes for text that outlives the source view it was made from, in blocks that never move.
+struct Arena:
+    var blocks: List[u8[]] = List[u8[]]()
+    var block_used: usize = 0
+
+    ## A copy of `text` in the arena.
+    mutating func store(text: const u8[]) -> str!:
+        let target = try self.reserve(text.length)
+        memory.copy(target, text, text.length)
+        return (str)target
+
+    ## `length` bytes of fresh arena storage, for the caller to fill.
+    mutating func reserve(length: usize) -> u8[]!:
+        if length == 0:
+            var empty: u8[]
+            return empty
+        var room: usize = 0
+        if self.blocks.used > 0:
+            room = self.blocks.items[self.blocks.used - 1].length - self.block_used
+        if room < length:
+            let size = length if length > 16384 else 16384
+            try self.blocks.push(try alloc u8[size] in memory.heap)
+            self.block_used = 0
+        let block = self.blocks.items[self.blocks.used - 1]
+        let start = self.block_used
+        self.block_used += length
+        return block[start..<start + length]
+
+    ## Free every block; every `str` the arena gave out is invalid afterwards.
+    mutating func release():
+        for block in self.blocks.view():
+            free(block) in memory.heap
+        self.blocks.release()
+        self.block_used = 0
+
+## Text built a byte at a time in a scratch list, then kept in an arena.
+struct TextBuilder:
+    var bytes: List[u8] = List[u8]()
+
+    mutating func add(byte: u8) -> !:
+        try self.bytes.push(byte)
+
+    mutating func add_all(text: const u8[]) -> !:
+        for byte in text:
+            try self.bytes.push(byte)
+
+    ## The bytes so far, stored in `arena`; the builder is cleared.
+    mutating func finish(arena: Arena*) -> str!:
+        let kept = try arena.store(self.bytes.view())
+        self.bytes.used = 0
+        return kept
+
+    mutating func release():
+        self.bytes.release()

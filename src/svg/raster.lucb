@@ -1,0 +1,96 @@
+#==============================================================================================
+#
+#   svg/raster - Flattening paths into polylines
+#
+#   DESCRIPTION:
+#       Paths become polylines here: curves are cut into straight pieces short enough
+#       that none strays more than a set tolerance from the curve, measured in device
+#       pixels. The scanline rasteriser (scanline.lucb) turns them into coverage.
+#
+#==============================================================================================
+
+# mark: Polylines =============================================================================
+
+## A run of points, one subpath flattened; `closed` when the subpath was closed.
+struct Strand:
+    var start: usize = 0
+    var count: usize = 0
+    var closed: bool = false
+
+## Flattened subpaths over one point buffer.
+struct Polylines:
+    var points: List[Point] = List[Point]()
+    var runs: List[Strand] = List[Strand]()
+
+    mutating func clear():
+        self.points.used = 0
+        self.runs.used = 0
+
+    mutating func release():
+        self.points.release()
+        self.runs.release()
+
+    ## The points of run `index`.
+    func run_points(index: usize) -> Point[]:
+        let run = self.runs.items[index]
+        return self.points.items[run.start..<run.start + run.count]
+
+    mutating func begin(p: Point) -> !:
+        try self.runs.push(Strand(start = self.points.used))
+        try self.add(p)
+
+    mutating func add(p: Point) -> !:
+        try self.points.push(p)
+        self.runs.items[self.runs.used - 1].count += 1
+
+## How far, in device pixels, a flattened curve may stray from the true one.
+let flatness: f64 = 0.05
+
+## Flatten `path` through `transform` into `out`. Curves are cut finely enough to stay
+## within `flatness` device pixels, where `scale` is how many device pixels one unit of
+## the result spans (1 when `transform` already maps to the device), so a path
+## flattened in user space for stroking stays smooth on screen.
+func flatten(path: const Path*, transform: Matrix, scale: f64, out: Polylines*) -> !:
+    var at: usize = 0
+    var current = Point()
+    var open = false
+    let per_unit = math.max(scale, 1e-9)
+    for verb in path.verbs.view():
+        match verb:
+            .move:
+                current = apply(transform, path.points.items[at].x, path.points.items[at].y)
+                try out.begin(current)
+                open = true
+                at += 1
+            .line:
+                current = apply(transform, path.points.items[at].x, path.points.items[at].y)
+                try out.add(current)
+                at += 1
+            .cubic:
+                let p1 = apply(transform, path.points.items[at].x, path.points.items[at].y)
+                let p2 = apply(transform, path.points.items[at + 1].x, path.points.items[at + 1].y)
+                let p3 = apply(transform, path.points.items[at + 2].x, path.points.items[at + 2].y)
+                # A cubic's deviation from its chord is bounded by 3/4 of its second difference.
+                let ddx = math.max(math.abs(current.x - 2.0 * p1.x + p2.x), math.abs(p1.x - 2.0 * p2.x + p3.x))
+                let ddy = math.max(math.abs(current.y - 2.0 * p1.y + p2.y), math.abs(p1.y - 2.0 * p2.y + p3.y))
+                let deviation = math.sqrt(ddx * ddx + ddy * ddy) * 0.75 * per_unit
+                let pieces = (i64)math.clamp(math.ceil(math.sqrt(deviation / flatness)), 1.0, 1000.0)
+                for step in 1..<pieces + 1:
+                    try out.add(cubic_point(current, p1, p2, p3, (f64)step / (f64)pieces))
+                current = p3
+                at += 3
+            .close:
+                if open:
+                    out.runs.items[out.runs.used - 1].closed = true
+                    open = false
+                    let run = out.runs.items[out.runs.used - 1]
+                    current = out.points.items[run.start]
+
+## The largest factor by which `transform` stretches a length.
+func max_stretch(transform: Matrix) -> f64:
+    let a = transform.a * transform.a + transform.b * transform.b
+    let b = transform.a * transform.c + transform.b * transform.d
+    let c = transform.c * transform.c + transform.d * transform.d
+    let mean = (a + c) * 0.5
+    let spread = math.sqrt(math.max(0.0, (a - c) * (a - c) * 0.25 + b * b))
+    return math.sqrt(mean + spread)

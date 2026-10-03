@@ -73,7 +73,7 @@ func read_flag(data: const u8[], pos: usize*) -> f64!:
 # mark: Attributes and transforms =============================================================
 
 ## The value of `name="..."` (or `name='...'`) inside `tag`, or none.
-func attribute(tag: str, name: str) -> str?:
+func tag_attribute(tag: str, name: str) -> str?:
     let data = tag.bytes
     let key = name.bytes
     var index: usize = 0
@@ -94,7 +94,7 @@ func attribute(tag: str, name: str) -> str?:
     return none
 
 func number_attribute(tag: str, name: str, fallback: f64) -> f64:
-    let value = attribute(tag, name) else return fallback
+    let value = tag_attribute(tag, name) else return fallback
     return strings.parse_f64(value) catch _: recover fallback
 
 ## Compose the transform list in `text` (translate/scale/rotate/matrix), left to right.
@@ -166,7 +166,7 @@ struct ViewBox:
     var h: f64 = 0.0
 
 func view_box(tag: str) -> ViewBox:
-    if let box = attribute(tag, "viewBox"):
+    if let box = tag_attribute(tag, "viewBox"):
         let data = box.bytes
         var pos: usize = 0
         var values: f64[4] = [0.0, 0.0, 0.0, 0.0]
@@ -234,7 +234,7 @@ struct Frame:
 ## own transform comes after its ancestors'. `gradient_ids` are the document's gradients.
 func entered(outer: Frame, tag: str, gradient_ids: const str[]) -> Frame:
     var inner = Frame(transform = outer.transform, style = styled(tag, outer.style, gradient_ids))
-    if let text = attribute(tag, "transform"):
+    if let text = tag_attribute(tag, "transform"):
         inner.transform = multiply(outer.transform, parse_transform(text))
     return inner
 

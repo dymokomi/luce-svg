@@ -1,0 +1,345 @@
+#==============================================================================================
+#
+#   svg/values - Parsers for SVG's attribute values
+#
+#   DESCRIPTION:
+#       The microsyntaxes attribute values are written in, each parser public so other
+#       code can share one spec-correct reading: numbers (an exponent never swallows the
+#       `e` of `em` or `ex`), lengths with their units, length and number lists,
+#       transform lists (matrix, translate, scale, rotate, skewX, skewY), angles,
+#       viewBoxes and preserveAspectRatio. Each answers none for text that does not
+#       parse as a whole; the rules follow resvg's svgtypes, so the two read files alike.
+#
+#==============================================================================================
+
+# mark: Scanning ==============================================================================
+
+## A position in a value being parsed.
+struct Scanner:
+    var data: const u8[]
+    var pos: usize = 0
+
+    func at_end() -> bool:
+        return self.pos >= self.data.length
+
+    func peek() -> u8:
+        return self.data[self.pos] if self.pos < self.data.length else 0
+
+    func peek_at(offset: usize) -> u8:
+        return self.data[self.pos + offset] if self.pos + offset < self.data.length else 0
+
+    func starts_with(text: str) -> bool:
+        if self.pos + text.length > self.data.length:
+            return false
+        for index in 0..<text.length:
+            if self.data[self.pos + index] != text.bytes[index]:
+                return false
+        return true
+
+    mutating func skip_spaces():
+        while self.pos < self.data.length and is_space(self.data[self.pos]):
+            self.pos += 1
+
+    ## Skip spaces, then one comma if there is one.
+    mutating func skip_separator():
+        self.skip_spaces()
+        if self.peek() == ',':
+            self.pos += 1
+
+    ## A number as SVG writes it: sign, digits, fraction, exponent.
+    mutating func number() -> f64?:
+        self.skip_spaces()
+        let start = self.pos
+        var byte = self.peek()
+        if byte == '+' or byte == '-':
+            self.pos += 1
+            byte = self.peek()
+        if is_digit(byte):
+            while is_digit(self.peek()):
+                self.pos += 1
+        elif byte != '.':
+            self.pos = start
+            return none
+        if self.peek() == '.':
+            self.pos += 1
+            while is_digit(self.peek()):
+                self.pos += 1
+        byte = self.peek()
+        if byte == 'e' or byte == 'E':
+            let next = self.peek_at(1)
+            if next != 'm' and next != 'x':
+                if next == '+' or next == '-':
+                    self.pos += 2
+                elif is_digit(next):
+                    self.pos += 1
+                else:
+                    self.pos = start
+                    return none
+                if not is_digit(self.peek()):
+                    self.pos = start
+                    return none
+                while is_digit(self.peek()):
+                    self.pos += 1
+        let text = (str)self.data[start..<self.pos]
+        if text == "." or text == "+" or text == "-" or text == "+." or text == "-.":
+            self.pos = start
+            return none
+        let value = strings.parse_f64(text) catch _:
+            self.pos = start
+            recover 0.0
+        if self.pos == start or not math.is_finite(value):
+            self.pos = start
+            return none
+        return value
+
+    ## A number from a list: the number, then spaces and an optional comma.
+    mutating func list_number() -> f64?:
+        let value = self.number() else return none
+        self.skip_separator()
+        return value
+
+    ## A length: a number and its unit.
+    mutating func length() -> Length?:
+        let value = self.number() else return none
+        var found_unit = Unit.plain
+        let units: str[9] = ["%", "em", "ex", "px", "in", "cm", "mm", "pt", "pc"]
+        let kinds: Unit[9] = [Unit.percent, Unit.em, Unit.ex, Unit.px, Unit.inch, Unit.cm, Unit.mm, Unit.pt, Unit.pc]
+        for index in 0..<units.length:
+            if self.starts_with(units[index]):
+                found_unit = kinds[index]
+                self.pos += units[index].length
+                break
+        return Length(number = value, unit = found_unit)
+
+    ## An identifier: letters, digits, `-` and `_`.
+    mutating func identifier() -> str:
+        let start = self.pos
+        while self.pos < self.data.length and (is_alpha(self.data[self.pos]) or is_digit(self.data[self.pos]) or self.data[self.pos] == '-' or self.data[self.pos] == '_'):
+            self.pos += 1
+        return (str)self.data[start..<self.pos]
+
+# mark: Numbers and lengths ===================================================================
+
+## A length's unit.
+pub enum Unit:
+    plain
+    percent
+    em
+    ex
+    px
+    inch
+    cm
+    mm
+    pt
+    pc
+
+## A length as written: a number and its unit.
+pub struct Length:
+    pub var number: f64 = 0.0
+    pub var unit: Unit = Unit.plain
+
+## `text` as one number (spaces around it allowed), or none.
+pub func parse_number(text: str) -> f64?:
+    var scanner = Scanner(data = text.bytes)
+    let value = scanner.number() else return none
+    scanner.skip_spaces()
+    if not scanner.at_end():
+        return none
+    return value
+
+## `text` as one length (spaces around it allowed), or none.
+pub func parse_length(text: str) -> Length?:
+    var scanner = Scanner(data = text.bytes)
+    let value = scanner.length() else return none
+    scanner.skip_spaces()
+    if not scanner.at_end():
+        return none
+    return value
+
+## An angle in degrees: a number, optionally in deg, grad, rad or turn.
+pub func parse_angle(text: str) -> f64?:
+    var scanner = Scanner(data = text.bytes)
+    let value = scanner.number() else return none
+    var degrees = value
+    if scanner.starts_with("deg"):
+        scanner.pos += 3
+    elif scanner.starts_with("grad"):
+        scanner.pos += 4
+        degrees = value * 0.9
+    elif scanner.starts_with("rad"):
+        scanner.pos += 3
+        degrees = value * 180.0 / math.pi
+    elif scanner.starts_with("turn"):
+        scanner.pos += 4
+        degrees = value * 360.0
+    scanner.skip_spaces()
+    if not scanner.at_end():
+        return none
+    return degrees
+
+# mark: Transforms ============================================================================
+
+## A transform list (`matrix`, `translate`, `scale`, `rotate`, `skewX`, `skewY`, separated
+## by spaces or commas) composed left to right, or none when any part is malformed.
+pub func parse_transform_list(text: str) -> Matrix?:
+    var scanner = Scanner(data = text.bytes)
+    var result = Matrix()
+    while true:
+        scanner.skip_spaces()
+        while scanner.peek() == ',':
+            scanner.pos += 1
+            scanner.skip_spaces()
+        if scanner.at_end():
+            break
+        let name = scanner.identifier()
+        scanner.skip_spaces()
+        if scanner.peek() != '(':
+            return none
+        scanner.pos += 1
+        var values: f64[6] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        var count: usize = 0
+        while true:
+            scanner.skip_spaces()
+            if scanner.peek() == ')':
+                scanner.pos += 1
+                break
+            if count >= 6:
+                return none
+            let value = scanner.list_number() else return none
+            values[count] = value
+            count += 1
+        let step = transform_step(name, values, count) else return none
+        result = multiply(result, step)
+    return result
+
+## One transform function with `count` arguments, or none when the count is wrong.
+func transform_step(name: str, values: f64[6], count: usize) -> Matrix?:
+    if name == "matrix":
+        if count != 6:
+            return none
+        return Matrix(a = values[0], b = values[1], c = values[2], d = values[3], e = values[4], f = values[5])
+    if name == "translate":
+        if count != 1 and count != 2:
+            return none
+        return Matrix(e = values[0], f = values[1] if count == 2 else 0.0)
+    if name == "scale":
+        if count != 1 and count != 2:
+            return none
+        return Matrix(a = values[0], d = values[1] if count == 2 else values[0])
+    if name == "rotate":
+        if count != 1 and count != 3:
+            return none
+        let rotation = rotation_matrix(values[0])
+        if count == 3:
+            return multiply(multiply(Matrix(e = values[1], f = values[2]), rotation), Matrix(e = -values[1], f = -values[2]))
+        return rotation
+    if name == "skewX":
+        if count != 1:
+            return none
+        return Matrix(c = math.tan(values[0] * math.pi / 180.0))
+    if name == "skewY":
+        if count != 1:
+            return none
+        return Matrix(b = math.tan(values[0] * math.pi / 180.0))
+    return none
+
+## A rotation by `degrees`, exact at the quarter turns.
+func rotation_matrix(degrees: f64) -> Matrix:
+    let turned = math.mod(degrees, 360.0)
+    var cosine = math.cos(degrees * math.pi / 180.0)
+    var sine = math.sin(degrees * math.pi / 180.0)
+    if turned == 0.0:
+        cosine = 1.0
+        sine = 0.0
+    elif turned == 90.0 or turned == -270.0:
+        cosine = 0.0
+        sine = 1.0
+    elif turned == 180.0 or turned == -180.0:
+        cosine = -1.0
+        sine = 0.0
+    elif turned == 270.0 or turned == -90.0:
+        cosine = 0.0
+        sine = -1.0
+    return Matrix(a = cosine, b = sine, c = -sine, d = cosine)
+
+# mark: Viewports =============================================================================
+
+## A rectangle: its origin and size.
+pub struct Rect:
+    pub var x: f64 = 0.0
+    pub var y: f64 = 0.0
+    pub var w: f64 = 0.0
+    pub var h: f64 = 0.0
+
+    pub func right() -> f64:
+        return self.x + self.w
+
+    pub func bottom() -> f64:
+        return self.y + self.h
+
+## A viewBox: four numbers, the width and height positive; else none.
+pub func parse_view_box(text: str) -> Rect?:
+    var scanner = Scanner(data = text.bytes)
+    var values: f64[4] = [0.0, 0.0, 0.0, 0.0]
+    for index in 0..<(usize)4:
+        values[index] = scanner.list_number() else return none
+    scanner.skip_spaces()
+    if not scanner.at_end() or not (values[2] > 0.0) or not (values[3] > 0.0):
+        return none
+    return Rect(x = values[0], y = values[1], w = values[2], h = values[3])
+
+## How a viewBox is fitted into a viewport: its alignment on each axis (0 min, 1 mid,
+## 2 max) or none at all (`stretch`), and whether it covers the viewport (`slice`)
+## rather than fitting inside it (`meet`).
+pub struct AspectRatio:
+    pub var stretch: bool = false
+    pub var align_x: u8 = 1
+    pub var align_y: u8 = 1
+    pub var slice: bool = false
+
+## A preserveAspectRatio value, or none.
+pub func parse_aspect_ratio(text: str) -> AspectRatio?:
+    var scanner = Scanner(data = text.bytes)
+    scanner.skip_spaces()
+    if scanner.starts_with("defer"):
+        scanner.pos += 5
+        scanner.skip_spaces()
+    let align = scanner.identifier()
+    var result = AspectRatio()
+    if align == "none":
+        result.stretch = true
+    elif align.length == 8 and align.bytes[0] == 'x' and align.bytes[4] == 'Y':
+        result.align_x = align_place((str)align.bytes[1..<4]) else return none
+        result.align_y = align_place((str)align.bytes[5..<8]) else return none
+    else:
+        return none
+    scanner.skip_spaces()
+    let mode = scanner.identifier()
+    if mode == "slice":
+        result.slice = true
+    elif mode != "meet" and mode != "":
+        return none
+    scanner.skip_spaces()
+    if not scanner.at_end():
+        return none
+    return result
+
+func align_place(text: str) -> u8?:
+    if text == "Min": return 0
+    if text == "Mid": return 1
+    if text == "Max": return 2
+    return none
+
+## The transform that fits `view` into a viewport of `width` by `height` at the origin
+## as `aspect` says.
+pub func view_box_transform(view: Rect, aspect: AspectRatio, width: f64, height: f64) -> Matrix:
+    let sx = width / view.w
+    let sy = height / view.h
+    if aspect.stretch:
+        return Matrix(a = sx, d = sy, e = -view.x * sx, f = -view.y * sy)
+    let scale = math.max(sx, sy) if aspect.slice else math.min(sx, sy)
+    let free_x = width - view.w * scale
+    let free_y = height - view.h * scale
+    let x = free_x * (f64)aspect.align_x * 0.5 - view.x * scale
+    let y = free_y * (f64)aspect.align_y * 0.5 - view.y * scale
+    return Matrix(a = scale, d = scale, e = x, f = y)

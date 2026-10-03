@@ -1,0 +1,257 @@
+#==============================================================================================
+#
+#   svg/stroker - Stroking flattened paths into coverage
+#
+#   DESCRIPTION:
+#       A stroke is built in user space, where its width, dashes, caps and joins are
+#       defined, and each piece is mapped to the device as it is accumulated, so a
+#       non-uniform transform stretches the stroke as SVG asks. The pieces are polygons
+#       that union under the nonzero rule: a quadrilateral per segment, the wedge of a
+#       miter, miter-clip or bevel join (or a round join's disc) at every vertex, and a
+#       butt, round or square cap at each open end. Dashes cut each subpath first, walking
+#       its length against the pattern from its offset; a dash of zero length still gets
+#       its caps, so round caps make dots. Discs have as many sides as their device size
+#       needs to stay within the flatness tolerance.
+#
+#==============================================================================================
+
+## How a shape is stroked, in user units.
+struct StrokeShape:
+    var width: f64 = 1.0
+    var cap: Cap = Cap.butt
+    var join: Join = Join.miter
+    var miter_limit: f64 = 4.0
+    ## The dash pattern (even length, positive sum) and where along it the path starts.
+    var dashes: const f64[]
+    var dash_offset: f64 = 0.0
+
+## Where stroke pieces go: user space mapped by `transform` into `coverage`.
+struct StrokeTarget:
+    var coverage: Coverage*
+    var transform: Matrix
+    ## Device pixels per user unit, for the number of sides a disc needs.
+    var scale: f64 = 1.0
+    var scratch: List[Point] = List[Point]()
+
+    mutating func release():
+        self.scratch.release()
+
+    ## Accumulate the user-space polygon `points`.
+    mutating func polygon(points: const Point[]) -> !:
+        self.scratch.used = 0
+        for p in points:
+            try self.scratch.push(apply(self.transform, p.x, p.y))
+        self.coverage.polygon(self.scratch.view())
+
+    ## A disc of radius `radius` round `centre`.
+    mutating func disc(centre: Point, radius: f64) -> !:
+        let device = radius * self.scale
+        var sides: usize = 8
+        if device > 0.5:
+            let step = 2.0 * math.acos(math.max(0.0, 1.0 - flatness / device))
+            sides = (usize)math.clamp(math.ceil(math.tau / math.max(step, 1e-3)), 8.0, 512.0)
+        self.scratch.used = 0
+        for index in 0..<sides:
+            let angle = (f64)index / (f64)sides * math.tau
+            let p = Point(centre.x + math.cos(angle) * radius, centre.y + math.sin(angle) * radius)
+            try self.scratch.push(apply(self.transform, p.x, p.y))
+        self.coverage.polygon(self.scratch.view())
+
+## Stroke every run of `lines` (user space) with `shape` into `target`.
+func stroke_lines(lines: const Polylines*, shape: const StrokeShape*, target: StrokeTarget*) -> !:
+    let half = shape.width * 0.5
+    var clean = List[Point]()
+    defer clean.release()
+    var pieces = Polylines()
+    defer pieces.release()
+    var dashed = List[Point]()
+    defer dashed.release()
+    for index in 0..<lines.runs.used:
+        let run = lines.runs.items[index]
+        # Drop repeated points, so every segment has a direction.
+        clean.used = 0
+        for at in run.start..<run.start + run.count:
+            let p = lines.points.items[at]
+            if clean.used == 0 or gap_between(clean.items[clean.used - 1], p) > 1e-9:
+                try clean.push(p)
+        var closed = run.closed and clean.used > 2
+        if closed and gap_between(clean.items[0], clean.items[clean.used - 1]) <= 1e-9:
+            clean.used -= 1
+        if shape.dashes.length == 0:
+            try stroke_strand(clean.view(), closed, half, shape, target, Point(1.0, 0.0))
+            continue
+        # A closed run is dashed as an open one that comes back to its start.
+        if closed:
+            try clean.push(clean.items[0])
+        pieces.clear()
+        try dash_run(clean.view(), shape, &pieces)
+        for piece in 0..<pieces.runs.used:
+            dashed.used = 0
+            for p in pieces.run_points(piece):
+                if dashed.used == 0 or gap_between(dashed.items[dashed.used - 1], p) > 1e-9:
+                    try dashed.push(p)
+            # A zero-length dash keeps the direction of the segment it lies on, for its caps.
+            var direction = Point(1.0, 0.0)
+            if dashed.used == 1:
+                direction = dash_direction(clean.view(), dashed.items[0]) else Point(1.0, 0.0)
+            try stroke_strand(dashed.view(), false, half, shape, target, direction)
+
+func gap_between(a: Point, b: Point) -> f64:
+    return math.hypot(b.x - a.x, b.y - a.y)
+
+## Stroke one polyline: segments, joins and caps. A lone point gets only its caps,
+## facing `direction`.
+func stroke_strand(points: const Point[], closed: bool, half: f64, shape: const StrokeShape*, target: StrokeTarget*, direction: Point) -> !:
+    var quad: Point[5] = [Point(), Point(), Point(), Point(), Point()]
+    let count = points.length
+    if count == 0:
+        return
+    if count == 1:
+        try stroke_cap(points[0], direction, half, shape, target, true)
+        try stroke_cap(points[0], direction, half, shape, target, false)
+        return
+    let segment_count = count if closed else count - 1
+    for index in 0..<segment_count:
+        let a = points[index]
+        let b = points[(index + 1) % count]
+        let along = heading(a, b) else continue
+        let nx = -along.y * half
+        let ny = along.x * half
+        quad[0] = Point(a.x + nx, a.y + ny)
+        quad[1] = Point(b.x + nx, b.y + ny)
+        quad[2] = Point(b.x - nx, b.y - ny)
+        quad[3] = Point(a.x - nx, a.y - ny)
+        try target.polygon(quad[..<4])
+    for index in 0..<count:
+        let interior = index > 0 and index + 1 < count
+        if closed or interior:
+            let before = points[(index + count - 1) % count]
+            let after = points[(index + 1) % count]
+            try stroke_join(before, points[index], after, half, shape, target)
+    if not closed:
+        let start_direction = heading(points[0], points[1]) else Point(1.0, 0.0)
+        let end_direction = heading(points[count - 2], points[count - 1]) else Point(1.0, 0.0)
+        try stroke_cap(points[0], start_direction, half, shape, target, true)
+        try stroke_cap(points[count - 1], end_direction, half, shape, target, false)
+
+## The join at `vertex` between the segment from `before` and the one to `after`.
+func stroke_join(before: Point, vertex: Point, after: Point, half: f64, shape: const StrokeShape*, target: StrokeTarget*) -> !:
+    if shape.join == Join.round:
+        try target.disc(vertex, half)
+        return
+    let d0 = heading(before, vertex) else return
+    let d1 = heading(vertex, after) else return
+    let turn = d0.x * d1.y - d0.y * d1.x
+    let dot = d0.x * d1.x + d0.y * d1.y
+    if math.abs(turn) < 1e-12 and dot > 0.0:
+        return
+    # The outer side is the one the path turns away from; a normal is (-dy, dx).
+    let side = -half if turn > 0.0 else half
+    let outer0 = Point(vertex.x - d0.y * side, vertex.y + d0.x * side)
+    let outer1 = Point(vertex.x - d1.y * side, vertex.y + d1.x * side)
+    var wedge: Point[5] = [vertex, outer0, Point(), Point(), Point()]
+    # The miter's length over the stroke width is 1 / sin(θ/2), θ the angle between segments.
+    let cosine = math.sqrt(math.max(0.0, (1.0 + dot) * 0.5))
+    let within = cosine > 1e-9 and 1.0 / cosine <= shape.miter_limit
+    if (shape.join == Join.miter or shape.join == Join.miter_clip) and within:
+        let reach = side / (1.0 + dot)
+        wedge[2] = Point(vertex.x - (d0.y + d1.y) * reach, vertex.y + (d0.x + d1.x) * reach)
+        wedge[3] = outer1
+        try target.polygon(wedge[..<4])
+    elif shape.join == Join.miter_clip and dot > -1.0 + 1e-12:
+        # Cut the miter square to its bisector at the limit's distance from the vertex.
+        let bx = -(d0.y + d1.y) * side
+        let by = (d0.x + d1.x) * side
+        let length = math.hypot(bx, by)
+        let mx = bx / length
+        let my = by / length
+        let clip = shape.miter_limit * half
+        let reach0 = (outer0.x - vertex.x) * mx + (outer0.y - vertex.y) * my
+        let along0 = d0.x * mx + d0.y * my
+        let along1 = -(d1.x * mx + d1.y * my)
+        if along0 > 1e-12 and along1 > 1e-12:
+            let s0 = (clip - reach0) / along0
+            let s1 = (clip - reach0) / along1
+            wedge[2] = Point(outer0.x + d0.x * s0, outer0.y + d0.y * s0)
+            wedge[3] = Point(outer1.x - d1.x * s1, outer1.y - d1.y * s1)
+            wedge[4] = outer1
+            try target.polygon(wedge[..<5])
+        else:
+            wedge[2] = outer1
+            try target.polygon(wedge[..<3])
+    else:
+        wedge[2] = outer1
+        try target.polygon(wedge[..<3])
+
+## The cap at `end`, which the path leaves (`start`) or reaches along `direction`.
+func stroke_cap(end: Point, direction: Point, half: f64, shape: const StrokeShape*, target: StrokeTarget*, start: bool) -> !:
+    if shape.cap == Cap.round:
+        try target.disc(end, half)
+        return
+    if shape.cap != Cap.square:
+        return
+    let out = Point(-direction.x, -direction.y) if start else direction
+    let nx = -out.y * half
+    let ny = out.x * half
+    var square: Point[4] = [Point(end.x + nx, end.y + ny), Point(end.x + nx + out.x * half, end.y + ny + out.y * half),
+                            Point(end.x - nx + out.x * half, end.y - ny + out.y * half), Point(end.x - nx, end.y - ny)]
+    try target.polygon(square)
+
+# mark: Dashes ================================================================================
+
+## Cut the polyline `points` into the "on" runs of `shape`'s dash pattern.
+func dash_run(points: const Point[], shape: const StrokeShape*, out: Polylines*) -> !:
+    let dashes = shape.dashes
+    var total = 0.0
+    for value in dashes:
+        total += value
+    if total <= 1e-12 or points.length < 2:
+        return
+    # Where in the pattern the path begins.
+    var phase = shape.dash_offset - math.floor(shape.dash_offset / total) * total
+    var slot: usize = 0
+    for _ in 0..<dashes.length * 2:
+        if phase < dashes[slot] or (dashes[slot] == 0.0 and phase == 0.0):
+            break
+        phase -= dashes[slot]
+        slot = (slot + 1) % dashes.length
+    var remaining = dashes[slot] - phase
+    var on = slot % 2 == 0
+    if on:
+        try out.begin(points[0])
+    for index in 0..<points.length - 1:
+        var a = points[index]
+        let b = points[index + 1]
+        var length = gap_between(a, b)
+        while length >= remaining:
+            let t = remaining / length if length > 0.0 else 0.0
+            let cut = Point(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+            if on:
+                try out.add(cut)
+            else:
+                try out.begin(cut)
+            on = not on
+            slot = (slot + 1) % dashes.length
+            remaining = dashes[slot]
+            length -= gap_between(a, cut)
+            a = cut
+        remaining -= length
+        if on:
+            try out.add(b)
+
+## The direction of the segment of `points` that `p` lies on, for a lone dash point.
+func dash_direction(points: const Point[], p: Point) -> Point?:
+    var best: Point? = none
+    var nearest = math.infinity
+    for index in 0..<points.length - 1:
+        let a = points[index]
+        let b = points[index + 1]
+        let along = heading(a, b) else continue
+        let t = (p.x - a.x) * along.x + (p.y - a.y) * along.y
+        let length = gap_between(a, b)
+        let clamped = math.clamp(t, 0.0, length)
+        let gap = gap_between(Point(a.x + along.x * clamped, a.y + along.y * clamped), p)
+        if gap < nearest:
+            nearest = gap
+            best = along
+    return best

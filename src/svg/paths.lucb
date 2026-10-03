@@ -299,7 +299,7 @@ func add_shape(drawing: Drawing*, name: str, tag: str, frame: Frame) -> !:
     drawing.style.pen.dash_offset *= factor
     let first = drawing.contour_used
     if name == "path":
-        if let d = attribute(tag, "d"):
+        if let d = tag_attribute(tag, "d"):
             try parse_path(drawing, d, transform)
     elif name == "rect":
         let rx = number_attribute(tag, "rx", 0.0)
@@ -317,7 +317,7 @@ func add_shape(drawing: Drawing*, name: str, tag: str, frame: Frame) -> !:
         try drawing.add_point(apply(transform, number_attribute(tag, "x1", 0.0), number_attribute(tag, "y1", 0.0)))
         try drawing.add_point(apply(transform, number_attribute(tag, "x2", 0.0), number_attribute(tag, "y2", 0.0)))
         try drawing.flush(start, false, false)
-    elif let points = attribute(tag, "points"):
+    elif let points = tag_attribute(tag, "points"):
         try add_points(drawing, transform, points, name == "polygon")
     if frame.style.fill.gradient > 0 or frame.style.stroke.gradient > 0:
         # Gradients need the finished shape: its box, and its transform.

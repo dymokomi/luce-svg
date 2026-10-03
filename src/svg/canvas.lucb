@@ -1,0 +1,194 @@
+#==============================================================================================
+#
+#   svg/canvas - Layers of premultiplied color and how they composite
+#
+#   DESCRIPTION:
+#       A Canvas is a layer: premultiplied RGBA floats over a rectangle of device pixels.
+#       Shapes are painted into one, groups that need isolation get one of their own,
+#       which is clipped, masked and filtered before it composites onto its parent with
+#       its opacity and blend mode. The blend modes are the sixteen of CSS Compositing
+#       Level 1, on premultiplied values: separable ones channel by channel, hue,
+#       saturation, color and luminosity through the lum/sat helpers. Values are in the
+#       picture's working space, encoded sRGB unless it is drawn in linear light.
+#
+#==============================================================================================
+
+## A layer of premultiplied RGBA floats covering device pixels `x..<x + width` by
+## `y..<y + height`.
+struct Canvas:
+    var x: i64 = 0
+    var y: i64 = 0
+    var width: usize = 0
+    var height: usize = 0
+    var pixels: f32[]
+
+    ## A cleared canvas.
+    static func make(x: i64, y: i64, width: usize, height: usize) -> Canvas!:
+        let pixels = try new f32[width * height * 4] in memory.heap
+        return Canvas(x = x, y = y, width = width, height = height, pixels = pixels)
+
+    mutating func release():
+        if self.pixels.length > 0:
+            free(self.pixels) in memory.heap
+        var empty: f32[]
+        self.pixels = empty
+
+    mutating func clear():
+        for index in 0..<self.pixels.length:
+            self.pixels[index] = 0.0
+
+    ## Scale every pixel by the matching value of `mask` (one float a pixel).
+    mutating func multiply(mask: const f32[]):
+        for index in 0..<self.width * self.height:
+            let m = mask[index]
+            if m >= 1.0:
+                continue
+            let at = index * 4
+            self.pixels[at] *= m
+            self.pixels[at + 1] *= m
+            self.pixels[at + 2] *= m
+            self.pixels[at + 3] *= m
+
+## Composite `layer` onto `target` (the same rectangle) at `opacity` with `blend`.
+func composite_layer(target: Canvas*, layer: const Canvas*, opacity: f64, blend: Blend):
+    let alpha = (f32)opacity
+    for index in 0..<target.width * target.height:
+        let at = index * 4
+        let sa = layer.pixels[at + 3] * alpha
+        if sa <= 0.0:
+            continue
+        let sr = layer.pixels[at] * alpha
+        let sg = layer.pixels[at + 1] * alpha
+        let sb = layer.pixels[at + 2] * alpha
+        if blend == Blend.normal:
+            let keep = 1.0 - sa
+            target.pixels[at] = sr + target.pixels[at] * keep
+            target.pixels[at + 1] = sg + target.pixels[at + 1] * keep
+            target.pixels[at + 2] = sb + target.pixels[at + 2] * keep
+            target.pixels[at + 3] = sa + target.pixels[at + 3] * keep
+            continue
+        let out = blend_pixel(blend, [sr, sg, sb, sa], [target.pixels[at], target.pixels[at + 1], target.pixels[at + 2], target.pixels[at + 3]])
+        target.pixels[at] = out[0]
+        target.pixels[at + 1] = out[1]
+        target.pixels[at + 2] = out[2]
+        target.pixels[at + 3] = out[3]
+
+# mark: Blend modes ===========================================================================
+
+## Blend premultiplied source `s` over premultiplied backdrop `d` with `blend`.
+func blend_pixel(blend: Blend, s: f32[4], d: f32[4]) -> f32[4]:
+    var out: f32[4] = [0.0, 0.0, 0.0, 0.0]
+    let sa = (f64)s[3]
+    let da = (f64)d[3]
+    let alpha = sa + da - sa * da
+    match blend:
+        .hue, .saturation, .color, .luminosity:
+            # On demultiplied colors, scaled back as the separable formula does.
+            var sc: f64[3] = [(f64)s[0], (f64)s[1], (f64)s[2]]
+            var dc: f64[3] = [(f64)d[0], (f64)d[1], (f64)d[2]]
+            var mixed: f64[3] = [0.0, 0.0, 0.0]
+            if blend == Blend.hue:
+                mixed = set_lum(set_sat(scale3(sc, da), saturation_of(dc) * sa), luminance_of(dc) * sa, sa * da)
+            elif blend == Blend.saturation:
+                mixed = set_lum(set_sat(scale3(dc, sa), saturation_of(sc) * da), luminance_of(dc) * sa, sa * da)
+            elif blend == Blend.color:
+                mixed = set_lum(scale3(sc, da), luminance_of(dc) * sa, sa * da)
+            else:
+                mixed = set_lum(scale3(dc, sa), luminance_of(sc) * da, sa * da)
+            for channel in 0..<(usize)3:
+                out[channel] = (f32)(sc[channel] * (1.0 - da) + dc[channel] * (1.0 - sa) + mixed[channel])
+            out[3] = (f32)alpha
+            return out
+        _:
+            for channel in 0..<(usize)3:
+                let sc = (f64)s[channel]
+                let dc = (f64)d[channel]
+                out[channel] = (f32)separable(blend, sc, sa, dc, da)
+            out[3] = (f32)alpha
+            return out
+
+## One premultiplied channel of a separable blend.
+func separable(blend: Blend, sc: f64, sa: f64, dc: f64, da: f64) -> f64:
+    match blend:
+        .multiply:
+            return sc * (1.0 - da) + dc * (1.0 - sa) + sc * dc
+        .screen:
+            return sc + dc - sc * dc
+        .overlay:
+            return hard_light(dc, da, sc, sa)
+        .darken:
+            return sc + dc - math.max(sc * da, dc * sa)
+        .lighten:
+            return sc + dc - math.min(sc * da, dc * sa)
+        .color_dodge:
+            if dc == 0.0:
+                return sc * (1.0 - da)
+            if sc >= sa:
+                return sc + dc * (1.0 - sa)
+            return sa * math.min(da, dc * sa / (sa - sc)) + sc * (1.0 - da) + dc * (1.0 - sa)
+        .color_burn:
+            if dc >= da:
+                return dc + sc * (1.0 - da)
+            if sc <= 0.0:
+                return dc * (1.0 - sa)
+            return sa * (da - math.min(da, (da - dc) * sa / sc)) + sc * (1.0 - da) + dc * (1.0 - sa)
+        .hard_light:
+            return hard_light(sc, sa, dc, da)
+        .soft_light:
+            return soft_light(sc, sa, dc, da)
+        .difference:
+            return sc + dc - 2.0 * math.min(sc * da, dc * sa)
+        .exclusion:
+            return sc + dc - 2.0 * sc * dc
+        _:
+            return sc + dc * (1.0 - sa)
+
+func hard_light(sc: f64, sa: f64, dc: f64, da: f64) -> f64:
+    let rest = sc * (1.0 - da) + dc * (1.0 - sa)
+    if 2.0 * sc <= sa:
+        return rest + 2.0 * sc * dc
+    return rest + sa * da - 2.0 * (da - dc) * (sa - sc)
+
+func soft_light(sc: f64, sa: f64, dc: f64, da: f64) -> f64:
+    let m = dc / da if da > 0.0 else 0.0
+    let s2 = 2.0 * sc
+    let m4 = 4.0 * m
+    let dark_src = dc * (sa + (s2 - sa) * (1.0 - m))
+    let dark_dst = (m4 * m4 + m4) * (m - 1.0) + 7.0 * m
+    let lite_dst = math.sqrt(m) - m
+    let lite_src = dc * sa + da * (s2 - sa) * (dark_dst if 4.0 * dc <= da else lite_dst)
+    let value = dark_src if s2 <= sa else lite_src
+    return sc * (1.0 - da) + dc * (1.0 - sa) + value
+
+func scale3(c: f64[3], k: f64) -> f64[3]:
+    return [c[0] * k, c[1] * k, c[2] * k]
+
+func luminance_of(c: f64[3]) -> f64:
+    return c[0] * 0.30 + c[1] * 0.59 + c[2] * 0.11
+
+func saturation_of(c: f64[3]) -> f64:
+    return math.max(c[0], math.max(c[1], c[2])) - math.min(c[0], math.min(c[1], c[2]))
+
+func set_sat(c: f64[3], s: f64) -> f64[3]:
+    let low = math.min(c[0], math.min(c[1], c[2]))
+    let high = math.max(c[0], math.max(c[1], c[2]))
+    let range = high - low
+    if range <= 0.0:
+        return [0.0, 0.0, 0.0]
+    return [(c[0] - low) * s / range, (c[1] - low) * s / range, (c[2] - low) * s / range]
+
+## Shift `c` to luminance `l`, then clip it into 0..`a`.
+func set_lum(c: f64[3], l: f64, a: f64) -> f64[3]:
+    let diff = l - luminance_of(c)
+    var r: f64[3] = [c[0] + diff, c[1] + diff, c[2] + diff]
+    let low = math.min(r[0], math.min(r[1], r[2]))
+    let high = math.max(r[0], math.max(r[1], r[2]))
+    let lum = luminance_of(r)
+    for channel in 0..<(usize)3:
+        var v = r[channel]
+        if low < 0.0 and lum - low != 0.0:
+            v = lum + (v - lum) * lum / (lum - low)
+        if high > a and high - lum != 0.0:
+            v = lum + (v - lum) * (a - lum) / (high - lum)
+        r[channel] = math.max(0.0, v)
+    return r

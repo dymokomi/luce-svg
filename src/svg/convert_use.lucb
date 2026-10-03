@@ -1,0 +1,238 @@
+#==============================================================================================
+#
+#   svg/convert_use - `use`, `symbol`, nested `svg` and `switch`
+#
+#   DESCRIPTION:
+#       A `use` draws its copy of the referenced element (built into the tree as its
+#       child) in a group translated by its x and y. A referenced `symbol` becomes a new
+#       viewport: the `use`'s width and height (100% by default) size it, its viewBox and
+#       preserveAspectRatio fit the content in, and unless its overflow is visible the
+#       viewport clips it. A nested `svg` is a viewport the same way, sized by its own
+#       width and height or by a `use` that references it. A `switch` draws its first
+#       child whose conditions pass: no requiredExtensions, only supported
+#       requiredFeatures, and a systemLanguage that matches the user's languages.
+#
+#==============================================================================================
+
+extend Converter:
+    ## A `use` element: its referenced copy, the tree child, in a group of its own.
+    mutating func use_element(node: u32, state: const State*, parent: u32) -> !:
+        let child = self.tree.first_element_child(node)
+        if child == 0:
+            return
+        let child_tag = self.tree.tag(child)
+        if state.clip_child and child_tag == Tag.symbol:
+            return
+        var use_state = *state
+        let zero = Length()
+        var transform = self.transform_of(node, Attr.transform, state)
+        var inner = Matrix(e = self.user_length(node, Attr.x, &use_state, zero), f = self.user_length(node, Attr.y, &use_state, zero))
+        if child_tag == Tag.symbol:
+            let full = Length(number = 100.0, unit = Unit.percent)
+            var width = use_state.view_box.w
+            var height = use_state.view_box.h
+            if self.has(node, Attr.width):
+                width = self.user_length(node, Attr.width, &use_state, full)
+            if self.has(node, Attr.height):
+                height = self.user_length(node, Attr.height, &use_state, full)
+            if width > 0.0 and height > 0.0:
+                use_state.view_box = Rect(x = use_state.view_box.x, y = use_state.view_box.y, w = width, h = height)
+            if let fit = self.viewport_transform(node, child, &use_state):
+                inner = multiply(inner, fit)
+            if let clip_rect = self.viewport_clip(node, child, &use_state):
+                # The viewport clips: an outer group carries the use's transform and the clip.
+                let outer = try self.clip_group(clip_rect, transform, parent)
+                let group = try self.open_group(node, &use_state, outer)
+                try self.children(child, &use_state, group)
+                self.picture.items.items[group].transform = inner
+                try self.close_group(node, &use_state, outer, group, true)
+                if self.picture.items.items[outer].first == 0:
+                    self.picture.items.items[outer].parent = 0
+                    return
+                self.picture.attach(parent, outer)
+                return
+            transform = multiply(transform, inner)
+            let group = try self.open_group(node, &use_state, parent)
+            try self.children(child, &use_state, group)
+            self.picture.items.items[group].transform = transform
+            try self.close_group(node, &use_state, parent, group, false)
+            return
+        transform = multiply(transform, inner)
+        if child_tag == Tag.svg:
+            let full = Length(number = 100.0, unit = Unit.percent)
+            use_state.use_width = none
+            use_state.use_height = none
+            if self.has(node, Attr.width):
+                use_state.use_width = self.user_length(node, Attr.width, &use_state, full)
+            if self.has(node, Attr.height):
+                use_state.use_height = self.user_length(node, Attr.height, &use_state, full)
+        try self.transformed_children(node, transform, &use_state, parent)
+
+    ## The children of `node` in a group of `node`'s with `transform` (a group even
+    ## without other reasons when the transform is not the identity).
+    mutating func transformed_children(node: u32, transform: Matrix, state: const State*, parent: u32) -> !:
+        let group = try self.open_group(node, state, parent)
+        if state.clip_child:
+            try self.clip_children(node, state, group)
+        else:
+            try self.children(node, state, group)
+        self.picture.items.items[group].transform = transform
+        try self.close_group(node, state, parent, group, not is_identity(transform))
+
+    ## A nested `svg`: a viewport for its children.
+    mutating func nested_svg(node: u32, state: const State*, parent: u32) -> !:
+        let zero = Length()
+        let transform = self.transform_of(node, Attr.transform, state)
+        let x = self.user_length(node, Attr.x, state, zero)
+        let y = self.user_length(node, Attr.y, state, zero)
+        var inner = Matrix(e = x, f = y)
+        if let fit = self.viewport_transform(node, node, state):
+            inner = multiply(inner, fit)
+        var inner_state = *state
+        if let box = parse_view_box(self.attribute(node, Attr.view_box) else ""):
+            inner_state.view_box = box
+        else:
+            let (w, h) = self.viewport_size(node, state)
+            if w > 0.0 and h > 0.0:
+                inner_state.view_box = Rect(x = x, y = y, w = w, h = h)
+        if let clip_rect = self.viewport_clip(node, node, state):
+            let outer = try self.clip_group(clip_rect, transform, parent)
+            try self.transformed_children(node, inner, &inner_state, outer)
+            self.picture.attach(parent, outer)
+            return
+        try self.transformed_children(node, multiply(transform, inner), &inner_state, parent)
+
+    ## A detached group with `transform`, clipped to `rect`.
+    mutating func clip_group(rect: Rect, transform: Matrix, parent: u32) -> u32!:
+        let root = try self.picture.add_item(Item())
+        var path = Path()
+        errdefer path.release()
+        try path.rect(rect.x, rect.y, rect.w, rect.h)
+        let path_index = self.picture.paths.used
+        try self.picture.paths.push(path)
+        discard(try self.picture.append(root, Item(kind = ItemKind.shape, path = path_index, fill = FillPaint())))
+        let clip = self.picture.clips.used
+        try self.picture.clips.push(ClipServer(root = root))
+        let group = try self.picture.add_item(Item(transform = transform, clip = clip + 1))
+        self.picture.items.items[group].parent = parent
+        return group
+
+    ## The width and height of a `use` or nested `svg` viewport (100% when unset); a
+    ## `use` referencing the `svg` overrides them.
+    func viewport_size(node: u32, state: const State*) -> (f64, f64):
+        let full = Length(number = 100.0, unit = Unit.percent)
+        var w = self.user_length(node, Attr.width, state, full)
+        var h = self.user_length(node, Attr.height, state, full)
+        if self.tree.tag(node) == Tag.svg:
+            w = state.use_width else w
+            h = state.use_height else h
+        return (w, h)
+
+    ## How `linked`'s viewBox fits the viewport of `node`, if it has one.
+    func viewport_transform(node: u32, linked: u32, state: const State*) -> Matrix?:
+        let (w, h) = self.viewport_size(node, state)
+        if not (w > 0.0) or not (h > 0.0):
+            return none
+        let box = parse_view_box(self.attribute(linked, Attr.view_box) else "") else return none
+        var aspect = AspectRatio()
+        if let text = self.attribute(linked, Attr.preserve_aspect_ratio):
+            aspect = parse_aspect_ratio(text) else AspectRatio()
+        return view_box_transform(box, aspect, w, h)
+
+    ## The rectangle a viewport clips to, unless its overflow is visible.
+    func viewport_clip(node: u32, linked: u32, state: const State*) -> Rect?:
+        let overflow = strings.trim(self.attribute(linked, Attr.overflow) else "hidden")
+        if overflow == "visible" or overflow == "auto":
+            return none
+        if self.tree.tag(node) == Tag.svg and state.use_width == none and state.use_height == none:
+            if not (self.has(node, Attr.width) and self.has(node, Attr.height)):
+                return none
+        let zero = Length()
+        let x = self.user_length(node, Attr.x, state, zero)
+        let y = self.user_length(node, Attr.y, state, zero)
+        let (w, h) = self.viewport_size(node, state)
+        if not (w > 0.0) or not (h > 0.0):
+            return none
+        return Rect(x = x, y = y, w = w, h = h)
+
+    ## A `switch`: its first child whose conditions pass, in a group of the switch's.
+    mutating func switch_element(node: u32, state: const State*, parent: u32) -> !:
+        var child = self.tree.first_child(node)
+        while child != 0:
+            if self.tree.is_element(child) and self.condition_passed(child):
+                break
+            child = self.tree.next_sibling(child)
+        if child == 0:
+            return
+        let group = try self.open_group(node, state, parent)
+        try self.element(child, state, group)
+        try self.close_group(node, state, parent, group, false)
+
+    ## Whether an element's conditional processing attributes pass.
+    func condition_passed(node: u32) -> bool:
+        if self.has(node, Attr.required_extensions):
+            return false
+        if let features = self.attribute(node, Attr.required_features):
+            var rest = features
+            while rest.length > 0:
+                var piece = rest
+                rest = ""
+                if let space = strings.find(piece, " "):
+                    rest = (str)piece.bytes[space + 1..]
+                    piece = (str)piece.bytes[..<space]
+                if piece.length > 0 and not supported_feature(piece):
+                    return false
+            # An empty list is false.
+            if strings.trim(features).length == 0:
+                return false
+        if let languages = self.attribute(node, Attr.system_language):
+            var rest = languages
+            while true:
+                var piece = rest
+                var more = false
+                if let comma = strings.find(rest, ","):
+                    piece = (str)rest.bytes[..<comma]
+                    rest = (str)rest.bytes[comma + 1..]
+                    more = true
+                let language = strings.trim(piece)
+                if self.knows_language(language):
+                    return true
+                if let dash = strings.find(language, "-"):
+                    if self.knows_language((str)language.bytes[..<dash]):
+                        return true
+                if not more:
+                    break
+            return false
+        return true
+
+    ## Whether `language` is one of the options' languages.
+    func knows_language(language: str) -> bool:
+        if language.length == 0:
+            return false
+        var rest = self.options.languages
+        while true:
+            var piece = rest
+            var more = false
+            if let comma = strings.find(rest, ","):
+                piece = (str)rest.bytes[..<comma]
+                rest = (str)rest.bytes[comma + 1..]
+                more = true
+            if strings.trim(piece) == language:
+                return true
+            if not more:
+                return false
+
+## The SVG 1.1 feature strings resvg supports.
+func supported_feature(feature: str) -> bool:
+    let prefix = "http://www.w3.org/TR/SVG11/feature#"
+    if not strings.starts_with(feature, prefix):
+        return false
+    let name = (str)feature.bytes[prefix.length..]
+    let names: str[26] = ["SVGDOM-static", "SVG-static", "CoreAttribute", "Structure", "BasicStructure", "ContainerAttribute",
+                          "ConditionalProcessing", "Image", "Style", "Shape", "Text", "BasicText", "PaintAttribute",
+                          "BasicPaintAttribute", "OpacityAttribute", "GraphicsAttribute", "BasicGraphicsAttribute", "Marker",
+                          "Gradient", "Pattern", "Clip", "BasicClip", "Mask", "Filter", "BasicFilter", "XlinkAttribute"]
+    for known in names:
+        if name == known:
+            return true
+    return false

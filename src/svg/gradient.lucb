@@ -80,7 +80,7 @@ func collect_gradients(drawing: Drawing*, source: str) -> str[]!:
         let tag = next_tag(source, &pos) else break
         let name = tag_name(tag)
         if is_gradient(name):
-            let id = attribute(tag, "id") else ""
+            let id = tag_attribute(tag, "id") else ""
             definitions[found] = Definition(id = id, tag = tag, stop_start = drawing.stop_used)
             found += 1
             open = not strings.ends_with(tag, "/")
@@ -115,10 +115,10 @@ func length_of(text: str?, fraction: f64, extent: f64) -> f64:
     return strings.parse_f64(value) catch _: recover fraction * extent
 
 ## The definition definition `index` links to by href, if any.
-func link(definitions: const Definition[], index: usize) -> usize?:
-    var href = attribute(definitions[index].tag, "href") else ""
+func gradient_link(definitions: const Definition[], index: usize) -> usize?:
+    var href = tag_attribute(definitions[index].tag, "href") else ""
     if href == "":
-        href = attribute(definitions[index].tag, "xlink:href") else return none
+        href = tag_attribute(definitions[index].tag, "xlink:href") else return none
     if not strings.starts_with(href, "#"):
         return none
     let id = (str)href.bytes[1..]
@@ -128,29 +128,29 @@ func link(definitions: const Definition[], index: usize) -> usize?:
     return none
 
 ## An attribute of definition `index`, else of the one it links to, and so on.
-func linked(definitions: const Definition[], index: usize, name: str) -> str?:
+func gradient_linked(definitions: const Definition[], index: usize, name: str) -> str?:
     var at = index
     for hop in 0..<8:
-        if let value = attribute(definitions[at].tag, name):
+        if let value = tag_attribute(definitions[at].tag, name):
             return strings.trim(value)
-        at = link(definitions, at) else return none
+        at = gradient_link(definitions, at) else return none
     return none
 
 ## Definition `index` as a Gradient, with what it inherits by href. Percentages in user
 ## space are of the viewBox (`view_w` by `view_h`; a radius of its normalised diagonal).
 func resolve_gradient(definitions: const Definition[], index: usize, view_w: f64, view_h: f64) -> Gradient:
-    let user_space = (linked(definitions, index, "gradientUnits") else "") == "userSpaceOnUse"
+    let user_space = (gradient_linked(definitions, index, "gradientUnits") else "") == "userSpaceOnUse"
     let w = view_w if user_space else 1.0
     let h = view_h if user_space else 1.0
     let diagonal = math.sqrt((w * w + h * h) * 0.5)
     var gradient = Gradient(radial = tag_name(definitions[index].tag) == "radialGradient", user_space = user_space,
-                            transform = parse_transform(linked(definitions, index, "gradientTransform") else ""),
-                            x1 = length_of(linked(definitions, index, "x1"), 0.0, w), y1 = length_of(linked(definitions, index, "y1"), 0.0, h),
-                            x2 = length_of(linked(definitions, index, "x2"), 1.0, w), y2 = length_of(linked(definitions, index, "y2"), 0.0, h),
-                            cx = length_of(linked(definitions, index, "cx"), 0.5, w), cy = length_of(linked(definitions, index, "cy"), 0.5, h),
-                            r = length_of(linked(definitions, index, "r"), 0.5, diagonal))
-    gradient.fx = length_of(linked(definitions, index, "fx"), gradient.cx / w, w)
-    gradient.fy = length_of(linked(definitions, index, "fy"), gradient.cy / h, h)
+                            transform = parse_transform(gradient_linked(definitions, index, "gradientTransform") else ""),
+                            x1 = length_of(gradient_linked(definitions, index, "x1"), 0.0, w), y1 = length_of(gradient_linked(definitions, index, "y1"), 0.0, h),
+                            x2 = length_of(gradient_linked(definitions, index, "x2"), 1.0, w), y2 = length_of(gradient_linked(definitions, index, "y2"), 0.0, h),
+                            cx = length_of(gradient_linked(definitions, index, "cx"), 0.5, w), cy = length_of(gradient_linked(definitions, index, "cy"), 0.5, h),
+                            r = length_of(gradient_linked(definitions, index, "r"), 0.5, diagonal))
+    gradient.fx = length_of(gradient_linked(definitions, index, "fx"), gradient.cx / w, w)
+    gradient.fy = length_of(gradient_linked(definitions, index, "fy"), gradient.cy / h, h)
     # A focal point on or outside the circle moves just inside it, as SVG 1.1 asks.
     let ex = gradient.fx - gradient.cx
     let ey = gradient.fy - gradient.cy
@@ -164,7 +164,7 @@ func resolve_gradient(definitions: const Definition[], index: usize, view_w: f64
             gradient.stop_start = definitions[at].stop_start
             gradient.stop_count = definitions[at].stop_count
             break
-        at = link(definitions, at) else break
+        at = gradient_link(definitions, at) else break
     return gradient
 
 # mark: Placing and shading ===================================================================

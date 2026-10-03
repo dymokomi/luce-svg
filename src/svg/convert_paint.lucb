@@ -1,0 +1,267 @@
+#==============================================================================================
+#
+#   svg/convert_paint - Shapes and their fills and strokes
+#
+#   DESCRIPTION:
+#       Turns each basic shape into a path (resolving its lengths, as resvg does: a rect
+#       needs a positive size, rx and ry stand in for each other and are clamped to half
+#       the size, circles and ellipses need positive radii, polylines two points) and
+#       resolves its paints: `fill` and `stroke` inherit, so the value comes from the
+#       nearest element that sets one. A paint is `none`, a color (its alpha joining the
+#       paint's opacity), `currentColor`, or `url(#id)` to a gradient or pattern with an
+#       optional fallback for when the reference cannot paint. An unreadable fill paints
+#       black and an unreadable stroke nothing. Stroke widths, dash arrays and offsets
+#       are lengths; a negative dash, or a pattern summing to zero, means no dashes.
+#
+#==============================================================================================
+
+extend Converter:
+    # mark: Shapes ==============================================================================
+
+    ## The path a shape element describes, or none when it is invalid or empty.
+    mutating func shape_path(node: u32, tag: Tag, state: const State*) -> Path?!:
+        let zero = Length()
+        var path = Path()
+        errdefer path.release()
+        match tag:
+            .rect:
+                let width = self.user_length(node, Attr.width, state, zero)
+                let height = self.user_length(node, Attr.height, state, zero)
+                if not (width > 0.0) or not (height > 0.0) or not math.is_finite(width) or not math.is_finite(height):
+                    return none
+                let x = self.user_length(node, Attr.x, state, zero)
+                let y = self.user_length(node, Attr.y, state, zero)
+                let (found_rx, found_ry) = self.radii(node, state)
+                let rx = math.min(found_rx, width * 0.5)
+                let ry = math.min(found_ry, height * 0.5)
+                if rx <= 0.0 or ry <= 0.0:
+                    try path.rect(x, y, width, height)
+                else:
+                    try path.move_to(x + rx, y)
+                    try path.line_to(x + width - rx, y)
+                    try path.arc_to(rx, ry, 0.0, false, true, x + width, y + ry)
+                    try path.line_to(x + width, y + height - ry)
+                    try path.arc_to(rx, ry, 0.0, false, true, x + width - rx, y + height)
+                    try path.line_to(x + rx, y + height)
+                    try path.arc_to(rx, ry, 0.0, false, true, x, y + height - ry)
+                    try path.line_to(x, y + ry)
+                    try path.arc_to(rx, ry, 0.0, false, true, x + rx, y)
+                    try path.close()
+            .circle, .ellipse:
+                let cx = self.user_length(node, Attr.cx, state, zero)
+                let cy = self.user_length(node, Attr.cy, state, zero)
+                var rx = 0.0
+                var ry = 0.0
+                if tag == Tag.circle:
+                    rx = self.user_length(node, Attr.r, state, zero)
+                    ry = rx
+                else:
+                    let (found_rx, found_ry) = self.radii(node, state)
+                    rx = found_rx
+                    ry = found_ry
+                if not (rx > 0.0) or not (ry > 0.0):
+                    return none
+                try path.move_to(cx + rx, cy)
+                try path.arc_to(rx, ry, 0.0, false, true, cx, cy + ry)
+                try path.arc_to(rx, ry, 0.0, false, true, cx - rx, cy)
+                try path.arc_to(rx, ry, 0.0, false, true, cx, cy - ry)
+                try path.arc_to(rx, ry, 0.0, false, true, cx + rx, cy)
+                try path.close()
+            .line:
+                try path.move_to(self.user_length(node, Attr.x1, state, zero), self.user_length(node, Attr.y1, state, zero))
+                try path.line_to(self.user_length(node, Attr.x2, state, zero), self.user_length(node, Attr.y2, state, zero))
+            .polyline, .polygon:
+                path.release()
+                let text = self.attribute(node, Attr.points) else return none
+                return try parse_points(text, tag == Tag.polygon)
+            .path:
+                let text = self.attribute(node, Attr.d) else return none
+                discard(try parse_path_data(text, &path))
+            _:
+                return none
+        if path.verb_count() < 2:
+            path.release()
+            return none
+        return path
+
+    ## `rx` and `ry` of a rect or ellipse: negative values are dropped, and a missing one
+    ## takes the other's value.
+    func radii(node: u32, state: const State*) -> (f64, f64):
+        var rx: Length? = none
+        var ry: Length? = none
+        if let text = self.attribute(node, Attr.rx):
+            if let value = parse_length(text):
+                if value.number >= 0.0:
+                    rx = value
+        if let text = self.attribute(node, Attr.ry):
+            if let value = parse_length(text):
+                if value.number >= 0.0:
+                    ry = value
+        if let x = rx:
+            let x_value = self.resolve_length(node, Attr.rx, x, false, state)
+            if let y = ry:
+                return (x_value, self.resolve_length(node, Attr.ry, y, false, state))
+            return (x_value, x_value)
+        if let y = ry:
+            let y_value = self.resolve_length(node, Attr.ry, y, false, state)
+            return (y_value, y_value)
+        return (0.0, 0.0)
+
+    ## Add the shape `node` with `path` to group `parent`, its paints resolved.
+    mutating func shape(node: u32, path: Path, state: const State*, parent: u32) -> !:
+        var owned = path
+        let bounds = owned.bounds() else Rect()
+        let has_box = bounds.w > 0.0 and bounds.h > 0.0
+        let fill = try self.fill_of(node, has_box, state)
+        let stroke = try self.stroke_of(node, has_box, state)
+        var visible = (self.find(node, Attr.visibility) else "visible") == "visible"
+        if fill == none and stroke == none:
+            visible = false
+        let rendering = self.find(node, Attr.shape_rendering) else "auto"
+        let aliased = rendering == "optimizeSpeed" or rendering == "crispEdges"
+        let stroke_first = paint_order_stroke_first(self.find(node, Attr.paint_order) else "normal")
+        let index = self.picture.paths.used
+        try self.picture.paths.push(owned)
+        discard(try self.picture.append(parent, Item(kind = ItemKind.shape, path = index, fill = fill, stroke = stroke,
+                                                     stroke_first = stroke_first, visible = visible, aliased = aliased)))
+
+    # mark: Fills and strokes ===================================================================
+
+    ## The fill of `node`, or none.
+    mutating func fill_of(node: u32, has_box: bool, state: const State*) -> FillPaint?!:
+        let evenodd_name = Attr.clip_rule if state.clip_child else Attr.fill_rule
+        let evenodd = strings.trim(self.find(node, evenodd_name) else "nonzero") == "evenodd"
+        if state.clip_child:
+            return FillPaint(brush = Brush(), evenodd = evenodd)
+        var brush = Brush()
+        if let source = self.tree.source_of(node, Attr.fill):
+            let value = self.attribute(source, Attr.fill) else return none
+            brush = (try self.paint(node, value, true, has_box)) else return none
+        brush.opacity *= self.found_opacity(node, Attr.fill_opacity)
+        return FillPaint(brush = brush, evenodd = evenodd)
+
+    ## The stroke of `node`, or none.
+    mutating func stroke_of(node: u32, has_box: bool, state: const State*) -> StrokePaint?!:
+        if state.clip_child:
+            return none
+        let source = self.tree.source_of(node, Attr.stroke) else return none
+        let value = self.attribute(source, Attr.stroke) else return none
+        var brush = (try self.paint(node, value, false, has_box)) else return none
+        let width = self.found_length(node, Attr.stroke_width, state, 1.0)
+        if not (width > 0.0) or not math.is_finite(width):
+            return none
+        brush.opacity *= self.found_opacity(node, Attr.stroke_opacity)
+        var stroke = StrokePaint(brush = brush, width = width)
+        stroke.miter_limit = math.max(1.0, parse_number(self.find(node, Attr.stroke_miterlimit) else "4") else 4.0)
+        let cap = strings.trim(self.find(node, Attr.stroke_linecap) else "butt")
+        stroke.cap = Cap.round if cap == "round" else (Cap.square if cap == "square" else Cap.butt)
+        let join = strings.trim(self.find(node, Attr.stroke_linejoin) else "miter")
+        if join == "round":
+            stroke.join = Join.round
+        elif join == "bevel":
+            stroke.join = Join.bevel
+        elif join == "miter-clip":
+            stroke.join = Join.miter_clip
+        stroke.dash_offset = self.found_length(node, Attr.stroke_dashoffset, state, 0.0)
+        try self.dashes(node, state, &stroke)
+        return stroke
+
+    ## The opacity property `name` that applies to `node`, 1 when none does.
+    func found_opacity(node: u32, name: Attr) -> f64:
+        let source = self.tree.source_of(node, name) else return 1.0
+        return self.opacity(source, name, 1.0)
+
+    ## The length property `name` that applies to `node`, resolved where it is set.
+    func found_length(node: u32, name: Attr, state: const State*, default: f64) -> f64:
+        let source = self.tree.source_of(node, name) else return default
+        let text = self.attribute(source, name) else return default
+        let value = parse_length(text) else return default
+        return self.resolve_length(source, name, value, false, state)
+
+    ## Fill in `stroke`'s dash pattern from the stroke-dasharray that applies to `node`.
+    mutating func dashes(node: u32, state: const State*, stroke: StrokePaint*) -> !:
+        let source = self.tree.source_of(node, Attr.stroke_dasharray) else return
+        let text = self.attribute(source, Attr.stroke_dasharray) else return
+        if strings.trim(text) == "none":
+            return
+        let start = self.picture.dashes.used
+        var scanner = Scanner(data = text.bytes)
+        var total = 0.0
+        while true:
+            scanner.skip_spaces()
+            if scanner.at_end():
+                break
+            let value = scanner.length() else break
+            scanner.skip_separator()
+            let length = self.resolve_length(source, Attr.stroke_dasharray, value, false, state)
+            if length < 0.0:
+                self.picture.dashes.truncate(start)
+                return
+            total += length
+            try self.picture.dashes.push(length)
+        var count = self.picture.dashes.used - start
+        if count == 0 or total <= 0.0:
+            self.picture.dashes.truncate(start)
+            return
+        if count % 2 == 1:
+            for index in 0..<count:
+                try self.picture.dashes.push(self.picture.dashes.items[start + index])
+            count *= 2
+        stroke.dash_start = start
+        stroke.dash_count = count
+
+    # mark: Paints ==============================================================================
+
+    ## The brush a paint value gives `node`, or none for no paint.
+    mutating func paint(node: u32, raw: str, is_fill: bool, has_box: bool) -> Brush?!:
+        let value = strings.trim(raw)
+        if value == "none" or value == "inherit" or value == "context-fill" or value == "context-stroke":
+            return none
+        if value == "currentColor":
+            return self.current_color(node)
+        if strings.starts_with(value, "url("):
+            let close = strings.find(value, ")") else return none
+            let fallback = strings.trim((str)value.bytes[close + 1..])
+            if fallback.length > 0 and fallback != "none" and fallback != "currentColor" and parse_rgba(fallback) == none:
+                return Brush() if is_fill else none
+            let id = func_iri((str)value.bytes[..<close + 1])
+            if let link = self.tree.element_by_id(id else ""):
+                let tag = self.tree.tag(link)
+                if tag != Tag.linear_gradient and tag != Tag.radial_gradient and tag != Tag.pattern:
+                    return none
+                let (kind, index) = try self.server(link)
+                if kind == 3:
+                    let color = self.server_colors.items[index]
+                    return Brush(color = color.rgb(), opacity = color.a)
+                if kind != 0:
+                    let bbox_units = self.picture.gradients.items[index].bbox_units if kind == 1 else self.picture.patterns.items[index].bbox_units or self.picture.patterns.items[index].content_bbox_units
+                    if has_box or not bbox_units:
+                        let brush_kind = BrushKind.pattern if kind == 2 else (BrushKind.radial if self.picture.gradients.items[index].radial else BrushKind.linear)
+                        return Brush(kind = brush_kind, server = index)
+            return self.fallback(node, fallback)
+        let color = parse_rgba(value) else return (Brush() if is_fill else none)
+        return Brush(color = color.rgb(), opacity = color.a)
+
+    ## A paint's fallback after its `url(...)`: none, currentColor or a color.
+    func fallback(node: u32, text: str) -> Brush?:
+        if text.length == 0 or text == "none":
+            return none
+        if text == "currentColor":
+            return self.current_color(node)
+        let color = parse_rgba(text) else return none
+        return Brush(color = color.rgb(), opacity = color.a)
+
+    ## The `color` property's color for `node`, black when unset or unreadable.
+    func current_color(node: u32) -> Brush:
+        let text = self.find(node, Attr.color) else return Brush()
+        let color = parse_rgba(text) else return Brush()
+        return Brush(color = color.rgb(), opacity = color.a)
+
+## Whether a paint-order value puts the stroke under the fill.
+func paint_order_stroke_first(text: str) -> bool:
+    var scanner = Scanner(data = text.bytes)
+    scanner.skip_spaces()
+    let first = scanner.identifier()
+    scanner.skip_spaces()
+    let second = scanner.identifier()
+    return first == "stroke" or (first == "markers" and second == "stroke")

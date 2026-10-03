@@ -1,0 +1,15 @@
+#==============================================================================================
+#
+#   svg/render_more - Images, filters and patterns still to come
+#
+#==============================================================================================
+
+extend Renderer:
+    mutating func image(item: const Item*, transform: Matrix, canvas: Canvas*) -> !:
+        return
+
+    mutating func apply_filters(item: const Item*, transform: Matrix, layer: Canvas*) -> !:
+        return
+
+    mutating func pattern_shader(brush: Brush, item: const Item*, transform: Matrix) -> Shader?!:
+        return none

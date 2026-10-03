@@ -1,0 +1,91 @@
+#==============================================================================================
+#
+#   svg/picture - Loading and drawing SVG documents in full
+#
+#   DESCRIPTION:
+#       The public face of the full renderer: `load` parses a document (XML, CSS, the SVG
+#       tree) and converts it into a Picture; `render` draws one into straight-alpha sRGB
+#       bytes, `render_float` into floats (encoded sRGB or linear light). Compositing is
+#       in sRGB, as browsers and resvg composite, unless RenderOptions asks for linear
+#       light.
+#
+#==============================================================================================
+
+## How a picture is drawn.
+pub struct RenderOptions:
+    ## Composite in linear light rather than in sRGB (how the Drawing renderer works).
+    pub var linear: bool = false
+
+## Parse and convert an SVG document. Its strings are copied out, so `source` need not
+## outlive the result.
+pub func load(source: str, options: Options = Options()) -> interop.Reference[Picture]!:
+    var tree = Tree()
+    defer tree.release()
+    try build_tree(source, &tree)
+    let native = try new Picture() in memory.heap
+    errdefer:
+        native.close()
+        free(native) in memory.heap
+    try convert_tree(&tree, options, native)
+    return try interop.Reference[Picture].adopt(native, picture_type)
+
+## The transform that stretches the picture's own size over a `width` by `height` bitmap.
+pub func fit_transform(picture: const Picture*, width: u32, height: u32) -> Matrix:
+    if not (picture.width > 0.0) or not (picture.height > 0.0):
+        return Matrix()
+    return Matrix(a = (f64)width / picture.width, d = (f64)height / picture.height)
+
+## Draw `picture` through `transform` (picture pixels to bitmap pixels) into a cleared
+## `width` by `height` premultiplied canvas.
+func draw_canvas(picture: const Picture*, transform: Matrix, width: u32, height: u32, options: RenderOptions) -> Canvas!:
+    if width == 0 or height == 0 or width > 16384 or height > 16384:
+        error(invalid, "a bitmap is 1..16384 pixels on a side")
+    var canvas = try Canvas.make(0, 0, (usize)width, (usize)height)
+    errdefer canvas.release()
+    var renderer = try Renderer.make(picture, (usize)width, (usize)height, options.linear)
+    defer renderer.release()
+    try renderer.children(0, transform, &canvas)
+    return canvas
+
+## Draw `picture` into `pixels`, `width * height * 4` bytes of straight-alpha sRGB RGBA,
+## through `transform` (see fit_transform).
+pub func render(picture: const Picture*, transform: Matrix, width: u32, height: u32, pixels: u8[], options: RenderOptions = RenderOptions()) -> !:
+    if pixels.length != (usize)width * (usize)height * 4:
+        error(invalid, "the pixel buffer must hold width * height * 4 bytes")
+    var canvas = try draw_canvas(picture, transform, width, height, options)
+    defer canvas.release()
+    for index in 0..<(usize)width * (usize)height:
+        let at = index * 4
+        let a = (f64)canvas.pixels[at + 3]
+        if a <= 0.0:
+            pixels[at] = 0
+            pixels[at + 1] = 0
+            pixels[at + 2] = 0
+            pixels[at + 3] = 0
+            continue
+        for channel in 0..<(usize)3:
+            var value = math.clamp((f64)canvas.pixels[at + channel] / a, 0.0, 1.0)
+            if options.linear:
+                value = transfer.srgb_encode(value)
+            pixels[at + channel] = (u8)(value * 255.0 + 0.5)
+        pixels[at + 3] = (u8)(math.clamp(a, 0.0, 1.0) * 255.0 + 0.5)
+
+## Draw `picture` into `pixels`, `width * height * 4` floats of straight-alpha RGBA,
+## encoded sRGB or, with `linear_output`, linear light.
+pub func render_float(picture: const Picture*, transform: Matrix, width: u32, height: u32, pixels: f32[], linear_output: bool,
+                      options: RenderOptions = RenderOptions()) -> !:
+    if pixels.length != (usize)width * (usize)height * 4:
+        error(invalid, "the pixel buffer must hold width * height * 4 floats")
+    var canvas = try draw_canvas(picture, transform, width, height, options)
+    defer canvas.release()
+    for index in 0..<(usize)width * (usize)height:
+        let at = index * 4
+        let a = (f64)canvas.pixels[at + 3]
+        pixels[at + 3] = (f32)math.clamp(a, 0.0, 1.0)
+        for channel in 0..<(usize)3:
+            var value = math.clamp((f64)canvas.pixels[at + channel] / a, 0.0, 1.0) if a > 0.0 else 0.0
+            if options.linear and not linear_output:
+                value = transfer.srgb_encode(value)
+            elif linear_output and not options.linear:
+                value = transfer.srgb_decode(value)
+            pixels[at + channel] = (f32)value

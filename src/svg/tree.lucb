@@ -1,0 +1,195 @@
+#==============================================================================================
+#
+#   svg/tree - The SVG document tree
+#
+#   DESCRIPTION:
+#       The XML tree with only what SVG draws from: SVG elements (others are dropped with
+#       their content), text nodes inside `<text>`, and each element's attributes after
+#       the cascade, so an element's list holds the winning value of every property it
+#       sets, whether it came from a presentation attribute, a style sheet or its `style`
+#       attribute (tree_build.lucb). `inherit` is resolved while building, and every
+#       `<use>` gets a copy of what it references as its child, so properties inherit
+#       through it as the specification says. This mirrors resvg's svgtree.
+#
+#==============================================================================================
+
+## What a tree node is.
+enum Kind:
+    root
+    element
+    text
+
+## A node; links are node indices and 0 (the root, never a child) means none.
+struct Node:
+    var kind: Kind = Kind.root
+    var tag: Tag = Tag.g
+    var parent: u32 = 0
+    var first: u32 = 0
+    var last: u32 = 0
+    var next: u32 = 0
+    var attr_start: u32 = 0
+    var attr_end: u32 = 0
+    ## A text node's characters.
+    var text: str = ""
+
+## An attribute as the cascade left it.
+struct Attribute:
+    var name: Attr = Attr.id
+    var value: str = ""
+    var important: bool = false
+
+## An element id and its node, sorted by id for lookup.
+struct IdEntry:
+    var id: str = ""
+    var node: u32 = 0
+
+## A parsed SVG document. Its strings view the source, which must outlive it, or its
+## XML tree's arena.
+struct Tree:
+    var nodes: List[Node] = List[Node]()
+    var attrs: List[Attribute] = List[Attribute]()
+    var ids: List[IdEntry] = List[IdEntry]()
+    var xml: Xml = Xml()
+    var sheet: Sheet = Sheet()
+    var arena: Arena = Arena()
+
+    mutating func release():
+        self.nodes.release()
+        self.attrs.release()
+        self.ids.release()
+        self.xml.release()
+        self.sheet.release()
+        self.arena.release()
+
+    # mark: Structure ===========================================================================
+
+    func node(index: u32) -> Node:
+        return self.nodes.items[index]
+
+    func tag(index: u32) -> Tag:
+        return self.nodes.items[index].tag
+
+    func is_element(index: u32) -> bool:
+        return self.nodes.items[index].kind == Kind.element
+
+    ## The root `<svg>` element.
+    func root_element() -> u32:
+        return self.nodes.items[0].first
+
+    ## The parent element, or none at the root element.
+    func parent_element(index: u32) -> u32?:
+        let parent = self.nodes.items[index].parent
+        if parent == 0:
+            return none
+        return parent
+
+    func first_child(index: u32) -> u32:
+        return self.nodes.items[index].first
+
+    func next_sibling(index: u32) -> u32:
+        return self.nodes.items[index].next
+
+    ## The first element child, or 0.
+    func first_element_child(index: u32) -> u32:
+        var child = self.nodes.items[index].first
+        while child != 0 and self.nodes.items[child].kind != Kind.element:
+            child = self.nodes.items[child].next
+        return child
+
+    ## Whether `ancestor` is `index` or one of its ancestors.
+    func is_ancestor(ancestor: u32, index: u32) -> bool:
+        var at = index
+        while true:
+            if at == ancestor:
+                return true
+            if at == 0:
+                return false
+            at = self.nodes.items[at].parent
+
+    ## The text of a node's first child when that is text, else "".
+    func text_of(index: u32) -> str:
+        let node = self.nodes.items[index]
+        if node.kind == Kind.text:
+            return node.text
+        if node.first != 0 and self.nodes.items[node.first].kind == Kind.text:
+            return self.nodes.items[node.first].text
+        return ""
+
+    # mark: Attributes ==========================================================================
+
+    ## The value of `name` on element `index`, as the cascade left it.
+    func attribute(index: u32, name: Attr) -> str?:
+        let node = self.nodes.items[index]
+        for at in node.attr_start..<node.attr_end:
+            if self.attrs.items[at].name == name:
+                return self.attrs.items[at].value
+        return none
+
+    func has(index: u32, name: Attr) -> bool:
+        return self.attribute(index, name) != none
+
+    ## The element whose `name` applies to `index`: for an inherited property the nearest
+    ## of it and its ancestors that sets it; otherwise it or its parent.
+    func source_of(index: u32, name: Attr) -> u32?:
+        if is_inherited(name):
+            var at = index
+            while at != 0:
+                if self.has(at, name):
+                    return at
+                at = self.nodes.items[at].parent
+            return none
+        if self.has(index, name):
+            return index
+        let parent = self.nodes.items[index].parent
+        if parent != 0 and self.has(parent, name):
+            return parent
+        return none
+
+    ## The value of `name` that applies to `index` (see `source_of`).
+    func find(index: u32, name: Attr) -> str?:
+        let at = self.source_of(index, name) else return none
+        return self.attribute(at, name)
+
+    ## The element with `id`, if any.
+    func element_by_id(id: str) -> u32?:
+        var low: usize = 0
+        var high = self.ids.used
+        while low < high:
+            let middle = (low + high) // 2
+            let order = compare_text(self.ids.items[middle].id, id)
+            if order == 0:
+                return self.ids.items[middle].node
+            if order < 0:
+                low = middle + 1
+            else:
+                high = middle
+        return none
+
+    ## The element an attribute links to: `href` holds an IRI (`#id`), the others a
+    ## FuncIRI (`url(#id)`).
+    func linked(index: u32, name: Attr) -> u32?:
+        let value = self.attribute(index, name) else return none
+        let id = (iri(value) if name == Attr.href else func_iri(value)) else return none
+        return self.element_by_id(id)
+
+    ## The element's `id`, or "".
+    func element_id(index: u32) -> str:
+        return self.attribute(index, Attr.id) else ""
+
+## The id of a local IRI, `#id`, or none.
+pub func iri(text: str) -> str?:
+    let value = strings.trim(text)
+    if value.length < 2 or value.bytes[0] != '#':
+        return none
+    return (str)value.bytes[1..]
+
+## The id of a local FuncIRI, `url(#id)` (quotes allowed), or none.
+pub func func_iri(text: str) -> str?:
+    let value = strings.trim(text)
+    if not strings.starts_with(value, "url("):
+        return none
+    let close = strings.find(value, ")") else return none
+    var inside = strings.trim((str)value.bytes[4..<close])
+    if inside.length >= 2 and (inside.bytes[0] == '"' or inside.bytes[0] == '\'') and inside.bytes[inside.length - 1] == inside.bytes[0]:
+        inside = strings.trim((str)inside.bytes[1..<inside.length - 1])
+    return iri(inside)

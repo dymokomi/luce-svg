@@ -1,33 +1,47 @@
 #==============================================================================================
 #
-#   svg - A small SVG parser, flattener and rasteriser
+#   svg - SVG documents: a full renderer, and a flattened Drawing for icons
 #
 #   DESCRIPTION:
-#       Reads an SVG string — paths, basic shapes and nested groups — and flattens its curves
-#       and arcs into polylines. The result is a Drawing: the viewBox size plus a set of
-#       contours over one flat point buffer, in viewBox coordinates. Each contour carries its
-#       element's paints (sRGB colors, currentColor, or linear and radial gradients), their
-#       opacities, and its pen: stroke width, caps, joins and dashes. Two rasterisers draw it:
-#       an 8-bit coverage mask for icons, which the caller tints, and straight-alpha linear
-#       RGBA for artwork. Enough of the SVG grammar is covered for icons and plain
-#       illustrations (M L H V C S Q T A Z, rect, circle, ellipse, line, polyline, polygon,
-#       g, linearGradient, radialGradient; no patterns, clipping or masks). Text is not
-#       drawn: `<text>` and `<tspan>` are read into runs, each with its place in paint
-#       order, for a caller with fonts to set (text.lucb). Fragments, in ORDER:
+#       Two ways to draw SVG. The full renderer (`load`, `render`) reads a document as a
+#       browser would — XML, CSS, the cascade, `use`, viewports, paint servers, clip
+#       paths and masks — into a render tree and draws it with anti-aliased coverage and
+#       sRGB compositing (picture.lucb has the overview). The Drawing (`parse`) is the
+#       older, smaller model: an icon's shapes flattened to contours with their paints,
+#       drawn into an 8-bit coverage mask the caller tints or into linear-light RGBA;
+#       `<text>` is read into runs for a caller with fonts. Fragments, in ORDER:
 #
-#       module.lucb    the Drawing, its contours and their paints
-#       parse.lucb     the document grammar: tags, attributes, transforms, groups
-#       paths.lucb     path data and basic shapes, flattened to points
-#       style.lucb     styles, their inheritance, and paint and color parsing
-#       gradient.lucb  gradient definitions, their placement on shapes, and color ramps
-#       text.lucb      text runs and font properties
-#       text_runs.lucb reading a `<text>` element's content into runs
-#       coverage.lucb  the exact-area coverage rasteriser and the 8-bit mask
-#       stroke.lucb    stroke outlines: segments, joins, caps and dashes
-#       rgba.lucb      compositing painted elements into linear RGBA
-#       tests.lucb     the parser and color tests
-#       raster_tests.lucb  the rasteriser tests
-#       text_tests.lucb    the text run tests
+#       module.lucb        the Drawing, its contours and their paints
+#       parse.lucb         the Drawing's document grammar: tags, attributes, groups
+#       paths.lucb         the Drawing's path data and shapes, flattened to points
+#       style.lucb         the Drawing's styles, their inheritance and paints
+#       gradient.lucb      the Drawing's gradients and color ramps
+#       text.lucb          text runs and font properties
+#       text_runs.lucb     reading a `<text>` element's content into runs
+#       coverage.lucb      the Drawing's exact-area coverage rasteriser and 8-bit mask
+#       stroke.lucb        the Drawing's stroke outlines
+#       rgba.lucb          compositing the Drawing into linear RGBA
+#       buffers.lucb       growable lists and a text arena
+#       names.lucb         the element and attribute names the tree knows
+#       xml.lucb           the XML reader
+#       css.lucb           style sheets, selectors and declarations
+#       tree.lucb          the SVG document tree and its queries
+#       tree_build.lucb    building the tree, with the cascade and `use` copies
+#       tree_text.lucb     text content in the tree, and the `font` shorthand
+#       values.lucb        the public value parsers: numbers, lengths, transforms
+#       colors.lucb        CSS colors
+#       path.lucb          paths, path data, arcs and bounds
+#       raster.lucb        flattening paths into polylines
+#       scanline.lucb      coverage by sub-scanlines with true winding rules
+#       stroker.lucb       stroking flattened paths: joins, caps, dashes
+#       scene.lucb         the render tree a document converts into
+#       convert*.lucb      converting the tree: structure, paints, servers, use, clips
+#       canvas.lucb        layers and blend modes
+#       shade.lucb         painting coverage with colors, gradients and patterns
+#       render_scene.lucb  drawing the render tree, clip paths and masks
+#       render_more.lucb   images, filters and patterns (to come)
+#       picture.lucb       the full renderer's public entry points
+#       *tests.lucb        the tests
 #
 #==============================================================================================
 

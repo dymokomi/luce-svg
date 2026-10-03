@@ -1,0 +1,239 @@
+#==============================================================================================
+#
+#   svg/scene - The render tree a document is converted into
+#
+#   DESCRIPTION:
+#       A Picture is what the converter (convert.lucb) makes of a document and what the
+#       renderer draws: a tree of items, each a group (transform, opacity, blend mode,
+#       clip path, mask, filters), a shape (a path with resolved fill and stroke) or an
+#       image, with every property resolved: no inheritance, no CSS, no `use` or
+#       `symbol` left. Paint servers, clip paths and masks are records the items name by
+#       index; a pattern's, clip path's or mask's content is a detached group of items.
+#       This mirrors resvg's usvg tree.
+#
+#==============================================================================================
+
+## What an item is.
+enum ItemKind:
+    group
+    shape
+    image
+
+## How a layer composites onto what is below it (CSS mix-blend-mode).
+enum Blend:
+    normal
+    multiply
+    screen
+    overlay
+    darken
+    lighten
+    color_dodge
+    color_burn
+    hard_light
+    soft_light
+    difference
+    exclusion
+    hue
+    saturation
+    color
+    luminosity
+
+## What a fill or stroke paints with.
+enum BrushKind:
+    solid
+    linear
+    radial
+    pattern
+
+## A fill's or stroke's paint: a solid sRGB color, or the gradient or pattern `server`
+## (an index into the picture's gradients or patterns), at `opacity`.
+struct Brush:
+    var kind: BrushKind = BrushKind.solid
+    var color: Color = Color()
+    var server: usize = 0
+    var opacity: f64 = 1.0
+
+## A shape's fill.
+struct FillPaint:
+    var brush: Brush = Brush()
+    var evenodd: bool = false
+
+## A shape's stroke; its dashes are `dash_count` of the picture's, from `dash_start`.
+struct StrokePaint:
+    var brush: Brush = Brush()
+    var width: f64 = 1.0
+    var cap: Cap = Cap.butt
+    var join: Join = Join.miter
+    var miter_limit: f64 = 4.0
+    var dash_start: usize = 0
+    var dash_count: usize = 0
+    var dash_offset: f64 = 0.0
+
+## How a gradient continues past its ends.
+enum Spread:
+    hold
+    reflect
+    repeat
+
+## A gradient stop: its offset (0..1) and sRGB color with opacity.
+struct GradientStop:
+    var offset: f64 = 0.0
+    var color: Rgba = Rgba()
+
+## A linear (x1, y1 → x2, y2) or radial (focal circle fx, fy, fr → circle cx, cy, r)
+## gradient. With `bbox_units` its coordinates are fractions of the painted shape's
+## bounding box. Its stops are `stop_count` of the picture's, from `stop_start`.
+struct GradientServer:
+    var radial: bool = false
+    var bbox_units: bool = true
+    var transform: Matrix = Matrix()
+    var spread: Spread = Spread.hold
+    var x1: f64 = 0.0
+    var y1: f64 = 0.0
+    var x2: f64 = 1.0
+    var y2: f64 = 0.0
+    var cx: f64 = 0.5
+    var cy: f64 = 0.5
+    var r: f64 = 0.5
+    var fx: f64 = 0.5
+    var fy: f64 = 0.5
+    var fr: f64 = 0.0
+    var stop_start: usize = 0
+    var stop_count: usize = 0
+
+## A pattern: its tile `rect` (fractions of the shape's box when `bbox_units`), the
+## content's units, viewBox and transform, and its content, the detached group `root`.
+struct PatternServer:
+    var rect: Rect = Rect()
+    var bbox_units: bool = true
+    var content_bbox_units: bool = false
+    var view_box: Rect? = none
+    var aspect: AspectRatio = AspectRatio()
+    var transform: Matrix = Matrix()
+    var root: u32 = 0
+
+## A clip path: its content (the detached group `root`, already in the clipped element's
+## user space through `transform`) and the clip path clipping it, if any (index + 1).
+struct ClipServer:
+    var transform: Matrix = Matrix()
+    var clip: usize = 0
+    var root: u32 = 0
+
+## A mask: the region it applies within, how its content becomes coverage, its content
+## (the detached group `root`) and the mask masking it, if any (index + 1).
+struct MaskServer:
+    var rect: Rect = Rect()
+    var luminance: bool = true
+    var mask: usize = 0
+    var root: u32 = 0
+
+## A decoded raster image: straight-alpha sRGB RGBA bytes.
+struct Raster:
+    var width: usize = 0
+    var height: usize = 0
+    var pixels: u8[]
+
+## One node of the render tree. Links are item indices; 0 (the root group, never a
+## child) means none.
+struct Item:
+    var kind: ItemKind = ItemKind.group
+    var parent: u32 = 0
+    var first: u32 = 0
+    var last: u32 = 0
+    var next: u32 = 0
+    ## A group's transform, opacity and compositing; clip, mask (index + 1) and filters
+    ## (`filter_count` of the picture's, from `filter_start`).
+    var transform: Matrix = Matrix()
+    var opacity: f64 = 1.0
+    var blend: Blend = Blend.normal
+    var isolate: bool = false
+    var clip: usize = 0
+    var mask: usize = 0
+    var filter_start: usize = 0
+    var filter_count: usize = 0
+    ## A shape's path (an index into the picture's paths) and paints.
+    var path: usize = 0
+    var fill: FillPaint? = none
+    var stroke: StrokePaint? = none
+    var stroke_first: bool = false
+    var visible: bool = true
+    var aliased: bool = false
+    ## An image: the raster (an index), the rectangle it fills and its sampling.
+    var raster: usize = 0
+    var view: Rect = Rect()
+    var pixelated: bool = false
+
+## A converted document, ready to draw.
+pub struct Picture:
+    var width: f64 = 0.0
+    var height: f64 = 0.0
+    var items: List[Item] = List[Item]()
+    var paths: List[Path] = List[Path]()
+    var dashes: List[f64] = List[f64]()
+    var gradients: List[GradientServer] = List[GradientServer]()
+    var stops: List[GradientStop] = List[GradientStop]()
+    var patterns: List[PatternServer] = List[PatternServer]()
+    var clips: List[ClipServer] = List[ClipServer]()
+    var masks: List[MaskServer] = List[MaskServer]()
+    var rasters: List[Raster] = List[Raster]()
+
+    ## The document's width in pixels (its `width`, else its viewBox's).
+    pub func width_px() -> f64:
+        return self.width
+
+    ## The document's height in pixels.
+    pub func height_px() -> f64:
+        return self.height
+
+    ## Free everything the picture holds.
+    pub mutating func close():
+        for index in 0..<self.paths.used:
+            self.paths.items[index].release()
+        for raster in self.rasters.view():
+            if raster.pixels.length > 0:
+                free(raster.pixels) in memory.heap
+        self.items.release()
+        self.paths.release()
+        self.dashes.release()
+        self.gradients.release()
+        self.stops.release()
+        self.patterns.release()
+        self.clips.release()
+        self.masks.release()
+        self.rasters.release()
+
+    ## Add a detached item; answer its index.
+    mutating func add_item(item: Item) -> u32!:
+        let index = (u32)self.items.used
+        try self.items.push(item)
+        return index
+
+    ## Add `item` as the last child of group `parent`; answer its index.
+    mutating func append(parent: u32, item: Item) -> u32!:
+        let index = try self.add_item(item)
+        self.attach(parent, index)
+        return index
+
+    ## Make detached item `index` the last child of `parent`.
+    mutating func attach(parent: u32, index: u32):
+        self.items.items[index].parent = parent
+        self.items.items[index].next = 0
+        let last = self.items.items[parent].last
+        if last != 0:
+            self.items.items[last].next = index
+        else:
+            self.items.items[parent].first = index
+        self.items.items[parent].last = index
+
+    ## Move every child of `from_group` to the end of `to_group`'s children.
+    mutating func adopt_children(from_group: u32, to_group: u32):
+        var child = self.items.items[from_group].first
+        while child != 0:
+            let next = self.items.items[child].next
+            self.attach(to_group, child)
+            child = next
+        self.items.items[from_group].first = 0
+        self.items.items[from_group].last = 0
+
+## The interop type a converted Picture is owned under.
+pub let picture_type: interop.Type[Picture] = interop.Type[Picture]("SVG picture", Picture.close, closeable = true)

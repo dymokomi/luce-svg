@@ -1,0 +1,456 @@
+#==============================================================================================
+#
+#   svg/xml - An XML reader for SVG documents
+#
+#   DESCRIPTION:
+#       Parses a document into a tree of elements and text nodes, the shape the SVG tree
+#       (tree.lucb) is built from. It reads the prolog and a DOCTYPE's internal subset,
+#       whose `<!ENTITY>` declarations may then stand for text or for markup; decodes the
+#       five predefined entities and character references; normalises white space in
+#       attribute values; resolves namespace prefixes (only the SVG, XLink and XML
+#       namespaces matter to SVG); and keeps CDATA as text. Comments and processing
+#       instructions are dropped. Malformed markup, such as a mismatched end tag, is an
+#       error, as it is for a browser showing an SVG file.
+#
+#==============================================================================================
+
+## The namespaces SVG cares about; any other is `other`.
+enum Space:
+    absent
+    svg
+    xlink
+    xml
+    other
+
+## An element or a run of text. Links are node indices; 0 (the document node, which is
+## never a child) means none.
+struct XmlNode:
+    var element: bool = false
+    var space: Space = Space.absent
+    ## The local name, and the name as written (with its prefix) to match the end tag.
+    var name: str = ""
+    var qualified: str = ""
+    var parent: u32 = 0
+    var first: u32 = 0
+    var last: u32 = 0
+    var next: u32 = 0
+    var attr_start: u32 = 0
+    var attr_end: u32 = 0
+    ## A text node's characters, entities decoded.
+    var text: str = ""
+
+## An attribute with its namespace resolved; namespace declarations are not kept.
+struct XmlAttr:
+    var space: Space = Space.absent
+    var name: str = ""
+    var value: str = ""
+
+## An entity the DOCTYPE declares.
+struct EntityDeclaration:
+    var name: str = ""
+    var value: str = ""
+
+## A namespace prefix in scope: `prefix` ("" for the default) names `space` until the
+## element at `depth` closes.
+struct Binding:
+    var prefix: str = ""
+    var space: Space = Space.absent
+    var depth: usize = 0
+
+## A parsed XML document: node 0 is the document, its element children the root.
+struct Xml:
+    var nodes: List[XmlNode] = List[XmlNode]()
+    var attrs: List[XmlAttr] = List[XmlAttr]()
+    var arena: Arena = Arena()
+    var entities: List[EntityDeclaration] = List[EntityDeclaration]()
+    var bindings: List[Binding] = List[Binding]()
+    var text: TextBuilder = TextBuilder()
+    var current: u32 = 0
+    var depth: usize = 0
+    var expanded: usize = 0
+
+    mutating func release():
+        self.nodes.release()
+        self.attrs.release()
+        self.arena.release()
+        self.entities.release()
+        self.bindings.release()
+        self.text.release()
+
+    ## Append `node` as the last child of the open element; answer its index.
+    mutating func append(node: XmlNode) -> u32!:
+        var child = node
+        child.parent = self.current
+        let index = (u32)self.nodes.used
+        try self.nodes.push(child)
+        let parent = self.current
+        if self.nodes.items[parent].last != 0:
+            self.nodes.items[self.nodes.items[parent].last].next = index
+        else:
+            self.nodes.items[parent].first = index
+        self.nodes.items[parent].last = index
+        return index
+
+    ## Turn the characters gathered so far into a text node.
+    mutating func flush_text() -> !:
+        if self.text.bytes.used == 0:
+            return
+        let text = try self.text.finish(&self.arena)
+        discard(try self.append(XmlNode(text = text)))
+
+## How deeply entities may expand inside one another, and how many bytes they may
+## produce in all: enough for any honest document, too little for an entity bomb.
+let entity_depth: usize = 8
+let entity_budget: usize = 4194304
+
+# mark: Scanning ==============================================================================
+
+## A position in some text being parsed: the source, or an entity's replacement text.
+struct Cursor:
+    var data: const u8[]
+    var pos: usize = 0
+
+    func at_end() -> bool:
+        return self.pos >= self.data.length
+
+    func peek() -> u8:
+        return self.data[self.pos] if self.pos < self.data.length else 0
+
+    func looking_at(text: str) -> bool:
+        if self.pos + text.length > self.data.length:
+            return false
+        for index in 0..<text.length:
+            if self.data[self.pos + index] != text.bytes[index]:
+                return false
+        return true
+
+    mutating func skip_space():
+        while self.pos < self.data.length and is_space(self.data[self.pos]):
+            self.pos += 1
+
+    ## Move past the next `text`, answering whether it was found.
+    mutating func skip_past(text: str) -> bool:
+        while self.pos < self.data.length:
+            if self.looking_at(text):
+                self.pos += text.length
+                return true
+            self.pos += 1
+        return false
+
+    ## A name: everything up to white space or one of `=/>?'"[`.
+    mutating func name() -> str:
+        let start = self.pos
+        while self.pos < self.data.length:
+            let byte = self.data[self.pos]
+            if is_space(byte) or byte == '=' or byte == '/' or byte == '>' or byte == '?' or byte == '"' or byte == '\'' or byte == '[' or byte == ';':
+                break
+            self.pos += 1
+        return (str)self.data[start..<self.pos]
+
+# mark: Parsing ===============================================================================
+
+## Parse `source` into `xml`.
+func parse_xml(source: str, xml: Xml*) -> !:
+    try xml.nodes.push(XmlNode())
+    var cursor = Cursor(data = source.bytes)
+    if cursor.looking_at("\u{FEFF}"):
+        cursor.pos += 3
+    try parse_content(xml, &cursor, 0)
+    try xml.flush_text()
+    if xml.depth != 0:
+        error(invalid, "an element is not closed")
+
+## Parse markup and character data until the cursor's end (or, inside an entity, its
+## replacement text's end). `level` counts entity expansions in progress.
+func parse_content(xml: Xml*, cursor: Cursor*, level: usize) -> !:
+    while not cursor.at_end():
+        let byte = cursor.peek()
+        if byte == '<':
+            if cursor.looking_at("<!--"):
+                if not cursor.skip_past("-->"):
+                    error(invalid, "an unclosed comment")
+            elif cursor.looking_at("<![CDATA["):
+                cursor.pos += 9
+                let start = cursor.pos
+                if not cursor.skip_past("]]>"):
+                    error(invalid, "an unclosed CDATA section")
+                try xml.text.add_all(cursor.data[start..<cursor.pos - 3])
+            elif cursor.looking_at("<!DOCTYPE"):
+                try parse_doctype(xml, cursor)
+            elif cursor.looking_at("<?"):
+                if not cursor.skip_past("?>"):
+                    error(invalid, "an unclosed processing instruction")
+            elif cursor.looking_at("</"):
+                try xml.flush_text()
+                try parse_end_tag(xml, cursor)
+            else:
+                try xml.flush_text()
+                try parse_start_tag(xml, cursor)
+        elif byte == '&':
+            try parse_reference(xml, cursor, level)
+        else:
+            if xml.depth > 0:
+                try xml.text.add(byte)
+            cursor.pos += 1
+
+## A `&...;` in content: a character, a predefined entity, or a declared one, whose text
+## is parsed in place (so it may hold elements).
+func parse_reference(xml: Xml*, cursor: Cursor*, level: usize) -> !:
+    let start = cursor.pos
+    cursor.pos += 1
+    let name = cursor.name()
+    if cursor.peek() != ';':
+        error(invalid, "an unterminated entity reference")
+    cursor.pos += 1
+    if let character = predefined(name):
+        if xml.depth > 0:
+            try add_character(&xml.text, character)
+        return
+    for declared in xml.entities.view():
+        if declared.name == name:
+            if level >= entity_depth or xml.expanded + declared.value.length > entity_budget:
+                error(invalid, "entities expand too far")
+            xml.expanded += declared.value.length
+            var inner = Cursor(data = declared.value.bytes)
+            try parse_content(xml, &inner, level + 1)
+            return
+    # An unknown entity is kept as written.
+    if xml.depth > 0:
+        try xml.text.add_all(cursor.data[start..<cursor.pos])
+
+## The character `&name;` stands for when it is predefined or a character reference.
+func predefined(name: str) -> u32?:
+    if name == "lt": return 60
+    if name == "gt": return 62
+    if name == "amp": return 38
+    if name == "apos": return 39
+    if name == "quot": return 34
+    if name.length >= 2 and name.bytes[0] == '#':
+        var value: u32 = 0
+        let hexadecimal = name.bytes[1] == 'x' or name.bytes[1] == 'X'
+        let digits = name.bytes[2..] if hexadecimal else name.bytes[1..]
+        if digits.length == 0 or digits.length > 8:
+            return none
+        for digit in digits:
+            if hexadecimal:
+                let part = hex_digit(digit) else return none
+                value = value * 16 + part
+            elif is_digit(digit):
+                value = value * 10 + (u32)(digit - '0')
+            else:
+                return none
+        if value == 0 or value > 0x10FFFF or (value >= 0xD800 and value <= 0xDFFF):
+            return none
+        return value
+    return none
+
+## Append `scalar` to `builder` as UTF-8.
+func add_character(builder: TextBuilder*, scalar: u32) -> !:
+    if scalar < 0x80:
+        try builder.add((u8)scalar)
+    elif scalar < 0x800:
+        try builder.add((u8)(0xC0 | (scalar >> 6)))
+        try builder.add((u8)(0x80 | (scalar & 0x3F)))
+    elif scalar < 0x10000:
+        try builder.add((u8)(0xE0 | (scalar >> 12)))
+        try builder.add((u8)(0x80 | ((scalar >> 6) & 0x3F)))
+        try builder.add((u8)(0x80 | (scalar & 0x3F)))
+    else:
+        try builder.add((u8)(0xF0 | (scalar >> 18)))
+        try builder.add((u8)(0x80 | ((scalar >> 12) & 0x3F)))
+        try builder.add((u8)(0x80 | ((scalar >> 6) & 0x3F)))
+        try builder.add((u8)(0x80 | (scalar & 0x3F)))
+
+## `<!DOCTYPE ...>`: its internal subset's entity declarations are kept, the rest skipped.
+func parse_doctype(xml: Xml*, cursor: Cursor*) -> !:
+    cursor.pos += 9
+    while not cursor.at_end() and cursor.peek() != '[' and cursor.peek() != '>':
+        let byte = cursor.peek()
+        cursor.pos += 1
+        if byte == '"' or byte == '\'':
+            while not cursor.at_end() and cursor.peek() != byte:
+                cursor.pos += 1
+            cursor.pos += 1
+    if cursor.peek() == '[':
+        cursor.pos += 1
+        while not cursor.at_end() and cursor.peek() != ']':
+            if cursor.looking_at("<!ENTITY"):
+                cursor.pos += 8
+                cursor.skip_space()
+                if cursor.peek() == '%':
+                    cursor.pos += 1
+                    cursor.skip_space()
+                let name = cursor.name()
+                cursor.skip_space()
+                let quote = cursor.peek()
+                if quote == '"' or quote == '\'':
+                    cursor.pos += 1
+                    let start = cursor.pos
+                    while not cursor.at_end() and cursor.peek() != quote:
+                        cursor.pos += 1
+                    try xml.entities.push(EntityDeclaration(name = name, value = (str)cursor.data[start..<cursor.pos]))
+                if not cursor.skip_past(">"):
+                    error(invalid, "an unclosed entity declaration")
+            elif cursor.looking_at("<!--"):
+                discard(cursor.skip_past("-->"))
+            elif cursor.peek() == '<':
+                # Other declarations, with any quoted text in them.
+                while not cursor.at_end() and cursor.peek() != '>':
+                    let byte = cursor.peek()
+                    cursor.pos += 1
+                    if byte == '"' or byte == '\'':
+                        while not cursor.at_end() and cursor.peek() != byte:
+                            cursor.pos += 1
+                        cursor.pos += 1
+                cursor.pos += 1
+            else:
+                cursor.pos += 1
+        cursor.pos += 1
+    if not cursor.skip_past(">"):
+        error(invalid, "an unclosed DOCTYPE")
+
+## `<name attr="value" ...>` or `<name .../>`.
+func parse_start_tag(xml: Xml*, cursor: Cursor*) -> !:
+    cursor.pos += 1
+    let qualified = cursor.name()
+    if qualified.length == 0:
+        error(invalid, "an element without a name")
+    let attr_start = xml.attrs.used
+    let depth = xml.depth + 1
+    while true:
+        cursor.skip_space()
+        if cursor.at_end():
+            error(invalid, "an unclosed start tag")
+        let byte = cursor.peek()
+        if byte == '>' or byte == '/':
+            break
+        let name = cursor.name()
+        cursor.skip_space()
+        if name.length == 0 or cursor.peek() != '=':
+            error(invalid, "an attribute without a value")
+        cursor.pos += 1
+        cursor.skip_space()
+        let quote = cursor.peek()
+        if quote != '"' and quote != '\'':
+            error(invalid, "an unquoted attribute value")
+        cursor.pos += 1
+        let start = cursor.pos
+        while not cursor.at_end() and cursor.peek() != quote:
+            cursor.pos += 1
+        if cursor.at_end():
+            error(invalid, "an unclosed attribute value")
+        let value = try attribute_value(xml, cursor.data[start..<cursor.pos], 0)
+        cursor.pos += 1
+        if name == "xmlns":
+            try xml.bindings.push(Binding(prefix = "", space = space_of(value), depth = depth))
+        elif strings.starts_with(name, "xmlns:"):
+            try xml.bindings.push(Binding(prefix = (str)name.bytes[6..], space = space_of(value), depth = depth))
+        else:
+            try xml.attrs.push(XmlAttr(name = name, value = value))
+    # Prefixes resolve once every declaration on the tag is known.
+    for index in attr_start..<xml.attrs.used:
+        let (prefix, local_name) = split_name(xml.attrs.items[index].name)
+        if prefix.length > 0:
+            xml.attrs.items[index].space = lookup(xml, prefix)
+            xml.attrs.items[index].name = local_name
+    let (prefix, local_name) = split_name(qualified)
+    let node = try xml.append(XmlNode(element = true, space = lookup(xml, prefix), name = local_name, qualified = qualified,
+                                      attr_start = (u32)attr_start, attr_end = (u32)xml.attrs.used))
+    if cursor.peek() == '/':
+        cursor.pos += 1
+        if cursor.peek() != '>':
+            error(invalid, "a malformed empty-element tag")
+        cursor.pos += 1
+        pop_bindings(xml, depth)
+        return
+    cursor.pos += 1
+    xml.current = node
+    xml.depth = depth
+
+## `</name>`, which must close the open element.
+func parse_end_tag(xml: Xml*, cursor: Cursor*) -> !:
+    cursor.pos += 2
+    let name = cursor.name()
+    cursor.skip_space()
+    if cursor.peek() != '>':
+        error(invalid, "a malformed end tag")
+    cursor.pos += 1
+    if xml.depth == 0 or xml.nodes.items[xml.current].qualified != name:
+        error(invalid, "an end tag that does not match its start tag")
+    pop_bindings(xml, xml.depth)
+    xml.current = xml.nodes.items[xml.current].parent
+    xml.depth -= 1
+
+## Drop the namespace declarations made by the element at `depth`.
+func pop_bindings(xml: Xml*, depth: usize):
+    while xml.bindings.used > 0 and xml.bindings.items[xml.bindings.used - 1].depth >= depth:
+        xml.bindings.used -= 1
+
+## The namespace a URI names.
+func space_of(uri: str) -> Space:
+    if uri == "http://www.w3.org/2000/svg":
+        return Space.svg
+    if uri == "http://www.w3.org/1999/xlink":
+        return Space.xlink
+    if uri == "http://www.w3.org/XML/1998/namespace":
+        return Space.xml
+    return Space.other
+
+## The namespace `prefix` names where the parser stands; "" is the default namespace.
+func lookup(xml: const Xml*, prefix: str) -> Space:
+    if prefix == "xml":
+        return Space.xml
+    var index = xml.bindings.used
+    while index > 0:
+        index -= 1
+        if xml.bindings.items[index].prefix == prefix:
+            return xml.bindings.items[index].space
+    return Space.absent if prefix.length == 0 else Space.other
+
+## A qualified name's prefix and local part.
+func split_name(name: str) -> (str, str):
+    for index in 0..<name.length:
+        if name.bytes[index] == ':':
+            return ((str)name.bytes[..<index], (str)name.bytes[index + 1..])
+    return ("", name)
+
+## An attribute value with references decoded and white space characters made spaces.
+## A value that needs no change stays a view of the source.
+func attribute_value(xml: Xml*, raw: const u8[], level: usize) -> str!:
+    var plain = true
+    for byte in raw:
+        if byte == '&' or byte == '\t' or byte == '\n' or byte == '\r':
+            plain = false
+            break
+    if plain:
+        return (str)raw
+    var builder = TextBuilder()
+    defer builder.release()
+    try expand_value(xml, &builder, raw, level)
+    return try builder.finish(&xml.arena)
+
+func expand_value(xml: Xml*, builder: TextBuilder*, raw: const u8[], level: usize) -> !:
+    var cursor = Cursor(data = raw)
+    while not cursor.at_end():
+        let byte = cursor.peek()
+        if byte == '&':
+            let start = cursor.pos
+            cursor.pos += 1
+            let name = cursor.name()
+            if cursor.peek() == ';':
+                cursor.pos += 1
+                if let character = predefined(name):
+                    try add_character(builder, character)
+                    continue
+                var found = false
+                for declared in xml.entities.view():
+                    if declared.name == name and level < entity_depth:
+                        try expand_value(xml, builder, declared.value.bytes, level + 1)
+                        found = true
+                        break
+                if found:
+                    continue
+            try builder.add_all(raw[start..<cursor.pos])
+        else:
+            try builder.add(' ' if byte == '\t' or byte == '\n' or byte == '\r' else byte)
+            cursor.pos += 1

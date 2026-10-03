@@ -1,0 +1,465 @@
+#==============================================================================================
+#
+#   svg/convert - Converting the document tree into a picture
+#
+#   DESCRIPTION:
+#       Walks the SVG tree and builds the render tree (scene.lucb), as resvg's usvg does:
+#       elements that are not displayed, fail their conditions or have a singular
+#       transform are skipped; each container or shape becomes a group only when it
+#       needs one (a transform, opacity, blend mode, isolation, clip path, mask or
+#       filter, or being a `g` or `use`), else its content joins its parent; shapes
+#       become paths with their paints resolved (convert_paint.lucb); `use`, `symbol`,
+#       nested `svg` and `switch` are expanded (convert_use.lucb). Lengths resolve here
+#       against the nearest viewport, the font size and the DPI.
+#
+#==============================================================================================
+
+## How a document is read and converted.
+pub struct Options:
+    ## Pixels per inch, for in, cm, mm, pt and pc.
+    pub var dpi: f64 = 96.0
+    ## The font size em and ex resolve against where no element sets one.
+    pub var font_size: f64 = 12.0
+    ## The size of a document whose width or height is a percentage with no viewBox.
+    pub var default_width: f64 = 100.0
+    pub var default_height: f64 = 100.0
+    ## The user's languages for `systemLanguage`, comma separated.
+    pub var languages: str = "en"
+
+## What the conversion of one element knows about where it stands.
+struct State:
+    ## Inside a clip path's content: no strokes, opacity, masks or filters.
+    var clip_child: bool = false
+    ## The nearest viewport, for percentages.
+    var view_box: Rect = Rect(w = 100.0, h = 100.0)
+    ## The width and height a `use` gives the `svg` it references, if any.
+    var use_width: f64? = none
+    var use_height: f64? = none
+
+## The state of one conversion.
+struct Converter:
+    var tree: const Tree*
+    var picture: Picture*
+    var options: Options
+    ## Per tree node: the paint server converted from it, as kind (1 gradient, 2
+    ## pattern, 3 a plain color) and index; 0 when not converted yet.
+    var servers: u32[]
+    var server_colors: List[Rgba] = List[Rgba]()
+    ## Elements being converted as clip paths, masks or patterns, so references back to
+    ## one of them are refused rather than followed for ever.
+    var active: List[u32] = List[u32]()
+
+    mutating func release():
+        if self.servers.length > 0:
+            free(self.servers) in memory.heap
+        self.server_colors.release()
+        self.active.release()
+
+    func entered(node: u32) -> bool:
+        for at in self.active.view():
+            if at == node:
+                return true
+        return false
+
+    # mark: Attributes ==========================================================================
+
+    func attribute(node: u32, name: Attr) -> str?:
+        return self.tree.attribute(node, name)
+
+    func has(node: u32, name: Attr) -> bool:
+        return self.tree.has(node, name)
+
+    ## A length attribute in user units (`bbox_units`: as a fraction of a box); `default`
+    ## when absent or unreadable.
+    func length(node: u32, name: Attr, bbox_units: bool, state: const State*, default: Length) -> f64:
+        var value = default
+        if let text = self.attribute(node, name):
+            value = parse_length(text) else default
+        return self.resolve_length(node, name, value, bbox_units, state)
+
+    func user_length(node: u32, name: Attr, state: const State*, default: Length) -> f64:
+        return self.length(node, name, false, state, default)
+
+    ## `value`, set on `node` for `name`, in user units.
+    func resolve_length(node: u32, name: Attr, value: Length, bbox_units: bool, state: const State*) -> f64:
+        let n = value.number
+        match value.unit:
+            .plain, .px:
+                return n
+            .em:
+                return n * self.font_size(node)
+            .ex:
+                return n * self.font_size(node) * 0.5
+            .inch:
+                return n * self.options.dpi
+            .cm:
+                return n * self.options.dpi / 2.54
+            .mm:
+                return n * self.options.dpi / 25.4
+            .pt:
+                return n * self.options.dpi / 72.0
+            .pc:
+                return n * self.options.dpi / 6.0
+            .percent:
+                if bbox_units:
+                    return n / 100.0
+                let box = state.view_box
+                if is_horizontal(name):
+                    return box.w * n / 100.0
+                if is_vertical(name):
+                    return box.h * n / 100.0
+                return math.sqrt((box.w * box.w + box.h * box.h) * 0.5) * n / 100.0
+
+    ## The font size in effect at `node`, in pixels.
+    func font_size(node: u32) -> f64:
+        let parent = self.tree.nodes.items[node].parent
+        let inherited = self.options.font_size if parent == 0 else self.font_size(parent)
+        if self.tree.nodes.items[node].kind != Kind.element:
+            return inherited
+        let text = self.attribute(node, Attr.font_size) else return inherited
+        if let size = parse_length(text):
+            let n = size.number
+            match size.unit:
+                .plain, .px:
+                    return n
+                .em:
+                    return n * inherited
+                .ex:
+                    return n * inherited * 0.5
+                .inch:
+                    return n * self.options.dpi
+                .cm:
+                    return n * self.options.dpi / 2.54
+                .mm:
+                    return n * self.options.dpi / 25.4
+                .pt:
+                    return n * self.options.dpi / 72.0
+                .pc:
+                    return n * self.options.dpi / 6.0
+                .percent:
+                    return n * inherited * 0.01
+        let names: str[9] = ["xx-small", "x-small", "small", "medium", "large", "x-large", "xx-large", "smaller", "larger"]
+        let steps: f64[9] = [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, -1.0, 1.0]
+        for index in 0..<names.length:
+            if text == names[index]:
+                return inherited * math.pow(1.2, steps[index])
+        return inherited
+
+    ## A number attribute, else `default`.
+    func number(node: u32, name: Attr, default: f64) -> f64:
+        let text = self.attribute(node, name) else return default
+        return parse_number(text) else default
+
+    ## An opacity: a number or a percentage, clamped to 0..1, else `default`.
+    func opacity(node: u32, name: Attr, default: f64) -> f64:
+        let text = self.attribute(node, name) else return default
+        let value = parse_length(text) else return default
+        if value.unit == Unit.percent:
+            return math.clamp(value.number / 100.0, 0.0, 1.0)
+        if value.unit == Unit.plain:
+            return math.clamp(value.number, 0.0, 1.0)
+        return default
+
+    ## The applicable value of an inherited (or parent-inherited) property.
+    func find(node: u32, name: Attr) -> str?:
+        return self.tree.find(node, name)
+
+    ## An element's transform with its transform-origin, identity when absent or invalid.
+    func transform_of(node: u32, name: Attr, state: const State*) -> Matrix:
+        let text = self.attribute(node, name) else return Matrix()
+        var transform = parse_transform_list(text) else return Matrix()
+        if let origin = self.attribute(node, Attr.transform_origin):
+            let (ox, oy) = self.transform_origin(node, origin, state)
+            transform = multiply(multiply(Matrix(e = ox, f = oy), transform), Matrix(e = -ox, f = -oy))
+        return transform
+
+    ## The point a transform-origin value names: up to two lengths or keywords.
+    func transform_origin(node: u32, text: str, state: const State*) -> (f64, f64):
+        var values: f64[2] = [0.0, 0.0]
+        var count: usize = 0
+        var scanner = Scanner(data = text.bytes)
+        var x_set = false
+        var y_set = false
+        while count < 2:
+            scanner.skip_spaces()
+            if scanner.at_end():
+                break
+            if is_alpha(scanner.peek()):
+                let word = scanner.identifier()
+                if word == "left" or word == "right":
+                    values[0] = 0.0 if word == "left" else state.view_box.w
+                    x_set = true
+                elif word == "top" or word == "bottom":
+                    values[1] = 0.0 if word == "top" else state.view_box.h
+                    y_set = true
+                elif word == "center":
+                    if not x_set and count == 0:
+                        values[0] = state.view_box.w * 0.5
+                        x_set = true
+                    else:
+                        values[1] = state.view_box.h * 0.5
+                        y_set = true
+                else:
+                    break
+            else:
+                let value = scanner.length() else break
+                let axis: usize = 1 if x_set else 0
+                values[axis] = self.resolve_length(node, Attr.width if axis == 0 else Attr.height, value, false, state)
+                if axis == 0:
+                    x_set = true
+                else:
+                    y_set = true
+            count += 1
+            scanner.skip_separator()
+        return (values[0], values[1])
+
+    ## Whether a transform attribute, when set, parses to an invertible transform.
+    func transform_valid(node: u32) -> bool:
+        let text = self.attribute(node, Attr.transform) else return true
+        let transform = parse_transform_list(text) else return true
+        return invertible(transform)
+
+    ## Whether an element is displayed: not `display: none`, a valid transform and its
+    ## conditional attributes passed.
+    func visible_element(node: u32) -> bool:
+        if let display = self.attribute(node, Attr.display):
+            if strings.trim(display) == "none":
+                return false
+        return self.transform_valid(node) and self.condition_passed(node)
+
+# mark: Small helpers =========================================================================
+
+## Attributes whose percentages are of the viewport's width.
+func is_horizontal(name: Attr) -> bool:
+    return name == Attr.cx or name == Attr.dx or name == Attr.fx or name == Attr.marker_width or name == Attr.ref_x or name == Attr.rx or name == Attr.width or name == Attr.x or name == Attr.x1 or name == Attr.x2
+
+## Attributes whose percentages are of the viewport's height.
+func is_vertical(name: Attr) -> bool:
+    return name == Attr.cy or name == Attr.dy or name == Attr.fy or name == Attr.height or name == Attr.marker_height or name == Attr.ref_y or name == Attr.ry or name == Attr.y or name == Attr.y1 or name == Attr.y2
+
+func invertible(m: Matrix) -> bool:
+    let det = m.a * m.d - m.b * m.c
+    return math.is_finite(det) and math.abs(det) > 1e-12 and math.is_finite(m.e) and math.is_finite(m.f)
+
+func is_identity(m: Matrix) -> bool:
+    return m.a == 1.0 and m.b == 0.0 and m.c == 0.0 and m.d == 1.0 and m.e == 0.0 and m.f == 0.0
+
+## `rect` mapped through `m`: the box round its four corners.
+func transform_rect(rect: Rect, m: Matrix) -> Rect:
+    var box = Box()
+    box.add(apply(m, rect.x, rect.y))
+    box.add(apply(m, rect.x + rect.w, rect.y))
+    box.add(apply(m, rect.x, rect.y + rect.h))
+    box.add(apply(m, rect.x + rect.w, rect.y + rect.h))
+    return box.rect() else rect
+
+## The transform taking the unit square onto `box`.
+func bbox_matrix(box: Rect) -> Matrix:
+    return Matrix(a = box.w, d = box.h, e = box.x, f = box.y)
+
+## A box given in fractions of `box`, in `box`'s space.
+func rect_in_bbox(rect: Rect, box: Rect) -> Rect:
+    return Rect(x = box.x + rect.x * box.w, y = box.y + rect.y * box.h, w = rect.w * box.w, h = rect.h * box.h)
+
+# mark: Conversion ============================================================================
+
+## Convert `tree` into a picture with `options`.
+func convert_tree(tree: const Tree*, options: Options, picture: Picture*) -> !:
+    let servers = try new u32[tree.nodes.used] in memory.heap
+    var converter = Converter(tree = tree, picture = picture, options = options, servers = servers)
+    defer converter.release()
+    try converter.document()
+
+extend Converter:
+    ## The root `svg`: its size, its viewBox, and its content under the root group.
+    mutating func document() -> !:
+        let svg = self.tree.root_element()
+        try self.picture.items.push(Item())
+        let (size, view) = self.document_size(svg)
+        self.picture.width = size.w
+        self.picture.height = size.h
+        if not self.visible_element(svg):
+            return
+        var aspect = AspectRatio()
+        if let text = self.attribute(svg, Attr.preserve_aspect_ratio):
+            aspect = parse_aspect_ratio(text) else AspectRatio()
+        let root_transform = view_box_transform(view, aspect, size.w, size.h)
+        let state = State(view_box = view)
+        let group = try self.picture.append(0, Item(transform = root_transform))
+        try self.element(svg, &state, group)
+
+    ## The document's size and viewBox: width and height (100% of the viewBox, or of the
+    ## default size without one), the missing one following the viewBox's aspect.
+    func document_size(svg: u32) -> (Rect, Rect):
+        let full = Length(number = 100.0, unit = Unit.percent)
+        let view = parse_view_box(self.attribute(svg, Attr.view_box) else "")
+        var width_length = full
+        var height_length = full
+        var has_width = false
+        var has_height = false
+        if let text = self.attribute(svg, Attr.width):
+            if let value = parse_length(text):
+                width_length = value
+                has_width = true
+        if let text = self.attribute(svg, Attr.height):
+            if let value = parse_length(text):
+                height_length = value
+                has_height = true
+        if let box = view:
+            let state = State(view_box = box)
+            let w = box.w * width_length.number / 100.0 if width_length.unit == Unit.percent else self.resolve_length(svg, Attr.width, width_length, false, &state)
+            let h = box.h * height_length.number / 100.0 if height_length.unit == Unit.percent else self.resolve_length(svg, Attr.height, height_length, false, &state)
+            var size = Rect(w = w, h = h)
+            if has_width and not has_height:
+                size = Rect(w = w, h = box.h * w / box.w)
+            elif has_height and not has_width:
+                size = Rect(w = box.w * h / box.h, h = h)
+            return (size, box)
+        let state = State(view_box = Rect(w = 100.0, h = 100.0))
+        var w = self.options.default_width * width_length.number / 100.0 if width_length.unit == Unit.percent else self.resolve_length(svg, Attr.width, width_length, false, &state)
+        var h = self.options.default_height * height_length.number / 100.0 if height_length.unit == Unit.percent else self.resolve_length(svg, Attr.height, height_length, false, &state)
+        if not (w > 0.0):
+            w = self.options.default_width
+        if not (h > 0.0):
+            h = self.options.default_height
+        return (Rect(w = w, h = h), Rect(w = w, h = h))
+
+    ## Convert the element children of `node` into group `parent`.
+    mutating func children(node: u32, state: const State*, parent: u32) -> !:
+        var child = self.tree.first_child(node)
+        while child != 0:
+            try self.element(child, state, parent)
+            child = self.tree.next_sibling(child)
+
+    ## Convert one element into group `parent`.
+    mutating func element(node: u32, state: const State*, parent: u32) -> !:
+        if not self.tree.is_element(node):
+            return
+        let tag = self.tree.tag(node)
+        if not (is_graphic(tag) or tag == Tag.g or tag == Tag.switch or tag == Tag.svg):
+            return
+        if not self.visible_element(node):
+            return
+        if tag == Tag.use:
+            try self.use_element(node, state, parent)
+            return
+        if tag == Tag.switch:
+            try self.switch_element(node, state, parent)
+            return
+        if tag == Tag.svg and self.tree.parent_element(node) != none:
+            try self.nested_svg(node, state, parent)
+            return
+        let group = try self.open_group(node, state, parent)
+        try self.content(node, tag, state, group)
+        try self.close_group(node, state, parent, group, false)
+
+    ## The content of `node` itself, into `group`.
+    mutating func content(node: u32, tag: Tag, state: const State*, group: u32) -> !:
+        if is_shape_tag(tag):
+            if let path = try self.shape_path(node, tag, state):
+                try self.shape(node, path, state, group)
+        elif tag == Tag.image:
+            try self.image_element(node, state, group)
+        elif tag == Tag.text:
+            try self.text_element(node, state, group)
+        elif tag == Tag.g or tag == Tag.svg:
+            if state.clip_child:
+                try self.clip_children(node, state, group)
+            else:
+                try self.children(node, state, group)
+
+    # mark: Groups ==============================================================================
+
+    ## Start the group `node` would make, detached until close_group decides its fate.
+    mutating func open_group(node: u32, state: const State*, parent: u32) -> u32!:
+        var item = Item(transform = self.transform_of(node, Attr.transform, state))
+        if not state.clip_child:
+            item.opacity = self.opacity(node, Attr.opacity, 1.0)
+        item.blend = blend_mode(self.attribute(node, Attr.mix_blend_mode) else "normal")
+        item.isolate = (self.attribute(node, Attr.isolation) else "") == "isolate"
+        let group = try self.picture.add_item(item)
+        self.picture.items.items[group].parent = parent
+        return group
+
+    ## Finish group `group` of `node`: give it the clip path, mask and filters its
+    ## element asks for (which may hide it), then attach it to `parent` when it needs to
+    ## be a group, else hand its children to `parent`. `force` keeps it a group.
+    mutating func close_group(node: u32, state: const State*, parent: u32, group: u32, force: bool) -> !:
+        let object_box = self.object_bounds(group)
+        let tag = self.tree.tag(node)
+        var clip: usize = 0
+        if let link = self.link_attribute(node, Attr.clip_path):
+            if not self.entered(link):
+                clip = try self.clip_path(link, state, object_box)
+                if clip == 0:
+                    return
+        var mask: usize = 0
+        if not state.clip_child:
+            if let link = self.link_attribute(node, Attr.mask):
+                if not self.entered(link):
+                    mask = try self.mask_element(link, state, object_box)
+                    if mask == 0:
+                        return
+        var filter_ok = true
+        if not state.clip_child:
+            filter_ok = try self.filters(node, state, object_box, group)
+        if not filter_ok:
+            return
+        let item = self.picture.items.items[group]
+        let required = item.opacity != 1.0 or clip != 0 or mask != 0 or item.filter_count > 0 or not is_identity(item.transform) or item.blend != Blend.normal or item.isolate or tag == Tag.g or tag == Tag.use or force
+        if not required:
+            self.picture.adopt_children(group, parent)
+            return
+        self.picture.items.items[group].clip = clip
+        self.picture.items.items[group].mask = mask
+        self.picture.attach(parent, group)
+
+    ## The element a clip-path, mask or filter attribute links to, if it links to one.
+    func link_attribute(node: u32, name: Attr) -> u32?:
+        let text = self.attribute(node, name) else return none
+        if strings.trim(text) == "none":
+            return none
+        let id = func_iri(text) else return none
+        return self.tree.element_by_id(id)
+
+    ## The union of the children's bounding boxes, in the group's own space.
+    func object_bounds(group: u32) -> Rect?:
+        var box = Box()
+        var child = self.picture.items.items[group].first
+        while child != 0:
+            if let r = self.item_bounds(child):
+                box.add_rect(r)
+            child = self.picture.items.items[child].next
+        return box.rect()
+
+    ## An item's bounding box in its parent's space.
+    func item_bounds(index: u32) -> Rect?:
+        let item = self.picture.items.items[index]
+        match item.kind:
+            .shape:
+                return self.picture.paths.items[item.path].bounds()
+            .image:
+                return item.view
+            .group:
+                let inner = self.object_bounds(index) else return none
+                return transform_rect(inner, item.transform)
+
+## Whether a tag is drawn by itself (or, for `use`, by what it references).
+func is_graphic(tag: Tag) -> bool:
+    return is_shape_tag(tag) or tag == Tag.image or tag == Tag.text or tag == Tag.use
+
+func is_shape_tag(tag: Tag) -> bool:
+    return tag == Tag.rect or tag == Tag.circle or tag == Tag.ellipse or tag == Tag.line or tag == Tag.polyline or tag == Tag.polygon or tag == Tag.path
+
+## A mix-blend-mode value.
+func blend_mode(text: str) -> Blend:
+    let names: str[16] = ["normal", "multiply", "screen", "overlay", "darken", "lighten", "color-dodge", "color-burn",
+                          "hard-light", "soft-light", "difference", "exclusion", "hue", "saturation", "color", "luminosity"]
+    let modes: Blend[16] = [Blend.normal, Blend.multiply, Blend.screen, Blend.overlay, Blend.darken, Blend.lighten,
+                            Blend.color_dodge, Blend.color_burn, Blend.hard_light, Blend.soft_light, Blend.difference,
+                            Blend.exclusion, Blend.hue, Blend.saturation, Blend.color, Blend.luminosity]
+    let value = strings.trim(text)
+    for index in 0..<names.length:
+        if value == names[index]:
+            return modes[index]
+    return Blend.normal

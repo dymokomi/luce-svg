@@ -1,0 +1,159 @@
+#==============================================================================================
+#
+#   svg/shade - Painting coverage with a brush
+#
+#   DESCRIPTION:
+#       A Shader is a brush made ready for one shape: a solid color, premultiplied in
+#       the working space, or a gradient or pattern with the matrix from device pixels
+#       into its own space (through the shape's bounding box for bounding-box units).
+#       Linear gradients project onto their vector; radial ones are two-point conical,
+#       from the focal circle (fx, fy, fr) to the end circle (cx, cy, r), taking the
+#       largest parameter whose circle is real, as Skia and browsers do. Spread methods
+#       pad, reflect and repeat; stops interpolate unpremultiplied in sRGB, then the
+#       color is premultiplied (and decoded, when drawing in linear light). Painting
+#       composites source-over through the coverage of the shape.
+#
+#==============================================================================================
+
+## A brush made ready for one shape.
+struct Shader:
+    var kind: BrushKind = BrushKind.solid
+    ## Solid: premultiplied working-space color at the brush's opacity.
+    var color: f32[4] = [0.0, 0.0, 0.0, 0.0]
+    var opacity: f64 = 1.0
+    var linear: bool = false
+    var gradient: GradientServer = GradientServer()
+    var stops: const GradientStop[]
+    ## Device pixel centre to the gradient's or pattern's space.
+    var inverse: Matrix = Matrix()
+    ## A pattern's rendered tile and its size.
+    var tile: const Canvas*? = none
+
+## Decode an encoded sRGB channel to linear light.
+func decode_channel(value: f64) -> f64:
+    return transfer.srgb_decode(value)
+
+## `color` with `alpha`, premultiplied, in the working space.
+func premultiplied(color: Color, alpha: f64, linear: bool) -> f32[4]:
+    var r = color.r
+    var g = color.g
+    var b = color.b
+    if linear:
+        r = decode_channel(r)
+        g = decode_channel(g)
+        b = decode_channel(b)
+    return [(f32)(r * alpha), (f32)(g * alpha), (f32)(b * alpha), (f32)alpha]
+
+## Where `t` falls once the gradient spreads past 0..1.
+func spread_offset(t: f64, spread: Spread) -> f64:
+    match spread:
+        .hold:
+            return math.clamp(t, 0.0, 1.0)
+        .repeat:
+            return t - math.floor(t)
+        .reflect:
+            let folded = math.abs(t - 2.0 * math.floor(t * 0.5) - 1.0)
+            return 1.0 - folded
+
+## The gradient parameter at point `p` of the gradient's space, or none where a
+## two-point conical gradient paints nothing.
+func gradient_parameter(gradient: const GradientServer*, p: Point) -> f64?:
+    if not gradient.radial:
+        let dx = gradient.x2 - gradient.x1
+        let dy = gradient.y2 - gradient.y1
+        let span = dx * dx + dy * dy
+        if span <= 1e-18:
+            return 1.0
+        return ((p.x - gradient.x1) * dx + (p.y - gradient.y1) * dy) / span
+    let cdx = gradient.cx - gradient.fx
+    let cdy = gradient.cy - gradient.fy
+    let dr = gradient.r - gradient.fr
+    let pdx = p.x - gradient.fx
+    let pdy = p.y - gradient.fy
+    let a = cdx * cdx + cdy * cdy - dr * dr
+    let b = pdx * cdx + pdy * cdy + gradient.fr * dr
+    let c = pdx * pdx + pdy * pdy - gradient.fr * gradient.fr
+    if math.abs(a) < 1e-12:
+        if math.abs(b) < 1e-12:
+            return none
+        let t = c / (2.0 * b)
+        if gradient.fr + t * dr < 0.0:
+            return none
+        return t
+    let discriminant = b * b - a * c
+    if discriminant < 0.0:
+        return none
+    let root = math.sqrt(discriminant)
+    let t1 = (b + root) / a
+    let t2 = (b - root) / a
+    let high = math.max(t1, t2)
+    let low = math.min(t1, t2)
+    if gradient.fr + high * dr >= 0.0:
+        return high
+    if gradient.fr + low * dr >= 0.0:
+        return low
+    return none
+
+## The unpremultiplied color of `stops` at offset `t` (0..1).
+func stop_color(stops: const GradientStop[], t: f64) -> Rgba:
+    if t <= stops[0].offset:
+        return stops[0].color
+    for index in 1..<stops.length:
+        let high = stops[index]
+        if t <= high.offset:
+            let low = stops[index - 1]
+            let span = high.offset - low.offset
+            let mix = (t - low.offset) / span if span > 1e-12 else 1.0
+            return Rgba(r = low.color.r + (high.color.r - low.color.r) * mix, g = low.color.g + (high.color.g - low.color.g) * mix,
+                        b = low.color.b + (high.color.b - low.color.b) * mix, a = low.color.a + (high.color.a - low.color.a) * mix)
+    return stops[stops.length - 1].color
+
+## The premultiplied working-space color `shader` gives the device pixel centre (x, y),
+## at coverage `cover`.
+func shader_color(shader: const Shader*, x: f64, y: f64, cover: f64) -> f32[4]:
+    match shader.kind:
+        .solid:
+            let k = (f32)cover
+            return [shader.color[0] * k, shader.color[1] * k, shader.color[2] * k, shader.color[3] * k]
+        .linear, .radial:
+            let p = apply(shader.inverse, x, y)
+            let t = gradient_parameter(&shader.gradient, p) else return [0.0, 0.0, 0.0, 0.0]
+            let color = stop_color(shader.stops, spread_offset(t, shader.gradient.spread))
+            return premultiplied(color.rgb(), color.a * shader.opacity * cover, shader.linear)
+        .pattern:
+            let tile = shader.tile else return [0.0, 0.0, 0.0, 0.0]
+            let p = apply(shader.inverse, x, y)
+            return sample_tile(tile, p, shader.opacity * cover)
+
+## The tile's pixel under pattern-space point `p`, the tile repeating in both directions,
+## scaled by `alpha`.
+func sample_tile(tile: const Canvas*, p: Point, alpha: f64) -> f32[4]:
+    if tile.width == 0 or tile.height == 0:
+        return [0.0, 0.0, 0.0, 0.0]
+    let w = (f64)tile.width
+    let h = (f64)tile.height
+    let fx = p.x - math.floor(p.x / w) * w
+    let fy = p.y - math.floor(p.y / h) * h
+    let column = math_min((usize)fx, tile.width - 1)
+    let row = math_min((usize)fy, tile.height - 1)
+    let at = (row * tile.width + column) * 4
+    let k = (f32)alpha
+    return [tile.pixels[at] * k, tile.pixels[at + 1] * k, tile.pixels[at + 2] * k, tile.pixels[at + 3] * k]
+
+## Composite `shader` source-over into `canvas` through the resolved region of `cover`.
+func paint_coverage(canvas: Canvas*, cover: const Coverage*, shader: const Shader*):
+    for row in cover.row0..<cover.row1:
+        for column in cover.col0..<cover.col1:
+            let c = (f64)cover.values[row * cover.width + column]
+            if c <= 0.0:
+                continue
+            let s = shader_color(shader, (f64)column + 0.5, (f64)row + 0.5, c)
+            let sa = s[3]
+            if sa <= 0.0:
+                continue
+            let at = (row * canvas.width + column) * 4
+            let keep = 1.0 - sa
+            canvas.pixels[at] = s[0] + canvas.pixels[at] * keep
+            canvas.pixels[at + 1] = s[1] + canvas.pixels[at + 1] * keep
+            canvas.pixels[at + 2] = s[2] + canvas.pixels[at + 2] * keep
+            canvas.pixels[at + 3] = sa + canvas.pixels[at + 3] * keep

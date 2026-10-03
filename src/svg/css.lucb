@@ -1,0 +1,436 @@
+#==============================================================================================
+#
+#   svg/css - Style sheets, selectors and declarations
+#
+#   DESCRIPTION:
+#       Reads the CSS of `<style>` elements into rules, each a selector and its
+#       declarations, sorted by specificity (stably, so a later rule of equal specificity
+#       wins). Selectors are what resvg's CSS engine supports: `*`, type, `.class`, `#id`,
+#       attribute tests (`[a]`, `=`, `~=`, `|=`, `^=`, `$=`, `*=`) and `:first-child`, in
+#       compounds joined by descendant, child (`>`) and adjacent-sibling (`+`)
+#       combinators; a compound with any other pseudo-class never matches. At-rules are
+#       skipped. The same declaration reader splits `style` attributes.
+#
+#==============================================================================================
+
+## One test of a compound selector.
+enum Test:
+    universal
+    tag
+    id
+    class_name
+    has
+    equals
+    includes
+    dash
+    prefix
+    suffix
+    contains
+    first_child
+    unmatched
+
+struct Simple:
+    var check: Test = Test.universal
+    var name: str = ""
+    var value: str = ""
+
+## How a compound relates to the one before it in its selector.
+enum Combinator:
+    single
+    descendant
+    child
+    adjacent
+
+## Simple tests `simple_start..<simple_end` that must all hold of one element.
+struct Compound:
+    var simple_start: usize = 0
+    var simple_end: usize = 0
+    var combinator: Combinator = Combinator.single
+
+## `name: value` with its `!important` flag.
+struct Declaration:
+    var name: str = ""
+    var value: str = ""
+    var important: bool = false
+
+## A selector (compounds `compound_start..<compound_end`) and its declarations.
+struct Rule:
+    var compound_start: usize = 0
+    var compound_end: usize = 0
+    var specificity: u32 = 0
+    var declaration_start: usize = 0
+    var declaration_end: usize = 0
+
+## Every rule of a document's style sheets.
+struct Sheet:
+    var rules: List[Rule] = List[Rule]()
+    var compounds: List[Compound] = List[Compound]()
+    var simples: List[Simple] = List[Simple]()
+    var declarations: List[Declaration] = List[Declaration]()
+
+    mutating func release():
+        self.rules.release()
+        self.compounds.release()
+        self.simples.release()
+        self.declarations.release()
+
+# mark: Reading style sheets ==================================================================
+
+## Add the rules of style sheet `text` (which must outlive the sheet).
+func parse_sheet(sheet: Sheet*, text: str) -> !:
+    let data = text.bytes
+    var pos: usize = 0
+    while true:
+        skip_css_space(data, &pos)
+        if pos >= data.length:
+            break
+        if data[pos] == '@':
+            skip_at_rule(data, &pos)
+            continue
+        let selector_start = pos
+        while pos < data.length and data[pos] != '{':
+            pos += 1
+        if pos >= data.length:
+            break
+        let selectors = (str)data[selector_start..<pos]
+        pos += 1
+        let block_start = pos
+        while pos < data.length and data[pos] != '}':
+            pos += 1
+        let block = (str)data[block_start..<pos]
+        pos += 1
+        let declaration_start = sheet.declarations.used
+        try parse_declarations(&sheet.declarations, block)
+        let declaration_end = sheet.declarations.used
+        # A selector list gives one rule per selector; an invalid selector drops the list.
+        let rule_start = sheet.rules.used
+        var rest = selectors
+        var valid = true
+        while true:
+            var piece = rest
+            var more = false
+            if let comma = strings.find(rest, ","):
+                piece = (str)rest.bytes[..<comma]
+                rest = (str)rest.bytes[comma + 1..]
+                more = true
+            if not try parse_selector(sheet, strings.trim(piece), declaration_start, declaration_end):
+                valid = false
+            if not more:
+                break
+        if not valid:
+            sheet.rules.truncate(rule_start)
+    sort_rules(sheet)
+
+## Skip `@name ...;` or `@name ... { ... }` with nested blocks.
+func skip_at_rule(data: const u8[], pos: usize*):
+    while *pos < data.length and data[*pos] != ';' and data[*pos] != '{':
+        *pos += 1
+    if *pos < data.length and data[*pos] == '{':
+        var depth: usize = 0
+        while *pos < data.length:
+            if data[*pos] == '{':
+                depth += 1
+            elif data[*pos] == '}':
+                depth -= 1
+                if depth == 0:
+                    *pos += 1
+                    return
+            *pos += 1
+    *pos += 1
+
+## Skip white space and `/* comments */`.
+func skip_css_space(data: const u8[], pos: usize*):
+    while *pos < data.length:
+        if is_space(data[*pos]):
+            *pos += 1
+        elif *pos + 1 < data.length and data[*pos] == '/' and data[*pos + 1] == '*':
+            *pos += 2
+            while *pos + 1 < data.length and not (data[*pos] == '*' and data[*pos + 1] == '/'):
+                *pos += 1
+            *pos += 2
+        elif *pos + 3 < data.length and data[*pos] == '<' and data[*pos + 1] == '!' and data[*pos + 2] == '-' and data[*pos + 3] == '-':
+            *pos += 4
+        elif *pos + 2 < data.length and data[*pos] == '-' and data[*pos + 1] == '-' and data[*pos + 2] == '>':
+            *pos += 3
+        else:
+            return
+
+## Insertion sort by specificity, stable, so equal rules keep document order.
+func sort_rules(sheet: Sheet*):
+    let rules = sheet.rules.view()
+    for index in 1..<rules.length:
+        let rule = rules[index]
+        var at = index
+        while at > 0 and rules[at - 1].specificity > rule.specificity:
+            rules[at] = rules[at - 1]
+            at -= 1
+        rules[at] = rule
+
+## Split `text`, a declaration block or a `style` attribute, into declarations.
+func parse_declarations(list: List[Declaration]*, text: str) -> !:
+    let data = text.bytes
+    var pos: usize = 0
+    while pos < data.length:
+        skip_css_space(data, &pos)
+        let name_start = pos
+        while pos < data.length and data[pos] != ':' and data[pos] != ';':
+            pos += 1
+        if pos >= data.length:
+            break
+        if data[pos] == ';':
+            pos += 1
+            continue
+        let name = strings.trim((str)data[name_start..<pos])
+        pos += 1
+        let value_start = pos
+        var quote: u8 = 0
+        var depth: usize = 0
+        while pos < data.length:
+            let byte = data[pos]
+            if quote != 0:
+                if byte == quote:
+                    quote = 0
+            elif byte == '"' or byte == '\'':
+                quote = byte
+            elif byte == '(':
+                depth += 1
+            elif byte == ')' and depth > 0:
+                depth -= 1
+            elif byte == ';' and depth == 0:
+                break
+            pos += 1
+        var value = strings.trim((str)data[value_start..<pos])
+        pos += 1
+        var important = false
+        if let bang = strings.find_last(value, "!"):
+            if strings.trim((str)value.bytes[bang + 1..]) == "important":
+                important = true
+                value = strings.trim((str)value.bytes[..<bang])
+        value = strip_comments(value)
+        if name.length > 0:
+            try list.push(Declaration(name = name, value = value, important = important))
+
+## `value` without a trailing `/* comment */`, as a declaration may end with one.
+func strip_comments(value: str) -> str:
+    if let start = strings.find(value, "/*"):
+        return strings.trim((str)value.bytes[..<start])
+    return value
+
+# mark: Selectors =============================================================================
+
+## Parse one selector into a rule; answer false when it is not valid CSS we can read.
+func parse_selector(sheet: Sheet*, text: str, declaration_start: usize, declaration_end: usize) -> bool!:
+    let data = text.bytes
+    if data.length == 0:
+        return false
+    let compound_start = sheet.compounds.used
+    var pos: usize = 0
+    var ids: u32 = 0
+    var classes: u32 = 0
+    var types: u32 = 0
+    var combinator = Combinator.single
+    while pos < data.length:
+        let simple_start = sheet.simples.used
+        while pos < data.length and not is_space(data[pos]) and data[pos] != '>' and data[pos] != '+':
+            let byte = data[pos]
+            if byte == '*':
+                pos += 1
+                try sheet.simples.push(Simple(check = Test.universal))
+            elif byte == '#' or byte == '.':
+                pos += 1
+                let name = css_identifier(data, &pos)
+                if name.length == 0:
+                    return false
+                try sheet.simples.push(Simple(check = Test.id if byte == '#' else Test.class_name, name = name))
+                if byte == '#':
+                    ids += 1
+                else:
+                    classes += 1
+            elif byte == '[':
+                pos += 1
+                let simple = parse_attribute_test(data, &pos) else return false
+                try sheet.simples.push(simple)
+                classes += 1
+            elif byte == ':':
+                pos += 1
+                let name = css_identifier(data, &pos)
+                if pos < data.length and data[pos] == '(':
+                    while pos < data.length and data[pos] != ')':
+                        pos += 1
+                    pos += 1
+                try sheet.simples.push(Simple(check = Test.first_child if name == "first-child" else Test.unmatched))
+                classes += 1
+            else:
+                let name = css_identifier(data, &pos)
+                if name.length == 0:
+                    return false
+                try sheet.simples.push(Simple(check = Test.tag, name = name))
+                types += 1
+        if sheet.simples.used == simple_start:
+            return false
+        try sheet.compounds.push(Compound(simple_start = simple_start, simple_end = sheet.simples.used, combinator = combinator))
+        # The combinator to the next compound, if any.
+        var saw_space = false
+        while pos < data.length and is_space(data[pos]):
+            pos += 1
+            saw_space = true
+        combinator = Combinator.descendant
+        if pos < data.length and (data[pos] == '>' or data[pos] == '+'):
+            combinator = Combinator.child if data[pos] == '>' else Combinator.adjacent
+            pos += 1
+            while pos < data.length and is_space(data[pos]):
+                pos += 1
+        elif not saw_space and pos < data.length:
+            return false
+    let specificity = (ids << 16) | (classes << 8) | types
+    try sheet.rules.push(Rule(compound_start = compound_start, compound_end = sheet.compounds.used, specificity = specificity,
+                              declaration_start = declaration_start, declaration_end = declaration_end))
+    return true
+
+## A CSS identifier: letters, digits, `-` and `_` (and any non-ASCII byte).
+func css_identifier(data: const u8[], pos: usize*) -> str:
+    let start = *pos
+    while *pos < data.length:
+        let byte = data[*pos]
+        if not (is_alpha(byte) or is_digit(byte) or byte == '-' or byte == '_' or byte >= 0x80):
+            break
+        *pos += 1
+    return (str)data[start..<*pos]
+
+## `[name]` or `[name op value]`, the `[` already consumed.
+func parse_attribute_test(data: const u8[], pos: usize*) -> Simple?:
+    skip_css_space(data, pos)
+    let name = css_identifier(data, pos)
+    skip_css_space(data, pos)
+    if name.length == 0 or *pos >= data.length:
+        return none
+    if data[*pos] == ']':
+        *pos += 1
+        return Simple(check = Test.has, name = name)
+    var check = Test.equals
+    let byte = data[*pos]
+    if byte != '=':
+        check = match byte:
+            '~' => Test.includes
+            '|' => Test.dash
+            '^' => Test.prefix
+            '$' => Test.suffix
+            '*' => Test.contains
+            _ => Test.unmatched
+        *pos += 1
+    if check == Test.unmatched or *pos >= data.length or data[*pos] != '=':
+        return none
+    *pos += 1
+    skip_css_space(data, pos)
+    var value = ""
+    if *pos < data.length and (data[*pos] == '"' or data[*pos] == '\''):
+        let quote = data[*pos]
+        *pos += 1
+        let start = *pos
+        while *pos < data.length and data[*pos] != quote:
+            *pos += 1
+        value = (str)data[start..<*pos]
+        *pos += 1
+    else:
+        value = css_identifier(data, pos)
+    skip_css_space(data, pos)
+    if *pos >= data.length or data[*pos] != ']':
+        return none
+    *pos += 1
+    return Simple(check = check, name = name, value = value)
+
+# mark: Matching ==============================================================================
+
+## Whether `rule`'s selector matches element `node` of `xml`.
+func rule_matches(sheet: const Sheet*, rule: Rule, xml: const Xml*, node: u32) -> bool:
+    return match_from(sheet, rule, rule.compound_end - 1, xml, node)
+
+func match_from(sheet: const Sheet*, rule: Rule, index: usize, xml: const Xml*, node: u32) -> bool:
+    let compound = sheet.compounds.items[index]
+    for at in compound.simple_start..<compound.simple_end:
+        if not simple_matches(sheet.simples.items[at], xml, node):
+            return false
+    if index == rule.compound_start:
+        return true
+    match compound.combinator:
+        .descendant:
+            var ancestor = xml.nodes.items[node].parent
+            while ancestor != 0:
+                if match_from(sheet, rule, index - 1, xml, ancestor):
+                    return true
+                ancestor = xml.nodes.items[ancestor].parent
+            return false
+        .child:
+            let parent = xml.nodes.items[node].parent
+            return parent != 0 and match_from(sheet, rule, index - 1, xml, parent)
+        .adjacent:
+            let before = previous_element(xml, node) else return false
+            return match_from(sheet, rule, index - 1, xml, before)
+        .single:
+            return true
+
+## The element before `node` among its parent's children, if any.
+func previous_element(xml: const Xml*, node: u32) -> u32?:
+    var child = xml.nodes.items[xml.nodes.items[node].parent].first
+    var found: u32? = none
+    while child != 0 and child != node:
+        if xml.nodes.items[child].element:
+            found = child
+        child = xml.nodes.items[child].next
+    return found
+
+func simple_matches(simple: Simple, xml: const Xml*, node: u32) -> bool:
+    let element = xml.nodes.items[node]
+    match simple.check:
+        .universal:
+            return true
+        .tag:
+            return element.name == simple.name
+        .first_child:
+            return previous_element(xml, node) == none
+        .unmatched:
+            return false
+        .id:
+            let value = xml_attribute(xml, node, "id") else return false
+            return value_matches(simple, value)
+        .class_name:
+            let value = xml_attribute(xml, node, "class") else return false
+            return value_matches(simple, value)
+        _:
+            let value = xml_attribute(xml, node, simple.name) else return false
+            return value_matches(simple, value)
+
+## Whether an attribute's `value` passes an attribute, id or class test.
+func value_matches(simple: Simple, value: str) -> bool:
+    match simple.check:
+        .id, .equals:
+            return value == (simple.name if simple.check == Test.id else simple.value)
+        .class_name, .includes:
+            let wanted = simple.name if simple.check == Test.class_name else simple.value
+            var start: usize = 0
+            for position in 0..<value.length + 1:
+                if position == value.length or is_space(value.bytes[position]):
+                    if (str)value.bytes[start..<position] == wanted and wanted.length > 0:
+                        return true
+                    start = position + 1
+            return false
+        .dash:
+            return value == simple.value or strings.starts_with(value, simple.value) and value.length > simple.value.length and value.bytes[simple.value.length] == '-'
+        .prefix:
+            return simple.value.length > 0 and strings.starts_with(value, simple.value)
+        .suffix:
+            return simple.value.length > 0 and strings.ends_with(value, simple.value)
+        .contains:
+            return simple.value.length > 0 and strings.contains(value, simple.value)
+        _:
+            return true
+
+## The value of the un-namespaced attribute `name` of element `node`, which an id or
+## class selector also reads.
+func xml_attribute(xml: const Xml*, node: u32, name: str) -> str?:
+    let element = xml.nodes.items[node]
+    for at in element.attr_start..<element.attr_end:
+        let attribute = xml.attrs.items[at]
+        if attribute.space == Space.absent and attribute.name == name:
+            return attribute.value
+    return none

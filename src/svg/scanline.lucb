@@ -1,0 +1,237 @@
+#==============================================================================================
+#
+#   svg/scanline - Coverage by sub-scanlines with true winding rules
+#
+#   DESCRIPTION:
+#       A Coverage collects a shape's edges, then resolves them into per-pixel coverage.
+#       Each pixel row is sampled by sixteen sub-scanlines; on each, the edges crossing
+#       it are sorted and swept with their winding counted, so the nonzero and even-odd
+#       rules hold exactly however many contours overlap (strokes are unions of
+#       overlapping pieces and depend on that), and the spans inside the shape add their
+#       exact horizontal extent, partial pixels included. Without anti-aliasing a pixel
+#       is in when its centre is. Only the rows and columns a shape touches are resolved.
+#
+#==============================================================================================
+
+## A line of a shape's outline, top to bottom, with the winding it adds.
+struct Edge:
+    var x0: f64 = 0.0
+    var y0: f64 = 0.0
+    var x1: f64 = 0.0
+    var y1: f64 = 0.0
+    var slope: f64 = 0.0
+    var winding: i32 = 1
+
+## Where an active edge crosses the current sub-scanline.
+struct Crossing:
+    var x: f64 = 0.0
+    var winding: i32 = 0
+
+## How many sub-scanlines sample each pixel row.
+let subsamples: usize = 16
+
+## Per-pixel coverage of a `width` by `height` area, built shape by shape.
+struct Coverage:
+    var width: usize = 0
+    var height: usize = 0
+    var values: f32[]
+    ## The region the last resolve touched: rows `row0..<row1`, columns `col0..<col1`.
+    var row0: usize = 0
+    var row1: usize = 0
+    var col0: usize = 0
+    var col1: usize = 0
+    var edges: List[Edge] = List[Edge]()
+    var crossings: List[Crossing] = List[Crossing]()
+    ## One row's partial coverage and run starts and ends (as a difference array).
+    var partial: f32[]
+    var runs: f32[]
+    var box: Box = Box()
+
+    static func make(width: usize, height: usize) -> Coverage!:
+        let values = try new f32[width * height] in memory.heap
+        errdefer free(values) in memory.heap
+        let partial = try new f32[width + 2] in memory.heap
+        errdefer free(partial) in memory.heap
+        let runs = try new f32[width + 2] in memory.heap
+        return Coverage(width = width, height = height, values = values, partial = partial, runs = runs)
+
+    mutating func release():
+        for buffer in [self.values, self.partial, self.runs]:
+            if buffer.length > 0:
+                free(buffer) in memory.heap
+        var empty: f32[]
+        self.values = empty
+        self.partial = empty
+        self.runs = empty
+        self.edges.release()
+        self.crossings.release()
+
+    ## Add the edge from `a` to `b` (device pixels).
+    mutating func edge(a: Point, b: Point):
+        if a.y == b.y or not math.is_finite(a.x + a.y + b.x + b.y):
+            return
+        self.box.add(a)
+        self.box.add(b)
+        var item = Edge(x0 = a.x, y0 = a.y, x1 = b.x, y1 = b.y, winding = 1)
+        if a.y > b.y:
+            item = Edge(x0 = b.x, y0 = b.y, x1 = a.x, y1 = a.y, winding = -1)
+        item.slope = (item.x1 - item.x0) / (item.y1 - item.y0)
+        self.edges.push(item) catch _:
+            recover ()
+
+    ## Add every run of `lines` as a closed outline.
+    mutating func outline(lines: const Polylines*):
+        for index in 0..<lines.runs.used:
+            let run = lines.runs.items[index]
+            if run.count < 2:
+                continue
+            for at in 0..<run.count:
+                let a = lines.points.items[run.start + at]
+                let b = lines.points.items[run.start + (at + 1) % run.count]
+                self.edge(a, b)
+
+    ## Add a polygon wound positively whichever way it was given, for stroke pieces
+    ## that must union under the nonzero rule.
+    mutating func polygon(points: const Point[]):
+        if points.length < 3:
+            return
+        var area = 0.0
+        for index in 0..<points.length:
+            let a = points[index]
+            let b = points[(index + 1) % points.length]
+            area += a.x * b.y - b.x * a.y
+        for index in 0..<points.length:
+            let a = points[index]
+            let b = points[(index + 1) % points.length]
+            if area < 0.0:
+                self.edge(b, a)
+            else:
+                self.edge(a, b)
+
+    ## Resolve the edges added since the last resolve into `values` by `evenodd` or
+    ## nonzero, without anti-aliasing when `aliased`, and drop them. Answers whether any
+    ## pixel was touched; the region is in `row0..<row1`, `col0..<col1`.
+    mutating func resolve(evenodd: bool, aliased: bool) -> bool:
+        let found = self.box.rect() else return false
+        self.box = Box()
+        defer self.edges.used = 0
+        let rows = (f64)self.height
+        let columns = (f64)self.width
+        self.row0 = (usize)math.clamp(math.floor(found.y), 0.0, rows)
+        self.row1 = (usize)math.clamp(math.ceil(found.y + found.h), 0.0, rows)
+        self.col0 = (usize)math.clamp(math.floor(found.x), 0.0, columns)
+        self.col1 = (usize)math.clamp(math.ceil(found.x + found.w) + 1.0, 0.0, columns)
+        if self.row1 <= self.row0 or self.col1 <= self.col0:
+            return false
+        sort_edges(self.edges.view())
+        let samples: usize = 1 if aliased else subsamples
+        let weight = 1.0 / (f64)samples
+        var next_edge: usize = 0
+        var active = List[usize]()
+        defer active.release()
+        for row in self.row0..<self.row1:
+            for column in self.col0..<self.col1 + 1:
+                self.partial[column] = 0.0
+                self.runs[column] = 0.0
+            for sub in 0..<samples:
+                let y = (f64)row + ((f64)sub + 0.5) * weight
+                # Edges start in order of their tops; drop the ones that ended above.
+                # Without anti-aliasing an edge covers the centres in (y0, y1], as rounding
+                # its ends half up does.
+                while next_edge < self.edges.used and (self.edges.items[next_edge].y0 < y or (not aliased and self.edges.items[next_edge].y0 == y)):
+                    active.push(next_edge) catch _:
+                        recover ()
+                    next_edge += 1
+                var kept: usize = 0
+                self.crossings.used = 0
+                for at in 0..<active.used:
+                    let edge = self.edges.items[active.items[at]]
+                    if edge.y1 < y or (edge.y1 == y and not aliased):
+                        continue
+                    active.items[kept] = active.items[at]
+                    kept += 1
+                    if edge.y0 < y or (edge.y0 == y and not aliased):
+                        self.crossings.push(Crossing(x = edge.x0 + (y - edge.y0) * edge.slope, winding = edge.winding)) catch _:
+                            recover ()
+                active.used = kept
+                sort_crossings(self.crossings.view())
+                var winding: i32 = 0
+                var span_start = 0.0
+                for crossing in self.crossings.view():
+                    let was_inside = winding_inside(winding, evenodd)
+                    winding += crossing.winding
+                    let now_inside = winding_inside(winding, evenodd)
+                    if now_inside and not was_inside:
+                        span_start = crossing.x
+                    elif was_inside and not now_inside:
+                        self.add_span(span_start, crossing.x, weight, aliased)
+            # Resolve the row: partial pixels plus the running sum of whole ones.
+            var run = 0.0
+            for column in self.col0..<self.col1:
+                run += (f64)self.runs[column]
+                let value = math.min(1.0, run + (f64)self.partial[column])
+                self.values[row * self.width + column] = (f32)(value if value > 1.0 / 65536.0 else 0.0)
+        return true
+
+    ## Add the span from `xa` to `xb` of one sub-scanline at `weight`.
+    mutating func add_span(xa: f64, xb: f64, weight: f64, aliased: bool):
+        let low = (f64)self.col0
+        let high = (f64)self.col1
+        if aliased:
+            # Pixels whose centres the span covers.
+            let first = math.clamp(math.floor(xa - 0.5) + 1.0, low, high)
+            let last = math.clamp(math.floor(xb - 0.5) + 1.0, low, high)
+            if last > first:
+                self.runs[(usize)first] += (f32)weight
+                self.runs[(usize)last] -= (f32)weight
+            return
+        let a = math.clamp(xa, low, high)
+        let b = math.clamp(xb, low, high)
+        if b <= a:
+            return
+        let ia = math.floor(a)
+        let ib = math.floor(b)
+        let left = (usize)ia
+        if ia == ib:
+            self.partial[left] += (f32)((b - a) * weight)
+            return
+        self.partial[left] += (f32)((ia + 1.0 - a) * weight)
+        # Whole pixels left + 1 ..< ib.
+        self.runs[left + 1] += (f32)weight
+        self.runs[(usize)ib] -= (f32)weight
+        if ib < high:
+            self.partial[(usize)ib] += (f32)((b - ib) * weight)
+
+## Whether a winding number is inside by the rule.
+func winding_inside(winding: i32, evenodd: bool) -> bool:
+    if evenodd:
+        return (winding & 1) != 0
+    return winding != 0
+
+## Sort edges by their tops.
+func sort_edges(edges: Edge[]):
+    if edges.length < 2:
+        return
+    # Shell sort with Ciura's gaps: fast on the few hundred edges a shape usually has.
+    let gaps: usize[8] = [701, 301, 132, 57, 23, 10, 4, 1]
+    for gap in gaps:
+        if gap >= edges.length:
+            continue
+        for index in gap..<edges.length:
+            let item = edges[index]
+            var at = index
+            while at >= gap and edges[at - gap].y0 > item.y0:
+                edges[at] = edges[at - gap]
+                at -= gap
+            edges[at] = item
+
+func sort_crossings(crossings: Crossing[]):
+    if crossings.length < 2:
+        return
+    for index in 1..<crossings.length:
+        let item = crossings[index]
+        var at = index
+        while at > 0 and crossings[at - 1].x > item.x:
+            crossings[at] = crossings[at - 1]
+            at -= 1
+        crossings[at] = item
