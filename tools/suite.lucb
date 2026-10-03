@@ -1,0 +1,73 @@
+## Render a list of SVG files at the resvg test suite's size, 300 pixels wide, for the
+## comparison in tools/suite.py. Each file `n` of the list (one path a line) becomes
+## `<outdir>/<n>.rgba`: its width and height as little-endian u32s, then straight-alpha
+## sRGB RGBA bytes. A file that fails to parse or draw writes nothing.
+##   suite <list.txt> <outdir>
+import c
+from luce_std import files, math
+import memory
+import strings
+import svg
+
+pub func main(arguments: str[]) -> i32!:
+    if arguments.length != 3:
+        print("usage: suite <list.txt> <outdir>")
+        return 2
+    let list_path = try strings.copy(arguments[1])
+    defer strings.release(list_path)
+    let list = try files.read((c.str)list_path)
+    defer free(list)
+    var index: usize = 0
+    var start: usize = 0
+    for position in 0..<list.length + 1:
+        if position < list.length and list[position] != '\n':
+            continue
+        let line = (str)list[start..<position]
+        start = position + 1
+        if line.length == 0:
+            continue
+        render_one(line, arguments[2], index) catch failure:
+            print(f"{index}: {failure.message}")
+            recover ()
+        index += 1
+    return 0
+
+## Draw `path` 300 pixels wide into `<outdir>/<index>.rgba`.
+func render_one(path: str, outdir: str, index: usize) -> !:
+    let input = try strings.copy(path)
+    defer strings.release(input)
+    let data = try files.read((c.str)input)
+    defer free(data)
+    let drawing = try svg.parse((str)data)
+    defer drawing.release()
+    let view_w = drawing.value().view_width()
+    let view_h = drawing.value().view_height()
+    let width: u32 = 300
+    let height = (u32)math.max(1.0, math.round(300.0 * view_h / view_w))
+    let pixels = try alloc f32[(usize)width * (usize)height * 4] in memory.heap
+    defer free(pixels) in memory.heap
+    try svg.rasterize_rgba(drawing.value(), width, height, pixels, svg.Color())
+    let output = try alloc u8[8 + pixels.length] in memory.heap
+    defer free(output) in memory.heap
+    put_u32(output, 0, width)
+    put_u32(output, 4, height)
+    for at in 0..<pixels.length:
+        var value = math.clamp((f64)pixels[at], 0.0, 1.0)
+        if at % 4 != 3:
+            value = encode(value)
+        output[8 + at] = (u8)(value * 255.0 + 0.5)
+    var name: u8[1024]
+    let target = try format(name, f"{outdir}/{index}.rgba")
+    try files.write((c.str)target, output)
+
+func put_u32(bytes: u8[], at: usize, value: u32):
+    bytes[at] = (u8)(value & 0xFF)
+    bytes[at + 1] = (u8)((value >> 8) & 0xFF)
+    bytes[at + 2] = (u8)((value >> 16) & 0xFF)
+    bytes[at + 3] = (u8)((value >> 24) & 0xFF)
+
+## Linear light to the sRGB encoding.
+func encode(value: f64) -> f64:
+    if value <= 0.0031308:
+        return value * 12.92
+    return 1.055 * math.pow(value, 1.0 / 2.4) - 0.055

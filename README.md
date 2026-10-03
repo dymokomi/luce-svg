@@ -103,3 +103,19 @@ sheet of the worst (`build/conformance/worst.png`). On 2026-09-22 all 157 icons
 were within 0.26 % of resvg's pixels (150 within 0.2 %); synthetic shapes match
 their analytic areas to 0.05 %. Needs `brew install resvg` and
 `python3 -m venv build/env && build/env/bin/pip install pillow numpy`.
+
+## resvg's test suite
+
+`tools/suite.py` measures the renderer against resvg's ~1700 feature tests
+(`crates/resvg/tests/tests` of https://github.com/linebender/resvg, cloned into
+`../.donors/resvg`; the suite is never committed here). `tools/suite.lucb` draws
+each test 300 pixels wide, as resvg drew its reference PNGs; a pixel differs when a
+premultiplied RGBA8 channel is off by more than 32, and a test passes when at most
+0.5 % of its pixels differ, which absorbs anti-aliasing differences but not a missing
+or misplaced feature. It prints a pass table per feature directory and category;
+`--save run.json` and `--compare run.json` track changes between runs,
+`--list-failing` names the failures, and `--only painting/fill` runs a subset.
+
+Baseline (2026-10-03, the `Drawing` renderer in linear light): 458 of 1725 —
+filters 75/398, masking 8/93, paint-servers 97/154, painting 116/306, shapes 90/133,
+structure 54/262, text 18/379.
