@@ -42,6 +42,8 @@ struct TextSpan:
     var word_spacing: f64 = 0.0
     var text_length: f64? = none
     var spacing_and_glyphs: bool = false
+    ## Drawn without anti-aliasing (the `<text>`'s text-rendering is optimizeSpeed).
+    var aliased: bool = false
     ## The baseline shift in pixels (up is positive) and how many sub- and
     ## superscripts stack on it, resolved against the face later.
     var shift: f64 = 0.0
@@ -121,6 +123,9 @@ extend Converter:
         content.scale = math.sqrt(sx * sy)
         var reader = ChunkReader()
         try self.read_chunks(node, state, content, &reader)
+        let aliased = strings.trim(self.find(node, Attr.text_rendering) else "") == "optimizeSpeed"
+        for index in 0..<content.spans.used:
+            content.spans.items[index].aliased = aliased
 
     ## Every character below `node`, in order, whether it is drawn or not, so a
     ## character's index means the same in the scalars and the positions.

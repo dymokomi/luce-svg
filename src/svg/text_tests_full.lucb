@@ -89,3 +89,13 @@ test "path lengths and positions along a path, as kurbo measures them":
     # Half way along lies on the diagonal.
     let middle = arc.at(arc.parameter(arc.length(1e-6) * 0.5, 1e-6))
     assert(math.abs(middle.x - middle.y) < 1e-3)
+
+test "a filter on text measures the text box, and tref needs an SVG element":
+    # Box font: ascent 800, descent -200 units at 10 px: the box spans y 2..12 for a
+    # baseline at 10, x 5..17 for two glyphs; the flood fills exactly that.
+    let pixels = try draw_text_test("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"30\" height=\"30\"><filter id=\"f\" x=\"0\" y=\"0\" width=\"1\" height=\"1\"><feFlood flood-color=\"blue\"/></filter><text x=\"5\" y=\"10\" font-size=\"10\" filter=\"url(#f)\">AB</text><x id=\"t\" xmlns=\"urn:x\">AB</x><text x=\"5\" y=\"25\" font-size=\"10\"><tref xlink:href=\"#t\"/></text></svg>", 30, 30)
+    defer free(pixels) in memory.heap
+    assert(rgba_at(pixels, 30, 6, 3)[2] == 255 and rgba_at(pixels, 30, 16, 11)[2] == 255)
+    assert(rgba_at(pixels, 30, 6, 1)[3] == 0 and rgba_at(pixels, 30, 18, 6)[3] == 0)
+    # The tref links to a foreign element: nothing is drawn.
+    assert(rgba_at(pixels, 30, 8, 22)[3] == 0)

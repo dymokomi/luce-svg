@@ -121,7 +121,8 @@ extend Converter:
             if self.picture.paths.items[index].verb_count() > 0:
                 let fill = span.fill
                 discard(try self.picture.append(parent, Item(kind = ItemKind.shape, path = index, fill = fill, stroke = span.stroke,
-                                                             stroke_first = span.stroke_first, visible = span.visible, paint_box = text_box)))
+                                                             stroke_first = span.stroke_first, visible = span.visible, paint_box = text_box,
+                                                             aliased = span.aliased)))
             try self.text_shape(&decorations.items[span_index * 3 + 2], span.line_through, &span, text_box, parent)
 
     ## Add a decoration's rectangles as a shape painted as it asks.
@@ -132,7 +133,7 @@ extend Converter:
         try self.picture.paths.push(*path)
         *path = Path()
         discard(try self.picture.append(parent, Item(kind = ItemKind.shape, path = index, fill = decoration.fill, stroke = decoration.stroke,
-                                                     visible = span.visible, paint_box = text_box)))
+                                                     visible = span.visible, paint_box = text_box, aliased = span.aliased)))
 
     ## Shape `chunk`'s characters into clusters, skipping any whose span has no face;
     ## `order` counts the drawn characters.
@@ -152,11 +153,12 @@ extend Converter:
             let glyph = shape_scalar(source, face, content.scalars.items[index], span.size)
             var cluster = Cluster(index = index, order = *order - 1, span = span_index, glyph = glyph, advance = glyph.advance, width = glyph.advance,
                                   ascent = glyph.ascent, descent = glyph.descent)
-            if clusters.used > 0 and span.kerning:
+            if clusters.used > 0:
                 let previous = &clusters.items[clusters.used - 1]
-                if previous.glyph.face == glyph.face:
+                # The pair kerns as the previous glyph's span shapes it, at that span's size.
+                if previous.glyph.face == glyph.face and content.spans.items[previous.span].kerning:
                     # A kerned glyph's shaped advance is its width, as a shaper reports it.
-                    let kern = source.glyph_kerning(glyph.face, previous.glyph.glyph, glyph.glyph) * glyph.scale
+                    let kern = source.glyph_kerning(glyph.face, previous.glyph.glyph, glyph.glyph) * previous.glyph.scale
                     previous.advance += kern
                     previous.width += kern
             try clusters.push(cluster)

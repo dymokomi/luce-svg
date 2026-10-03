@@ -492,6 +492,9 @@ extend Converter:
 
     ## The union of the children's bounding boxes, in the group's own space.
     func object_bounds(group: u32) -> Rect?:
+        # A text's group carries its text box (advances by face heights).
+        if let known = self.picture.items.items[group].box:
+            return known
         var box = Box()
         var child = self.picture.items.items[group].first
         while child != 0:

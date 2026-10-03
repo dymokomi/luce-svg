@@ -48,7 +48,12 @@ extend Builder:
                     let node = try self.attributes(child, parent, tag, false)
                     let inner = own_space(self.tree, node, preserve)
                     if is_tref:
-                        if let target = self.xml_link(child):
+                        # It must link to an SVG element.
+                        var linked_to = self.xml_link(child)
+                        if let found_target = linked_to:
+                            if svg_tag(&self.tree.xml, found_target) == none:
+                                linked_to = none
+                        if let target = linked_to:
                             var gathered = TextBuilder()
                             defer gathered.release()
                             try gather_text(&self.tree.xml, target, &gathered)
@@ -99,6 +104,13 @@ extend Builder:
         let family = strings.trim((str)data[pos..])
         if family.length == 0:
             return
+        # Reset what the shorthand does not name, then set what it does.
+        let resets: Attr[6] = [Attr.line_height, Attr.font_variant_caps, Attr.font_variant_ligatures, Attr.font_variant_numeric,
+                               Attr.font_variant_east_asian, Attr.font_variant_position]
+        for name in resets:
+            try self.insert(name, "normal", important, parent, tag, start)
+        try self.insert(Attr.font_size_adjust, "none", important, parent, tag, start)
+        try self.insert(Attr.font_kerning, "auto", important, parent, tag, start)
         try self.insert(Attr.font_style, style, important, parent, tag, start)
         try self.insert(Attr.font_variant, variant, important, parent, tag, start)
         try self.insert(Attr.font_weight, weight, important, parent, tag, start)
