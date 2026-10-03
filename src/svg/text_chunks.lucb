@@ -1,0 +1,163 @@
+#==============================================================================================
+#
+#   svg/text_chunks - Reading `<text>` into chunks and spans
+#
+#   DESCRIPTION:
+#       A `<text>` element's characters (white space already handled in the tree) split
+#       into chunks — a new one wherever a character has its own x or y, and at each
+#       `textPath` — and each chunk into spans of one style: the element that holds the
+#       characters gives their font, paints, spacing, baselines, decorations and
+#       textLength. x, y, dx, dy and rotate lists apply to characters by their index in
+#       the whole text, an inner element's values replacing an outer one's, and a
+#       rotate list's last value carries on. As resvg's usvg reads them.
+#
+#==============================================================================================
+
+## Where a character sits, where it says: its own x, y and shifts.
+struct CharPosition:
+    var x: f64? = none
+    var y: f64? = none
+    var dx: f64 = 0.0
+    var dy: f64 = 0.0
+    var rotate: f64 = 0.0
+
+## A decoration's paints, from the element that asked for it.
+struct Decoration:
+    var on: bool = false
+    var fill: FillPaint? = none
+    var stroke: StrokePaint? = none
+
+## A run of characters `start..<end` of a chunk in one style.
+struct TextSpan:
+    var start: usize = 0
+    var end: usize = 0
+    var fill: FillPaint? = none
+    var stroke: StrokePaint? = none
+    var stroke_first: bool = false
+    var visible: bool = true
+    var face: u32? = none
+    var size: f64 = 12.0
+    var kerning: bool = true
+    var letter_spacing: f64 = 0.0
+    var word_spacing: f64 = 0.0
+    var text_length: f64? = none
+    var spacing_and_glyphs: bool = false
+    ## The baseline shift in pixels (up is positive) and how many sub- and
+    ## superscripts stack on it, resolved against the face later.
+    var shift: f64 = 0.0
+    var subscripts: i64 = 0
+    var dominant: u8 = 0
+    var alignment: u8 = 0
+    var underline: Decoration = Decoration()
+    var overline: Decoration = Decoration()
+    var line_through: Decoration = Decoration()
+
+## A chunk: characters `char_start..<char_end` of the text, spans `span_start..<span_end`,
+## placed at (x, y) when they are set, or along a text path.
+struct TextChunk:
+    var x: f64? = none
+    var y: f64? = none
+    var anchor: u8 = 0
+    var char_start: usize = 0
+    var char_end: usize = 0
+    var span_start: usize = 0
+    var span_end: usize = 0
+    ## A text path: its index + 1 in the layout's paths, and the start offset along it.
+    var path: usize = 0
+    var start_offset: f64 = 0.0
+
+## Everything one `<text>` reads into.
+struct TextContent:
+    var scalars: List[u32] = List[u32]()
+    var positions: List[CharPosition] = List[CharPosition]()
+    var chunks: List[TextChunk] = List[TextChunk]()
+    var spans: List[TextSpan] = List[TextSpan]()
+    var paths: List[Path] = List[Path]()
+    var vertical: bool = false
+
+    mutating func release():
+        for index in 0..<self.paths.used:
+            self.paths.items[index].release()
+        self.scalars.release()
+        self.positions.release()
+        self.chunks.release()
+        self.spans.release()
+        self.paths.release()
+
+extend Converter:
+    ## How many characters the text nodes below `node` hold.
+    func count_chars(node: u32) -> usize:
+        var count: usize = 0
+        var child = self.tree.first_child(node)
+        while child != 0:
+            let item = self.tree.nodes.items[child]
+            if item.kind == Kind.text:
+                for _ in item.text:
+                    count += 1
+            elif item.kind == Kind.element:
+                count += self.count_chars(child)
+            child = item.next
+        return count
+
+    ## Read `<text>` element `node` into `content`.
+    mutating func read_text(node: u32, state: const State*, content: TextContent*) -> !:
+        let total = self.count_chars(node)
+        for _ in 0..<total:
+            try content.positions.push(CharPosition())
+        var offset: usize = 0
+        try self.read_positions(node, state, content, &offset)
+        let mode = strings.trim(self.find(node, Attr.writing_mode) else "lr-tb")
+        content.vertical = mode == "tb" or mode == "tb-rl" or mode == "vertical-rl" or mode == "vertical-lr"
+        var reader = ChunkReader()
+        try self.read_chunks(node, state, content, &reader)
+
+    ## Apply the x, y, dx, dy and rotate lists of `node` and the elements below it.
+    mutating func read_positions(node: u32, state: const State*, content: TextContent*, offset: usize*) -> !:
+        let tag = self.tree.tag(node)
+        if tag == Tag.text or tag == Tag.tspan:
+            let count = self.count_chars(node)
+            let names: Attr[4] = [Attr.x, Attr.y, Attr.dx, Attr.dy]
+            for which in 0..<(usize)4:
+                let text = self.attribute(node, names[which]) else continue
+                var scanner = Scanner(data = text.bytes)
+                var at: usize = 0
+                while at < count:
+                    scanner.skip_spaces()
+                    if scanner.at_end():
+                        break
+                    let length = scanner.length() else break
+                    scanner.skip_separator()
+                    let value = self.resolve_length(node, names[which], length, false, state)
+                    let index = *offset + at
+                    match which:
+                        0:
+                            content.positions.items[index].x = value
+                        1:
+                            content.positions.items[index].y = value
+                        2:
+                            content.positions.items[index].dx = value
+                        _:
+                            content.positions.items[index].dy = value
+                    at += 1
+        if let text = self.attribute(node, Attr.rotate):
+            let count = self.count_chars(node)
+            var scanner = Scanner(data = text.bytes)
+            var last = 0.0
+            var listed = true
+            for at in 0..<count:
+                if listed:
+                    scanner.skip_spaces()
+                    if let value = scanner.list_number():
+                        last = value
+                    else:
+                        listed = false
+                content.positions.items[*offset + at].rotate = last
+        var child = self.tree.first_child(node)
+        while child != 0:
+            let item = self.tree.nodes.items[child]
+            if item.kind == Kind.text:
+                for _ in item.text:
+                    *offset += 1
+            elif item.kind == Kind.element:
+                try self.read_positions(child, state, content, offset)
+            child = item.next

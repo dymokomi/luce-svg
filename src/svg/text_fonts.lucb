@@ -1,0 +1,86 @@
+#==============================================================================================
+#
+#   svg/text_fonts - Where SVG text gets its glyphs
+#
+#   DESCRIPTION:
+#       luce-svg reads no font files: a caller that wants `<text>` drawn by the full
+#       renderer passes a GlyphSource in Options, and the text layout (text_layout.lucb)
+#       asks it for faces, glyphs, advances, kerning and outlines. A source might wrap
+#       luce-fonts' OpenType faces, a font set loaded from files, or a test's synthetic
+#       glyphs. Without one, text is laid out but draws nothing. Glyphs are mapped one
+#       scalar at a time with kerning between pairs (no contextual shaping yet); a scalar
+#       the face lacks is looked up in the source's fallback face.
+#
+#==============================================================================================
+
+## A face's vertical metrics, in its font units (y up, the baseline at 0).
+pub struct FaceMetrics:
+    pub var units_per_em: f64 = 1000.0
+    pub var ascent: f64 = 800.0
+    pub var descent: f64 = -200.0
+    pub var x_height: f64 = 500.0
+    pub var underline_position: f64 = -100.0
+    pub var underline_thickness: f64 = 50.0
+    pub var strikeout_position: f64 = 250.0
+    pub var subscript_offset: f64 = 140.0
+    pub var superscript_offset: f64 = 480.0
+
+## What a font style asks for.
+pub struct FaceQuery:
+    ## The CSS font-family list as written (names unquoted by the source, generic
+    ## families such as serif and sans-serif included).
+    pub var families: str = ""
+    ## 100..900.
+    pub var weight: u32 = 400
+    ## 0 normal, 1 italic, 2 oblique.
+    pub var style: u8 = 0
+    ## Percent of normal width (50..200).
+    pub var stretch: f64 = 100.0
+
+## A source of faces and glyphs for SVG text. Faces and glyphs are numbered by the
+## source; outlines are in font units with y up.
+pub interface GlyphSource:
+    ## The face that best matches `query`, or none.
+    mutating func select_face(query: FaceQuery) -> u32?
+
+    ## A face with a glyph for `scalar`, to use where `face` has none; none to give up.
+    mutating func fallback_face(face: u32, scalar: u32) -> u32?
+
+    ## The face's metrics.
+    mutating func face_metrics(face: u32) -> FaceMetrics
+
+    ## The glyph `face` maps `scalar` to; 0 when it has none.
+    mutating func glyph_index(face: u32, scalar: u32) -> u32
+
+    ## How far a glyph advances the pen, in font units.
+    mutating func glyph_advance(face: u32, glyph: u32) -> f64
+
+    ## The kerning adjustment between two glyphs, in font units.
+    mutating func glyph_kerning(face: u32, left: u32, right: u32) -> f64
+
+    ## Append the glyph's outline to `path`; false when it has none.
+    mutating func glyph_outline(face: u32, glyph: u32, path: Path*) -> bool!
+
+## One shaped scalar: its face, glyph and advance in pixels.
+struct ShapedGlyph:
+    var face: u32 = 0
+    var glyph: u32 = 0
+    var advance: f64 = 0.0
+    var ascent: f64 = 0.0
+    var descent: f64 = 0.0
+    var scale: f64 = 0.0
+
+## Map `scalar` through `face` (or its fallback) at `size` pixels to the em.
+func shape_scalar(source: GlyphSource, face: u32, scalar: u32, size: f64) -> ShapedGlyph:
+    var used = face
+    var glyph = source.glyph_index(face, scalar)
+    if glyph == 0:
+        if let other = source.fallback_face(face, scalar):
+            let found = source.glyph_index(other, scalar)
+            if found != 0:
+                used = other
+                glyph = found
+    let metrics = source.face_metrics(used)
+    let scale = size / math.max(metrics.units_per_em, 1.0)
+    return ShapedGlyph(face = used, glyph = glyph, advance = source.glyph_advance(used, glyph) * scale, ascent = metrics.ascent * scale,
+                       descent = metrics.descent * scale, scale = scale)

@@ -1,0 +1,70 @@
+#==============================================================================================
+#
+#   svg/text_tests_full - Tests of SVG text layout with a synthetic font
+#
+#==============================================================================================
+
+## A font of boxes: every scalar but a space is a 600 by 700 unit box on the baseline,
+## advancing 600 units of a 1000-unit em; "AV" kerns by -100.
+struct BoxFont: GlyphSource:
+    var selected: u32 = 0
+
+    mutating func select_face(query: FaceQuery) -> u32?:
+        self.selected += 1
+        return 1
+
+    mutating func fallback_face(face: u32, scalar: u32) -> u32?:
+        return none
+
+    mutating func face_metrics(face: u32) -> FaceMetrics:
+        return FaceMetrics()
+
+    mutating func glyph_index(face: u32, scalar: u32) -> u32:
+        return scalar
+
+    mutating func glyph_advance(face: u32, glyph: u32) -> f64:
+        return 600.0
+
+    mutating func glyph_kerning(face: u32, left: u32, right: u32) -> f64:
+        return -100.0 if left == 65 and right == 86 else 0.0
+
+    mutating func glyph_outline(face: u32, glyph: u32, path: Path*) -> bool!:
+        if glyph == 32:
+            return false
+        try path.rect(0.0, 0.0, 600.0, 700.0)
+        return true
+
+## Draw `source` with the box font.
+func draw_text_test(source: str, width: u32, height: u32) -> u8[]!:
+    var font = BoxFont()
+    let picture = try load(source, Options(glyphs = &font))
+    defer picture.release()
+    let pixels = try alloc u8[(usize)width * (usize)height * 4] in memory.heap
+    errdefer free(pixels) in memory.heap
+    try render(picture.value(), fit_transform(picture.value(), width, height), width, height, pixels)
+    return pixels
+
+test "text sets glyphs on the baseline, anchored, spaced and shifted":
+    # 10 px to the em: boxes 6 wide and 7 tall above the baseline at y 20.
+    let pixels = try draw_text_test("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"60\" height=\"30\"><text x=\"10\" y=\"20\" font-size=\"10\">AB<tspan dx=\"5\" fill=\"blue\">C</tspan></text></svg>", 60, 30)
+    defer free(pixels) in memory.heap
+    assert(rgba_at(pixels, 60, 12, 16)[3] == 255 and rgba_at(pixels, 60, 12, 11)[3] == 0 and rgba_at(pixels, 60, 12, 21)[3] == 0)
+    # B at 16..22, then C shifted 5 to 27..33 in blue.
+    assert(rgba_at(pixels, 60, 18, 16)[3] == 255 and rgba_at(pixels, 60, 24, 16)[3] == 0)
+    let c = rgba_at(pixels, 60, 30, 16)
+    assert(c[2] == 255 and c[3] == 255)
+
+test "text-anchor, letter-spacing, kerning and decorations":
+    let pixels = try draw_text_test("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"60\" height=\"40\"><text x=\"30\" y=\"10\" font-size=\"10\" text-anchor=\"middle\">AA</text><text x=\"0\" y=\"25\" font-size=\"10\">AV</text><text x=\"0\" y=\"38\" font-size=\"10\" text-decoration=\"underline\">B</text></svg>", 60, 40)
+    defer free(pixels) in memory.heap
+    # Two boxes 12 wide centred on 30: 24..36.
+    assert(rgba_at(pixels, 60, 25, 6)[3] == 255 and rgba_at(pixels, 60, 35, 6)[3] == 255 and rgba_at(pixels, 60, 37, 6)[3] == 0)
+    # V kerned 1 px left: 5..11 rather than 6..12.
+    assert(rgba_at(pixels, 60, 11, 22)[3] == 0)
+    # The underline sits 1 px under the baseline (position -100 units).
+    assert(rgba_at(pixels, 60, 3, 39)[3] > 0 or rgba_at(pixels, 60, 3, 38)[3] > 0)
+
+test "text follows a text path":
+    let pixels = try draw_text_test("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"40\"><path id=\"p\" d=\"M5 30 H35\"/><text font-size=\"10\"><textPath href=\"#p\" startOffset=\"10\">A</textPath></text></svg>", 40, 40)
+    defer free(pixels) in memory.heap
+    assert(rgba_at(pixels, 40, 17, 27)[3] == 255 and rgba_at(pixels, 40, 13, 27)[3] == 0)

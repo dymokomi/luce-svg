@@ -180,7 +180,7 @@ func invert(m: Matrix) -> Matrix?:
 ## `source` placed on the element whose contours start at `first` and were drawn through
 ## `transform`: a gradient paint gets the matrix from viewBox coordinates into gradient
 ## space. A bounding-box gradient on a shape with no width or height paints nothing.
-func placed(drawing: const Drawing*, source: Paint, transform: Matrix, first: usize) -> Paint:
+func gradient_placement(drawing: const Drawing*, source: Paint, transform: Matrix, first: usize) -> Paint:
     if source.gradient == 0:
         return source
     let gradient = drawing.gradients[source.gradient - 1]

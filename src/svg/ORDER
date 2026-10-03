@@ -33,6 +33,11 @@ filter_scene.lucb
 convert_filter.lucb
 convert_primitive.lucb
 convert_fe.lucb
+text_fonts.lucb
+text_chunks.lucb
+text_spans.lucb
+text_layout.lucb
+text_path_walk.lucb
 convert_more.lucb
 canvas.lucb
 shade.lucb
@@ -47,3 +52,4 @@ tests.lucb
 raster_tests.lucb
 text_tests.lucb
 picture_tests.lucb
+text_tests_full.lucb

@@ -1,0 +1,234 @@
+#==============================================================================================
+#
+#   svg/text_spans - Text chunks, spans and their styles
+#
+#   DESCRIPTION:
+#       Walks a `<text>`'s content in order: a `textPath` (only as a direct child, and
+#       only when its `href` names a shape) starts chunks that follow that path, each
+#       text node adds its characters to the current chunk in a span of its parent's
+#       style, and a character with its own x or y starts a new chunk. A span's style is
+#       resolved once: font face (through the GlyphSource), size, paints, spacing,
+#       baseline shift, decorations and textLength.
+#
+#==============================================================================================
+
+## The walk's state.
+struct ChunkReader:
+    var chars: usize = 0
+    var split: bool = false
+    var path: usize = 0
+    var start_offset: f64 = 0.0
+
+extend Converter:
+    mutating func read_chunks(parent: u32, state: const State*, content: TextContent*, reader: ChunkReader*) -> !:
+        var child = self.tree.first_child(parent)
+        while child != 0:
+            let item = self.tree.nodes.items[child]
+            let current = child
+            child = item.next
+            if item.kind == Kind.element:
+                let is_path = self.tree.tag(current) == Tag.text_path
+                if is_path:
+                    if self.tree.tag(parent) != Tag.text or not try self.text_path(current, state, content, reader):
+                        reader.chars += self.count_chars(current)
+                        continue
+                    reader.split = true
+                try self.read_chunks(current, state, content, reader)
+                reader.path = 0
+                if is_path:
+                    reader.split = true
+                continue
+            if item.kind != Kind.text:
+                continue
+            var count: usize = 0
+            for _ in item.text:
+                count += 1
+            if not self.visible_element(parent):
+                reader.chars += count
+                continue
+            let size = self.font_size(parent)
+            if not (size > 0.0):
+                reader.chars += count
+                continue
+            let span = try self.text_span(parent, size, state)
+            let anchor_text = strings.trim(self.find(parent, Attr.text_anchor) else "start")
+            let anchor: u8 = 1 if anchor_text == "middle" else (2 if anchor_text == "end" else 0)
+            var new_span = true
+            for character in item.text:
+                let index = reader.chars
+                let position = content.positions.items[index]
+                try content.scalars.push((u32)character)
+                let new_chunk = position.x != none or position.y != none or reader.split or content.chunks.used == 0
+                reader.split = false
+                if new_chunk:
+                    var first = span
+                    first.start = index
+                    first.end = index + 1
+                    let span_index = content.spans.used
+                    try content.spans.push(first)
+                    try content.chunks.push(TextChunk(x = position.x, y = position.y, anchor = anchor, char_start = index, char_end = index + 1,
+                                                      span_start = span_index, span_end = span_index + 1, path = reader.path,
+                                                      start_offset = reader.start_offset))
+                elif new_span:
+                    var next = span
+                    next.start = index
+                    next.end = index + 1
+                    try content.spans.push(next)
+                    content.chunks.items[content.chunks.used - 1].char_end = index + 1
+                    content.chunks.items[content.chunks.used - 1].span_end = content.spans.used
+                else:
+                    content.chunks.items[content.chunks.used - 1].char_end = index + 1
+                    content.spans.items[content.spans.used - 1].end = index + 1
+                new_span = false
+                reader.chars += 1
+
+    ## Start text path `node`: its shape's path (through the shape's transform) becomes the
+    ## layout's; false when it names no shape.
+    mutating func text_path(node: u32, state: const State*, content: TextContent*, reader: ChunkReader*) -> bool!:
+        let link = self.tree.linked(node, Attr.href) else return false
+        let tag = self.tree.tag(link)
+        if not is_shape_tag(tag):
+            return false
+        var path = (try self.shape_path(link, tag, state)) else return false
+        defer path.release()
+        let transform = self.transform_of(link, Attr.transform, state)
+        var placed = try path.transformed(transform)
+        errdefer placed.release()
+        var offset = 0.0
+        if let text = self.attribute(node, Attr.start_offset):
+            if let length = parse_length(text):
+                if length.unit == Unit.percent:
+                    offset = path_length(&placed) * length.number / 100.0
+                else:
+                    offset = self.resolve_length(node, Attr.start_offset, length, false, state)
+        try content.paths.push(placed)
+        reader.path = content.paths.used
+        reader.start_offset = offset
+        return true
+
+    ## The style of characters held by `node`, `size` pixels to the em.
+    mutating func text_span(node: u32, size: f64, state: const State*) -> TextSpan!:
+        var span = TextSpan(size = size)
+        span.fill = try self.fill_of(node, true, state)
+        span.stroke = try self.stroke_of(node, true, state)
+        let order = paint_order(self.find(node, Attr.paint_order) else "normal")
+        span.stroke_first = order[0] == 1 or (order[0] == 2 and order[1] == 1)
+        span.visible = (self.find(node, Attr.visibility) else "visible") == "visible"
+        if let source = self.options.glyphs:
+            var fonts = source
+            span.face = fonts.select_face(self.face_query(node))
+        span.kerning = not (self.found_length(node, Attr.kerning, state, -1.0) == 0.0 or strings.trim(self.find(node, Attr.font_kerning) else "") == "none")
+        span.letter_spacing = self.found_length(node, Attr.letter_spacing, state, 0.0)
+        span.word_spacing = self.found_length(node, Attr.word_spacing, state, 0.0)
+        if let text = self.attribute(node, Attr.text_length):
+            if let length = parse_length(text):
+                let value = self.resolve_length(node, Attr.text_length, length, false, state)
+                if value >= 0.0:
+                    span.text_length = value
+        span.spacing_and_glyphs = strings.trim(self.find(node, Attr.length_adjust) else "") == "spacingAndGlyphs"
+        span.dominant = baseline_code(self.find(node, Attr.dominant_baseline) else "auto")
+        span.alignment = baseline_code(self.attribute(node, Attr.alignment_baseline) else "auto")
+        # Baseline shifts add up from the span's element out to the `<text>`.
+        var at = node
+        while at != 0 and self.tree.tag(at) != Tag.text:
+            if let text = self.attribute(at, Attr.baseline_shift):
+                let value = strings.trim(text)
+                if value == "sub":
+                    span.subscripts += 1
+                elif value == "super":
+                    span.subscripts -= 1
+                elif let length = parse_length(value):
+                    if length.unit == Unit.percent:
+                        span.shift += self.font_size(at) * length.number / 100.0
+                    else:
+                        span.shift += self.resolve_length(at, Attr.baseline_shift, length, true, state)
+            at = self.tree.nodes.items[at].parent
+        span.underline = try self.decoration(node, "underline", state)
+        span.overline = try self.decoration(node, "overline", state)
+        span.line_through = try self.decoration(node, "line-through", state)
+        return span
+
+    ## The decoration `kind` of characters held by `node`: painted as the nearest
+    ## element (from `node` out) that asks for it, or the `<text>`, paints.
+    mutating func decoration(node: u32, kind: str, state: const State*) -> Decoration!:
+        var at = node
+        var asked = false
+        while at != 0:
+            if decorates(self.attribute(at, Attr.text_decoration) else "", kind):
+                asked = true
+                break
+            at = self.tree.nodes.items[at].parent
+        if not asked:
+            return Decoration()
+        var painter = node
+        while painter != 0:
+            if decorates(self.attribute(painter, Attr.text_decoration) else "", kind) or self.tree.tag(painter) == Tag.text:
+                break
+            painter = self.tree.nodes.items[painter].parent
+        return Decoration(on = true, fill = try self.fill_of(painter, true, state), stroke = try self.stroke_of(painter, true, state))
+
+    ## The face query for characters held by `node`.
+    func face_query(node: u32) -> FaceQuery:
+        var query = FaceQuery(families = self.find(node, Attr.font_family) else "")
+        let style = strings.trim(self.find(node, Attr.font_style) else "normal")
+        query.style = 1 if style == "italic" else (2 if style == "oblique" else 0)
+        query.stretch = stretch_percent(strings.trim(self.find(node, Attr.font_stretch) else "normal"))
+        query.weight = self.font_weight(node)
+        return query
+
+    ## font-weight, resolved from the root down as usvg resolves it.
+    func font_weight(node: u32) -> u32:
+        let parent = self.tree.nodes.items[node].parent
+        let inherited = 400 if parent == 0 else self.font_weight(parent)
+        let text = strings.trim(self.attribute(node, Attr.font_weight) else return inherited)
+        if text == "normal":
+            return 400
+        if text == "bold":
+            return 700
+        if text == "bolder":
+            return (u32)math.clamp((f64)inherited + (300.0 if inherited == 400 else 100.0), 100.0, 900.0)
+        if text == "lighter":
+            return (u32)math.clamp((f64)inherited - (200.0 if inherited == 400 else 100.0), 100.0, 900.0)
+        let numbers: str[9] = ["100", "200", "300", "400", "500", "600", "700", "800", "900"]
+        for at in 0..<numbers.length:
+            if text == numbers[at]:
+                return (u32)((at + 1) * 100)
+        return inherited
+
+## Whether a text-decoration value lists `kind`.
+func decorates(value: str, kind: str) -> bool:
+    var rest = value
+    while rest.length > 0:
+        var piece = rest
+        rest = ""
+        if let space = strings.find(piece, " "):
+            rest = (str)piece.bytes[space + 1..]
+            piece = (str)piece.bytes[..<space]
+        if strings.trim(piece) == kind:
+            return true
+    return false
+
+## A baseline keyword as a code: 0 auto, 1 baseline, 2 before-edge, 3 middle, 4 central,
+## 5 after-edge, 6 ideographic, 7 alphabetic, 8 hanging, 9 mathematical.
+func baseline_code(text: str) -> u8:
+    let value = strings.trim(text)
+    if value == "baseline": return 1
+    if value == "before-edge" or value == "text-before-edge": return 2
+    if value == "middle": return 3
+    if value == "central": return 4
+    if value == "after-edge" or value == "text-after-edge": return 5
+    if value == "ideographic": return 6
+    if value == "alphabetic": return 7
+    if value == "hanging": return 8
+    if value == "mathematical": return 9
+    return 0
+
+## A font-stretch keyword as a percentage.
+func stretch_percent(text: str) -> f64:
+    let names: str[10] = ["ultra-condensed", "extra-condensed", "condensed", "narrower", "semi-condensed", "semi-expanded", "expanded",
+                          "wider", "extra-expanded", "ultra-expanded"]
+    let values: f64[10] = [50.0, 62.5, 75.0, 75.0, 87.5, 112.5, 125.0, 125.0, 150.0, 200.0]
+    for at in 0..<names.length:
+        if text == names[at]:
+            return values[at]
+    return 100.0

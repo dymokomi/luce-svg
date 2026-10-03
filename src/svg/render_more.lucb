@@ -42,7 +42,7 @@ extend Renderer:
         var content = Matrix()
         let base = self.context_transform if brush.context else transform
         if pattern.bbox_units or pattern.content_bbox_units:
-            let box = (self.context_box if brush.context else self.picture.paths.items[item.path].bounds()) else return none
+            let box = (self.context_box if brush.context else self.item_box(item)) else return none
             if not (box.w > 0.0) or not (box.h > 0.0):
                 return none
             if pattern.bbox_units:

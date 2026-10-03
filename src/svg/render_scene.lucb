@@ -134,7 +134,7 @@ struct Renderer:
                     return none
                 var space = self.context_transform if brush.context else transform
                 if gradient.bbox_units:
-                    let box = (self.context_box if brush.context else self.picture.paths.items[item.path].bounds()) else return none
+                    let box = (self.context_box if brush.context else self.item_box(item)) else return none
                     if not (box.w > 0.0) or not (box.h > 0.0):
                         return none
                     space = multiply(space, bbox_matrix(box))
@@ -144,6 +144,12 @@ struct Renderer:
                 return Shader(kind = brush.kind, opacity = brush.opacity, linear = self.linear, gradient = gradient, stops = stops, inverse = inverse)
             .pattern:
                 return try self.pattern_shader(brush, item, transform)
+
+    ## The box a shape's bounding-box paint servers measure.
+    func item_box(item: const Item*) -> Rect?:
+        if let box = item.paint_box:
+            return box
+        return self.picture.paths.items[item.path].bounds()
 
     # mark: Clip paths and masks ================================================================
 

@@ -27,6 +27,8 @@ pub struct Options:
     pub var languages: str = "en"
     ## The directory relative image references resolve against; "" loads no files.
     pub var resources: str = ""
+    ## Where `<text>` gets its glyphs; without a source text is not drawn.
+    pub var glyphs: GlyphSource? = none
 
 ## What the conversion of one element knows about where it stands.
 struct State:

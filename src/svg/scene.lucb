@@ -160,6 +160,9 @@ struct Item:
     var context_box: Rect? = none
     ## A group's bounding box when it is not its children's (a sliced image's box).
     var box: Rect? = none
+    ## The box paint servers in bounding-box units measure, when it is not the shape's
+    ## own (text spans measure their whole text).
+    var paint_box: Rect? = none
     ## A shape's path (an index into the picture's paths) and paints.
     var path: usize = 0
     var fill: FillPaint? = none

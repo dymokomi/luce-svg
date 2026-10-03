@@ -177,7 +177,7 @@ func accumulate_polygon(acc: f32[], width: usize, height: usize, polygon: const 
 
 ## Resolve the accumulator into `coverage` at `opacity`, taking the higher value
 ## where shapes overlap, then clear it for the next shape.
-func resolve(acc: f32[], width: usize, height: usize, opacity: f64, coverage: u8[]):
+func resolve_coverage(acc: f32[], width: usize, height: usize, opacity: f64, coverage: u8[]):
     let stride = width + 1
     for row in 0..<height:
         var sum: f32 = 0.0
@@ -229,7 +229,7 @@ pub func rasterize(drawing: const Drawing*, width: u32, height: u32, coverage: u
             continue
         if contour.fill.painted and contour.length >= 3:
             trace_fill(acc, w, h, drawing, contour, fit)
-            resolve(acc, w, h, contour.fill_opacity, coverage)
+            resolve_coverage(acc, w, h, contour.fill_opacity, coverage)
         if contour.stroke.painted:
             try trace_stroke(acc, w, h, drawing, contour, fit)
-            resolve(acc, w, h, contour.stroke_opacity, coverage)
+            resolve_coverage(acc, w, h, contour.stroke_opacity, coverage)

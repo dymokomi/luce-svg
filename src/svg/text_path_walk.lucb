@@ -1,0 +1,154 @@
+#==============================================================================================
+#
+#   svg/text_path_walk - Text along a path
+#
+#   DESCRIPTION:
+#       A text path's glyphs sit centred on points along the path's length: each glyph
+#       at the start offset (plus the chunk's x and its anchor shift) plus the advances
+#       and dx before it, turned with the path's tangent there, shifted across it by the
+#       running dy and its baseline. A glyph past either end of the path is not drawn.
+#       Lengths come from each segment's arc length, measured on a table of samples.
+#
+#==============================================================================================
+
+## Samples a segment's arc length is measured on.
+let arc_samples: usize = 64
+
+## A path segment as a cubic (lines and closes as straight cubics).
+struct Bezier:
+    var p0: Point = Point()
+    var p1: Point = Point()
+    var p2: Point = Point()
+    var p3: Point = Point()
+
+    func at(t: f64) -> Point:
+        return cubic_point(self.p0, self.p1, self.p2, self.p3, t)
+
+    ## The derivative at `t`.
+    func tangent(t: f64) -> Point:
+        let u = 1.0 - t
+        let ax = 3.0 * u * u * (self.p1.x - self.p0.x) + 6.0 * u * t * (self.p2.x - self.p1.x) + 3.0 * t * t * (self.p3.x - self.p2.x)
+        let ay = 3.0 * u * u * (self.p1.y - self.p0.y) + 6.0 * u * t * (self.p2.y - self.p1.y) + 3.0 * t * t * (self.p3.y - self.p2.y)
+        return Point(ax, ay)
+
+    func length() -> f64:
+        var total = 0.0
+        var previous = self.p0
+        for step in 1..<arc_samples + 1:
+            let p = self.at((f64)step / (f64)arc_samples)
+            total += math.hypot(p.x - previous.x, p.y - previous.y)
+            previous = p
+        return total
+
+    ## The parameter `distance` along the curve falls at.
+    func parameter(distance: f64) -> f64:
+        var total = 0.0
+        var previous = self.p0
+        for step in 1..<arc_samples + 1:
+            let t = (f64)step / (f64)arc_samples
+            let p = self.at(t)
+            let piece = math.hypot(p.x - previous.x, p.y - previous.y)
+            if total + piece >= distance and piece > 0.0:
+                return t - (1.0 - (distance - total) / piece) / (f64)arc_samples
+            total += piece
+            previous = p
+        return 1.0
+
+func straight(a: Point, b: Point) -> Bezier:
+    return Bezier(p0 = a, p1 = Point(a.x + (b.x - a.x) * 0.33, a.y + (b.y - a.y) * 0.33), p2 = Point(a.x + (b.x - a.x) * 0.66, a.y + (b.y - a.y) * 0.66), p3 = b)
+
+## The segments of `path` as cubics, into `out`.
+func path_beziers(path: const Path*, out: List[Bezier]*) -> !:
+    var at: usize = 0
+    var start = Point()
+    var current = Point()
+    for verb in path.verbs.view():
+        match verb:
+            .move:
+                start = path.points.items[at]
+                current = start
+                at += 1
+            .line:
+                try out.push(straight(current, path.points.items[at]))
+                current = path.points.items[at]
+                at += 1
+            .cubic:
+                try out.push(Bezier(p0 = current, p1 = path.points.items[at], p2 = path.points.items[at + 1], p3 = path.points.items[at + 2]))
+                current = path.points.items[at + 2]
+                at += 3
+            .close:
+                try out.push(straight(current, start))
+                current = start
+
+## The arc length of `path`.
+func path_length(path: const Path*) -> f64:
+    var beziers = List[Bezier]()
+    defer beziers.release()
+    path_beziers(path, &beziers) catch _:
+        return 0.0
+    var total = 0.0
+    for b in beziers.view():
+        total += b.length()
+    return total
+
+## Place `clusters` along `path`; answer where the pen ends.
+func place_on_path(content: const TextContent*, chunk: const TextChunk*, path: const Path*, clusters: Cluster[], fonts: GlyphSource) -> Point:
+    var source = fonts
+    var beziers = List[Bezier]()
+    defer beziers.release()
+    path_beziers(path, &beziers) catch _:
+        return Point()
+    var lengths = List[f64]()
+    defer lengths.release()
+    for b in beziers.view():
+        lengths.push(b.length()) catch _:
+            return Point()
+    var width = 0.0
+    for cluster in clusters:
+        width += cluster.advance
+    var advance = (chunk.x else 0.0) + chunk.start_offset + anchor_shift(chunk.anchor, width)
+    var dy = 0.0
+    var end = Point()
+    for at in 0..<clusters.length:
+        let position = content.positions.items[clusters[at].index]
+        advance += position.dx
+        let half = clusters[at].width * 0.5
+        let offset = advance + half
+        advance += clusters[at].advance
+        # Find the segment the offset lies on.
+        var found = false
+        var walked = 0.0
+        var point = Point()
+        var angle = 0.0
+        if offset >= 0.0:
+            for segment in 0..<beziers.used:
+                let length = lengths.items[segment]
+                if offset >= walked and offset <= walked + length:
+                    let b = beziers.items[segment]
+                    let t = math.clamp(b.parameter(offset - walked), 0.0, 1.0)
+                    point = b.at(t)
+                    let d = b.tangent(t)
+                    angle = math.atan2(d.y, d.x) * 180.0 / math.pi
+                    found = true
+                    break
+                walked += length
+        if not found:
+            clusters[at].visible = false
+            continue
+        clusters[at].shifted = true
+        let original = clusters[at].transform
+        var t = Matrix(e = point.x - half, f = point.y)
+        t = multiply(t, multiply(multiply(Matrix(e = half), rotation_matrix(angle)), Matrix(e = -half)))
+        dy += position.dy
+        let span = content.spans.items[clusters[at].span]
+        var shift = 0.0
+        if let face = span.face:
+            let metrics = source.face_metrics(face)
+            shift = baseline_offset(&span, metrics, span.size / math.max(metrics.units_per_em, 1.0))
+        if dy != 0.0 or shift != 0.0:
+            t = multiply(t, Matrix(f = dy + shift))
+        if position.rotate != 0.0:
+            t = multiply(t, rotation_matrix(position.rotate))
+        clusters[at].transform = multiply(t, original)
+        end = Point(point.x + clusters[at].advance, point.y)
+    return end

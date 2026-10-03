@@ -43,7 +43,7 @@ func stroke_half(contour: Contour, fit: Placement) -> f64:
     return math.max(0.25, contour.pen.width * fit.scale * 0.5)
 
 ## A regular polygon approximating a disc, for round caps and joins.
-func disc(acc: f32[], width: usize, height: usize, centre: Point, radius: f64) -> !:
+func drawing_disc(acc: f32[], width: usize, height: usize, centre: Point, radius: f64) -> !:
     let ring = try alloc Point[16] in memory.heap
     defer free(ring) in memory.heap
     for index in 0..<(usize)16:
@@ -62,7 +62,7 @@ func heading(a: Point, b: Point) -> Point?:
 
 ## The nearest point of `path` before (or after, when `forward`) `index` that is not
 ## on top of it, wrapping round a closed run, whose last point repeats its first.
-func neighbour(path: const Point[], index: usize, closed: bool, forward: bool) -> Point?:
+func stroke_neighbour(path: const Point[], index: usize, closed: bool, forward: bool) -> Point?:
     let ring = path.length - 1 if closed else path.length
     var step: usize = 1
     while step < ring:
@@ -85,10 +85,10 @@ func neighbour(path: const Point[], index: usize, closed: bool, forward: bool) -
 func join_at(acc: f32[], width: usize, height: usize, scratch: Point[], path: const Point[], index: usize, closed: bool, half: f64, pen: Pen) -> !:
     let vertex = path[index]
     if pen.join == Join.round:
-        try disc(acc, width, height, vertex, half)
+        try drawing_disc(acc, width, height, vertex, half)
         return
-    let before = neighbour(path, index, closed, false) else return
-    let after = neighbour(path, index, closed, true) else return
+    let before = stroke_neighbour(path, index, closed, false) else return
+    let after = stroke_neighbour(path, index, closed, true) else return
     let d0 = heading(before, vertex) else return
     let d1 = heading(vertex, after) else return
     let turn = d0.x * d1.y - d0.y * d1.x
@@ -117,12 +117,12 @@ func join_at(acc: f32[], width: usize, height: usize, scratch: Point[], path: co
 func cap_at(acc: f32[], width: usize, height: usize, scratch: Point[], path: const Point[], index: usize, half: f64, pen: Pen) -> !:
     let end = path[index]
     if pen.cap == Cap.round:
-        try disc(acc, width, height, end, half)
+        try drawing_disc(acc, width, height, end, half)
         return
     if pen.cap != Cap.square:
         return
     var out = Point(1.0, 0.0)
-    if let inner = neighbour(path, index, false, index == 0):
+    if let inner = stroke_neighbour(path, index, false, index == 0):
         out = heading(inner, end) else Point(1.0, 0.0)
     let nx = -out.y * half
     let ny = out.x * half

@@ -1,0 +1,307 @@
+#==============================================================================================
+#
+#   svg/text_layout - Laying text out and turning it into shapes
+#
+#   DESCRIPTION:
+#       Each chunk's characters become clusters (a glyph with its advance, kerned against
+#       the one before), spaced by letter-spacing and word-spacing, stretched to
+#       textLength, then placed: along the line from the chunk's x and y (or where the
+#       last chunk ended) shifted by the anchor, each by its dx, dy and rotate; or along
+#       a text path, each glyph centred on its point and turned with the path. Each span
+#       becomes a shape whose path is its glyphs' outlines, moved to its baseline, with
+#       its decorations as rectangles of the face's thickness; paint servers in
+#       bounding-box units measure the whole text. As resvg's usvg lays text out.
+#
+#==============================================================================================
+
+## One laid-out character.
+struct Cluster:
+    var index: usize = 0
+    var span: usize = 0
+    var glyph: ShapedGlyph = ShapedGlyph()
+    var advance: f64 = 0.0
+    var width: f64 = 0.0
+    var transform: Matrix = Matrix()
+    var visible: bool = true
+    var shifted: bool = false
+
+## Whether `scalar` separates words for word-spacing.
+func word_separator(scalar: u32) -> bool:
+    return scalar == 0x20 or scalar == 0xA0 or scalar == 0x1361 or scalar == 0x10100 or scalar == 0x10101 or scalar == 0x1039F or scalar == 0x1091F
+
+## The anchor's shift for a chunk `width` wide.
+func anchor_shift(anchor: u8, width: f64) -> f64:
+    if anchor == 1:
+        return -width * 0.5
+    if anchor == 2:
+        return -width
+    return 0.0
+
+extend Converter:
+    ## A `<text>` element into `parent`: its spans as shapes.
+    mutating func text_element(node: u32, state: const State*, parent: u32) -> !:
+        var content = TextContent()
+        defer content.release()
+        try self.read_text(node, state, &content)
+        let source = self.options.glyphs else return
+        var fonts = source
+        var clusters = List[Cluster]()
+        defer clusters.release()
+        # Each span's outline, built over every chunk; then the decorations.
+        let path_start = self.picture.paths.used
+        for _ in 0..<content.spans.used:
+            try self.picture.paths.push(Path())
+        var decorations = List[Path]()
+        defer:
+            for index in 0..<decorations.used:
+                decorations.items[index].release()
+            decorations.release()
+        for _ in 0..<content.spans.used * 3:
+            try decorations.push(Path())
+        var box = Box()
+        var last_x = 0.0
+        var last_y = 0.0
+        for chunk_index in 0..<content.chunks.used:
+            let chunk = content.chunks.items[chunk_index]
+            var x = chunk.x else last_x
+            var y = chunk.y else last_y
+            if chunk.path != 0:
+                x = 0.0
+                y = 0.0
+            clusters.used = 0
+            try self.shape_chunk(&content, &chunk, fonts, &clusters)
+            if clusters.used == 0:
+                continue
+            space_clusters(&content, clusters.view())
+            adjust_length(&content, &chunk, clusters.view())
+            var end = Point()
+            if chunk.path == 0:
+                end = place_on_line(&content, &chunk, clusters.view())
+            else:
+                end = place_on_path(&content, &chunk, &content.paths.items[chunk.path - 1], clusters.view(), fonts)
+            for span_index in chunk.span_start..<chunk.span_end:
+                let span = content.spans.items[span_index]
+                let face = span.face else continue
+                let metrics = fonts.face_metrics(face)
+                let scale = span.size / math.max(metrics.units_per_em, 1.0)
+                var span_ts = Matrix(e = x, f = y)
+                if chunk.path == 0:
+                    span_ts = multiply(span_ts, Matrix(f = baseline_offset(&span, metrics, scale)))
+                try self.span_outlines(fonts, &content, span_index, clusters.view(), span_ts, &self.picture.paths.items[path_start + span_index], &box)
+                try decorate(&span, metrics, scale, span_index, clusters.view(), span_ts, decorations.items[span_index * 3..<span_index * 3 + 3], &box)
+            last_x = x + end.x
+            last_y = y + end.y
+        let text_box = box.rect()
+        for span_index in 0..<content.spans.used:
+            let span = content.spans.items[span_index]
+            # Underline and overline go under the glyphs, line-through over them.
+            for which in 0..<(usize)2:
+                try self.text_shape(&decorations.items[span_index * 3 + which], span.underline if which == 0 else span.overline, &span, text_box, parent)
+            let index = path_start + span_index
+            if self.picture.paths.items[index].verb_count() > 0:
+                let fill = span.fill
+                discard(try self.picture.append(parent, Item(kind = ItemKind.shape, path = index, fill = fill, stroke = span.stroke,
+                                                             stroke_first = span.stroke_first, visible = span.visible, paint_box = text_box)))
+            try self.text_shape(&decorations.items[span_index * 3 + 2], span.line_through, &span, text_box, parent)
+
+    ## Add a decoration's rectangles as a shape painted as it asks.
+    mutating func text_shape(path: Path*, decoration: Decoration, span: const TextSpan*, text_box: Rect?, parent: u32) -> !:
+        if not decoration.on or path.verb_count() == 0:
+            return
+        let index = self.picture.paths.used
+        try self.picture.paths.push(*path)
+        *path = Path()
+        discard(try self.picture.append(parent, Item(kind = ItemKind.shape, path = index, fill = decoration.fill, stroke = decoration.stroke,
+                                                     visible = span.visible, paint_box = text_box)))
+
+    ## Shape `chunk`'s characters into clusters, skipping any whose span has no face.
+    mutating func shape_chunk(content: const TextContent*, chunk: const TextChunk*, fonts: GlyphSource, clusters: List[Cluster]*) -> !:
+        var source = fonts
+        for index in chunk.char_start..<chunk.char_end:
+            var span_index = chunk.span_start
+            while span_index + 1 < chunk.span_end and content.spans.items[span_index].end <= index:
+                span_index += 1
+            let span = content.spans.items[span_index]
+            let face = span.face else continue
+            let glyph = shape_scalar(source, face, content.scalars.items[index], span.size)
+            var cluster = Cluster(index = index, span = span_index, glyph = glyph, advance = glyph.advance, width = glyph.advance)
+            if clusters.used > 0 and span.kerning:
+                let previous = &clusters.items[clusters.used - 1]
+                if previous.glyph.face == glyph.face:
+                    previous.advance += source.glyph_kerning(glyph.face, previous.glyph.glyph, glyph.glyph) * glyph.scale
+            try clusters.push(cluster)
+
+    ## Append the outlines of `span_index`'s visible clusters, through `span_ts`, to `out`.
+    mutating func span_outlines(fonts: GlyphSource, content: const TextContent*, span_index: usize, clusters: const Cluster[], span_ts: Matrix,
+                                out: Path*, box: Box*) -> !:
+        var source = fonts
+        var glyph_path = Path()
+        defer glyph_path.release()
+        for cluster in clusters:
+            if not cluster.visible:
+                continue
+            let placed = multiply(span_ts, cluster.transform)
+            # Every visible cluster counts towards the text's box: its advance by its height.
+            let height = cluster.glyph.ascent - cluster.glyph.descent
+            if height > 0.0:
+                let r = transform_rect(Rect(y = -cluster.glyph.ascent, w = math.max(cluster.advance, 1.0), h = height), placed)
+                box.add_rect(r)
+            if cluster.span != span_index:
+                continue
+            glyph_path.release()
+            if not try source.glyph_outline(cluster.glyph.face, cluster.glyph.glyph, &glyph_path):
+                continue
+            let to_user = multiply(placed, Matrix(a = cluster.glyph.scale, d = -cluster.glyph.scale))
+            try append_path(out, &glyph_path, to_user)
+
+## Append `path`'s verbs, mapped through `m`, to `out`.
+func append_path(out: Path*, path: const Path*, m: Matrix) -> !:
+    var at: usize = 0
+    for verb in path.verbs.view():
+        match verb:
+            .move:
+                let p = apply(m, path.points.items[at].x, path.points.items[at].y)
+                try out.move_to(p.x, p.y)
+                at += 1
+            .line:
+                let p = apply(m, path.points.items[at].x, path.points.items[at].y)
+                try out.line_to(p.x, p.y)
+                at += 1
+            .cubic:
+                let p1 = apply(m, path.points.items[at].x, path.points.items[at].y)
+                let p2 = apply(m, path.points.items[at + 1].x, path.points.items[at + 1].y)
+                let p3 = apply(m, path.points.items[at + 2].x, path.points.items[at + 2].y)
+                try out.cubic_to(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y)
+                at += 3
+            .close:
+                try out.close()
+
+## letter-spacing after every cluster but the last, and word-spacing after separators.
+func space_clusters(content: const TextContent*, clusters: Cluster[]):
+    for at in 0..<clusters.length:
+        let span = content.spans.items[clusters[at].span]
+        if at + 1 < clusters.length and span.letter_spacing != 0.0:
+            clusters[at].advance += span.letter_spacing
+            if not (clusters[at].advance > 0.0):
+                clusters[at].advance = 0.0
+                clusters[at].width = 0.0
+                clusters[at].visible = false
+        if word_separator(content.scalars.items[clusters[at].index]):
+            clusters[at].advance += span.word_spacing
+
+## Stretch each span with textLength to it: by spacing, or by spacing and glyphs.
+func adjust_length(content: const TextContent*, chunk: const TextChunk*, clusters: Cluster[]):
+    for span_index in chunk.span_start..<chunk.span_end:
+        let span = content.spans.items[span_index]
+        let target = span.text_length else continue
+        var width = 0.0
+        var count: usize = 0
+        for cluster in clusters:
+            if cluster.span == span_index:
+                width += cluster.width
+                count += 1
+        if count == 0:
+            continue
+        if not span.spacing_and_glyphs:
+            let factor = (target - width) / (f64)(count - 1) if count > 1 else 0.0
+            for at in 0..<clusters.length:
+                if clusters[at].span == span_index:
+                    clusters[at].advance = clusters[at].width + factor
+        else:
+            let factor = target / width
+            if factor < 0.001:
+                continue
+            for at in 0..<clusters.length:
+                if clusters[at].span == span_index:
+                    clusters[at].transform = multiply(clusters[at].transform, Matrix(a = factor))
+                    if chunk.path != 0:
+                        clusters[at].advance *= factor
+                        clusters[at].width *= factor
+
+## Place `clusters` along the line; answer where the pen ends.
+func place_on_line(content: const TextContent*, chunk: const TextChunk*, clusters: Cluster[]) -> Point:
+    var width = 0.0
+    for cluster in clusters:
+        width += cluster.advance
+    var x = anchor_shift(chunk.anchor, width)
+    var y = 0.0
+    for at in 0..<clusters.length:
+        let position = content.positions.items[clusters[at].index]
+        if content.vertical:
+            y -= position.dx
+            x += position.dy
+        else:
+            x += position.dx
+            y += position.dy
+        clusters[at].shifted = position.dx != 0.0 or position.dy != 0.0
+        # As tiny-skia's pre_translate and pre_rotate compose: the glyph turns about its origin.
+        clusters[at].transform = multiply(clusters[at].transform, Matrix(e = x, f = y))
+        if position.rotate != 0.0:
+            clusters[at].transform = multiply(clusters[at].transform, rotation_matrix(position.rotate))
+            clusters[at].shifted = true
+        x += clusters[at].advance
+    return Point(x, y)
+
+## How far a span's baseline moves down: its baseline shift, then its dominant or
+## alignment baseline.
+func baseline_offset(span: const TextSpan*, metrics: FaceMetrics, scale: f64) -> f64:
+    var shift = span.shift
+    shift -= (f64)span.subscripts * (metrics.subscript_offset * scale if span.subscripts > 0 else metrics.superscript_offset * scale)
+    var offset = -shift
+    let code = span.alignment if span.alignment > 1 else span.dominant
+    offset += alignment_shift(code, metrics, scale)
+    return offset
+
+func alignment_shift(code: u8, metrics: FaceMetrics, scale: f64) -> f64:
+    let ascent = metrics.ascent * scale
+    let descent = metrics.descent * scale
+    match code:
+        2:
+            return ascent
+        3:
+            return metrics.x_height * scale * 0.5
+        4:
+            return ascent - (ascent - descent) * 0.5
+        5, 6:
+            return descent
+        8:
+            return ascent * 0.8
+        9:
+            return ascent * 0.5
+        _:
+            return 0.0
+
+## The underline, overline and line-through rectangles of `span` into `out` (three paths).
+func decorate(span: const TextSpan*, metrics: FaceMetrics, scale: f64, span_index: usize, clusters: const Cluster[], span_ts: Matrix,
+              out: Path[], box: Box*) -> !:
+    let thickness = metrics.underline_thickness * scale
+    let offsets: f64[3] = [-metrics.underline_position * scale, -metrics.ascent * scale, -metrics.strikeout_position * scale]
+    let wanted: bool[3] = [span.underline.on, span.overline.on, span.line_through.on]
+    for which in 0..<(usize)3:
+        if not wanted[which]:
+            continue
+        # One rectangle per run of the span's clusters not broken by a shift.
+        var at: usize = 0
+        while at < clusters.length:
+            if clusters[at].span != span_index:
+                at += 1
+                continue
+            let start = clusters[at].transform
+            var width = clusters[at].advance
+            at += 1
+            while at < clusters.length and clusters[at].span == span_index and not clusters[at].shifted:
+                width += clusters[at].advance
+                at += 1
+            let m = multiply(span_ts, multiply(start, Matrix(f = offsets[which])))
+            let r = Rect(y = -thickness * 0.5, w = width, h = thickness)
+            let a = apply(m, r.x, r.y)
+            let b = apply(m, r.x + r.w, r.y)
+            let c = apply(m, r.x + r.w, r.y + r.h)
+            let d = apply(m, r.x, r.y + r.h)
+            try out[which].move_to(a.x, a.y)
+            try out[which].line_to(b.x, b.y)
+            try out[which].line_to(c.x, c.y)
+            try out[which].line_to(d.x, d.y)
+            try out[which].close()
+            box.add(a)
+            box.add(c)

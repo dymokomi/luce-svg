@@ -159,7 +159,7 @@ func append_characters(drawing: Drawing*, data: const u8[], decode: bool, spacin
             pos += 1
             continue
         if byte == '&' and decode:
-            if let found = entity(data[pos..]):
+            if let found = decode_entity(data[pos..]):
                 try append_scalar(drawing, found.scalar, spacing)
                 pos += found.length
                 continue
@@ -172,7 +172,7 @@ struct Entity:
     var length: usize = 0
 
 ## The entity at the start of `data`, or none.
-func entity(data: const u8[]) -> Entity?:
+func decode_entity(data: const u8[]) -> Entity?:
     var end: usize = 1
     while end < data.length and end < 12 and data[end] != ';':
         end += 1

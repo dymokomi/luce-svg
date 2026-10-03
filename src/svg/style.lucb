@@ -28,9 +28,9 @@ struct Style:
 func styled(tag: str, base: Style, gradient_ids: const str[]) -> Style:
     var style = base
     if let value = property(tag, "fill"):
-        style.fill = paint(value, base.fill, gradient_ids)
+        style.fill = drawing_paint(value, base.fill, gradient_ids)
     if let value = property(tag, "stroke"):
-        style.stroke = paint(value, base.stroke, gradient_ids)
+        style.stroke = drawing_paint(value, base.stroke, gradient_ids)
     style.opacity = base.opacity * math.clamp(number_property(tag, "opacity", 1.0), 0.0, 1.0)
     style.fill_opacity = math.clamp(number_property(tag, "fill-opacity", base.fill_opacity), 0.0, 1.0)
     style.stroke_opacity = math.clamp(number_property(tag, "stroke-opacity", base.stroke_opacity), 0.0, 1.0)
@@ -98,7 +98,7 @@ func number_property(tag: str, name: str, fallback: f64) -> f64:
 ## The paint `value` names. `inherit` keeps the parent's. `url(#id)` paints with the
 ## gradient of that id among `gradient_ids`, else with the fallback written after it, else
 ## not at all. An unknown color name is black, so the shape still shows.
-func paint(value: str, inherited: Paint, gradient_ids: const str[]) -> Paint:
+func drawing_paint(value: str, inherited: Paint, gradient_ids: const str[]) -> Paint:
     if value == "" or value == "none" or same_folded(value, "transparent"):
         return Paint()
     if value == "inherit":
@@ -111,7 +111,7 @@ func paint(value: str, inherited: Paint, gradient_ids: const str[]) -> Paint:
         for index in 0..<gradient_ids.length:
             if id != "" and gradient_ids[index] == id:
                 return Paint(painted = true, gradient = index + 1)
-        return paint(strings.trim((str)value.bytes[close + 1..]), Paint(), gradient_ids)
+        return drawing_paint(strings.trim((str)value.bytes[close + 1..]), Paint(), gradient_ids)
     if same_folded(value, "currentColor"):
         return Paint(painted = true, current = true)
     let color = parse_color(value) else return Paint(painted = true)

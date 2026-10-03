@@ -1,13 +1,10 @@
 #==============================================================================================
 #
-#   svg/convert_more - Patterns, and text (still to come)
+#   svg/convert_more - Patterns
 #
 #==============================================================================================
 
 extend Converter:
-    mutating func text_element(node: u32, state: const State*, parent: u32) -> !:
-        return
-
     ## The pattern `node` converts to (see `server`): its attributes from it or the
     ## patterns it references, its content from the first of them with any.
     mutating func pattern_server(node: u32) -> (u32, usize)!:
