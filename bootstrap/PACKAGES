@@ -1,3 +1,7 @@
 luce-std 2347ecb823548c9c692f1d72b09939e2f55e8f82
 luce-fonts 14dd2d6d9ea2918df234ca413f9b45fba80f15de
 luce-color fbc56ff41d0bb9dd2dfdad969f9cb2c99a9bb194
+luce-png a6ae4bb35b3edf717e791b1a61d40e238f3d9d2c
+luce-jpeg fca5e6690e6756f04f21df97ab0982dec1ef4a3e
+luce-raster cea1c627020f31099a22acd5aabb212102e5c6fe
+luce-compress 14f4a066f0771d3d4b32d4ac93f7104cb3cbf650
