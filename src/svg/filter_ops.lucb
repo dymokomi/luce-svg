@@ -1,0 +1,341 @@
+#==============================================================================================
+#
+#   svg/filter_ops - The filter primitives that combine and recolor
+#
+#   DESCRIPTION:
+#       feBlend, feComposite (the Porter-Duff operators and arithmetic), feMerge,
+#       feFlood, feOffset (whole device pixels, as resvg shifts), feTile, feImage,
+#       feColorMatrix and feComponentTransfer (on unpremultiplied values in the
+#       primitive's color space), feConvolveMatrix and feDisplacementMap. Each takes
+#       layer-sized images and makes one, as filter_render.lucb runs them.
+#
+#==============================================================================================
+
+## A transform's scale on each axis as tiny-skia measures it: the lengths of its rows.
+func axis_scales(m: Matrix) -> (f64, f64):
+    return (math.hypot(m.a, m.c), math.hypot(m.b, m.d))
+
+extend Renderer:
+    ## Run one primitive; the result's region is set by the caller.
+    mutating func primitive(p: const Primitive*, region: Bounds, transform: Matrix, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
+        let linear = p.linear
+        match p.kind:
+            .flood:
+                var canvas = try Canvas.make(0, 0, layer.width, layer.height)
+                let color = premultiplied(p.color.rgb(), p.color.a, false)
+                for index in 0..<canvas.width * canvas.height:
+                    for channel in 0..<(usize)4:
+                        canvas.pixels[index * 4 + channel] = color[channel]
+                return FilterImage(canvas = canvas, region = region, linear = false)
+            .offset:
+                var image = try self.input(p.input1, region, layer, results)
+                let (sx, sy) = axis_scales(transform)
+                let dx = (i64)(p.values[0] * sx)
+                let dy = (i64)(p.values[1] * sy)
+                if dx != 0 or dy != 0:
+                    shift_canvas(&image.canvas, dx, dy)
+                return image
+            .blend, .composite:
+                var below = try self.input_in(p.input2, linear, region, layer, results)
+                var above = try self.input_in(p.input1, linear, region, layer, results)
+                defer above.canvas.release()
+                if p.kind == FilterKind.blend:
+                    composite_layer(&below.canvas, &above.canvas, 1.0, p.blend)
+                else:
+                    composite_operator(&below.canvas, &above.canvas, p.values)
+                below.linear = linear
+                return below
+            .merge:
+                var canvas = try Canvas.make(0, 0, layer.width, layer.height)
+                for at in p.start..<p.start + p.count:
+                    var part = try self.input_in(self.picture.filter_inputs.items[at], linear, region, layer, results)
+                    defer part.canvas.release()
+                    composite_layer(&canvas, &part.canvas, 1.0, Blend.normal)
+                return FilterImage(canvas = canvas, region = region, linear = linear)
+            .tile:
+                var image = try self.input(p.input1, region, layer, results)
+                tile_canvas(&image.canvas, image.region, region)
+                return image
+            .image:
+                var canvas = try Canvas.make(0, 0, layer.width, layer.height)
+                let (sx, sy) = axis_scales(transform)
+                let origin_box = pixel_bounds(p.rect, transform)
+                let drawn_at = Matrix(a = sx, d = sy, e = (f64)origin_box.x0, f = (f64)origin_box.y0)
+                try self.children(p.root, drawn_at, &canvas)
+                return FilterImage(canvas = canvas, region = region, linear = self.linear)
+            .color_matrix, .component_transfer:
+                var image = try self.input_in(p.input1, linear, region, layer, results)
+                if p.kind == FilterKind.color_matrix:
+                    self.color_matrix(p, &image.canvas)
+                else:
+                    self.component_transfer(p, &image.canvas)
+                return image
+            .convolve:
+                var image = try self.input_in(p.input1, linear, region, layer, results)
+                try self.convolve(p, &image.canvas)
+                return image
+            .displacement:
+                var source = try self.input_in(p.input1, linear, region, layer, results)
+                var map = try self.input_in(p.input2, linear, region, layer, results)
+                defer map.canvas.release()
+                let (sx, sy) = axis_scales(transform)
+                var out = try Canvas.make(0, 0, layer.width, layer.height)
+                displace(&out, &source.canvas, &map.canvas, p.values[0] * sx, p.values[0] * sy, (usize)p.values[1], (usize)p.values[2])
+                source.canvas.release()
+                source.canvas = out
+                return source
+            .blur, .drop_shadow, .morphology:
+                return try self.blur_family(p, region, transform, layer, results)
+            .turbulence, .diffuse, .specular:
+                return try self.generated(p, region, transform, layer, results)
+
+    ## feColorMatrix on `canvas`, unpremultiplied.
+    func color_matrix(p: const Primitive*, canvas: Canvas*):
+        let kind = (i64)p.values[0]
+        var m: f64[20] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        if kind == 0:
+            for at in 0..<(usize)20:
+                m[at] = self.picture.filter_values.items[p.start + at]
+        elif kind == 1:
+            let v = math.max(0.0, p.values[1])
+            m = [0.213 + 0.787 * v, 0.715 - 0.715 * v, 0.072 - 0.072 * v, 0.0, 0.0, 0.213 - 0.213 * v, 0.715 + 0.285 * v, 0.072 - 0.072 * v, 0.0, 0.0,
+                 0.213 - 0.213 * v, 0.715 - 0.715 * v, 0.072 + 0.928 * v, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        elif kind == 2:
+            let angle = p.values[1] * math.pi / 180.0
+            let a1 = math.cos(angle)
+            let a2 = math.sin(angle)
+            m = [0.213 + 0.787 * a1 - 0.213 * a2, 0.715 - 0.715 * a1 - 0.715 * a2, 0.072 - 0.072 * a1 + 0.928 * a2, 0.0, 0.0,
+                 0.213 - 0.213 * a1 + 0.143 * a2, 0.715 + 0.285 * a1 + 0.140 * a2, 0.072 - 0.072 * a1 - 0.283 * a2, 0.0, 0.0,
+                 0.213 - 0.213 * a1 - 0.787 * a2, 0.715 - 0.715 * a1 + 0.715 * a2, 0.072 + 0.928 * a1 + 0.072 * a2, 0.0, 0.0,
+                 0.0, 0.0, 0.0, 1.0, 0.0]
+        else:
+            m = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2125, 0.7154, 0.0721, 0.0, 0.0]
+        for index in 0..<canvas.width * canvas.height:
+            let c = unpremultiplied(canvas, index)
+            var out: f64[4] = [0.0, 0.0, 0.0, 0.0]
+            for row in 0..<(usize)4:
+                out[row] = math.clamp(c[0] * m[row * 5] + c[1] * m[row * 5 + 1] + c[2] * m[row * 5 + 2] + c[3] * m[row * 5 + 3] + m[row * 5 + 4], 0.0, 1.0)
+            store_unpremultiplied(canvas, index, out)
+
+    ## feComponentTransfer on `canvas`, unpremultiplied.
+    func component_transfer(p: const Primitive*, canvas: Canvas*):
+        for index in 0..<canvas.width * canvas.height:
+            var c = unpremultiplied(canvas, index)
+            for channel in 0..<(usize)4:
+                c[channel] = self.transfer(p.functions[channel], c[channel])
+            store_unpremultiplied(canvas, index, c)
+
+    ## One transfer function applied to `c`.
+    func transfer(f: TransferFn, c: f64) -> f64:
+        match f.kind:
+            0:
+                return c
+            1, 2:
+                if f.count == 0:
+                    return c
+                let values = self.picture.filter_values.items[f.start..<f.start + f.count]
+                if f.kind == 2:
+                    let n = (f64)f.count
+                    let k = math_min((usize)math.floor(c * n), f.count - 1)
+                    return math.clamp(values[k], 0.0, 1.0)
+                let n = f.count - 1
+                let k = math_min((usize)math.floor(c * (f64)n), n)
+                if k == n:
+                    return math.clamp(values[k], 0.0, 1.0)
+                let v = values[k] + (c - (f64)k / (f64)n) * (f64)n * (values[k + 1] - values[k])
+                return math.clamp(v, 0.0, 1.0)
+            3:
+                return math.clamp(f.a * c + f.b, 0.0, 1.0)
+            _:
+                return math.clamp(f.a * math.pow(c, f.b) + f.c, 0.0, 1.0)
+
+    ## feConvolveMatrix on `canvas`.
+    func convolve(p: const Primitive*, canvas: Canvas*) -> !:
+        let columns = (i64)p.values[0]
+        let rows = (i64)p.values[1]
+        let target_x = (i64)p.values[2]
+        let target_y = (i64)p.values[3]
+        let divisor = p.values[4]
+        let bias = p.values[5]
+        let edge = (i64)p.values[6]
+        let preserve = p.values[7] != 0.0
+        let kernel = self.picture.filter_values.items[p.start..<p.start + p.count]
+        let w = (i64)canvas.width
+        let h = (i64)canvas.height
+        let source = try new f32[canvas.pixels.length] in memory.heap
+        defer free(source) in memory.heap
+        memory.copy(source, canvas.pixels, source.length)
+        if preserve:
+            for index in 0..<canvas.width * canvas.height:
+                let a = source[index * 4 + 3]
+                if a > 0.0:
+                    for channel in 0..<(usize)3:
+                        source[index * 4 + channel] /= a
+        for y in 0..<h:
+            for x in 0..<w:
+                var sum: f64[4] = [0.0, 0.0, 0.0, 0.0]
+                for oy in 0..<rows:
+                    for ox in 0..<columns:
+                        var tx = x - target_x + ox
+                        var ty = y - target_y + oy
+                        if edge == 2:
+                            if tx < 0 or tx >= w or ty < 0 or ty >= h:
+                                continue
+                        elif edge == 0:
+                            tx = math.iclamp(tx, 0, w - 1)
+                            ty = math.iclamp(ty, 0, h - 1)
+                        else:
+                            tx = math.mod_floor(tx, w)
+                            ty = math.mod_floor(ty, h)
+                        let k = kernel[(usize)((rows - oy - 1) * columns + (columns - ox - 1))]
+                        let at = ((usize)ty * canvas.width + (usize)tx) * 4
+                        for channel in 0..<(usize)4:
+                            sum[channel] += (f64)source[at + channel] * k
+                let at = ((usize)y * canvas.width + (usize)x) * 4
+                var a = (f64)canvas.pixels[at + 3] if preserve else sum[3] / divisor + bias
+                let bounded = math.clamp(a, 0.0, 1.0)
+                for channel in 0..<(usize)3:
+                    let value = sum[channel] / divisor + bias * a
+                    let out = math.clamp(value, 0.0, 1.0) * bounded if preserve else math.clamp(value, 0.0, bounded)
+                    canvas.pixels[at + channel] = (f32)out
+                canvas.pixels[at + 3] = (f32)bounded
+
+## The unpremultiplied RGBA of pixel `index`.
+func unpremultiplied(canvas: const Canvas*, index: usize) -> f64[4]:
+    let at = index * 4
+    let a = (f64)canvas.pixels[at + 3]
+    if a <= 0.0:
+        return [0.0, 0.0, 0.0, 0.0]
+    return [(f64)canvas.pixels[at] / a, (f64)canvas.pixels[at + 1] / a, (f64)canvas.pixels[at + 2] / a, a]
+
+func store_unpremultiplied(canvas: Canvas*, index: usize, c: f64[4]):
+    let at = index * 4
+    let a = math.clamp(c[3], 0.0, 1.0)
+    canvas.pixels[at] = (f32)(math.clamp(c[0], 0.0, 1.0) * a)
+    canvas.pixels[at + 1] = (f32)(math.clamp(c[1], 0.0, 1.0) * a)
+    canvas.pixels[at + 2] = (f32)(math.clamp(c[2], 0.0, 1.0) * a)
+    canvas.pixels[at + 3] = (f32)a
+
+## Move every pixel by (`dx`, `dy`), what leaves cleared.
+func shift_canvas(canvas: Canvas*, dx: i64, dy: i64):
+    let w = (i64)canvas.width
+    let h = (i64)canvas.height
+    let copy = canvas.pixels
+    var y = 0 if dy <= 0 else h - 1
+    let step_y: i64 = 1 if dy <= 0 else -1
+    while y >= 0 and y < h:
+        var x = 0 if dx <= 0 else w - 1
+        let step_x: i64 = 1 if dx <= 0 else -1
+        while x >= 0 and x < w:
+            let sx = x - dx
+            let sy = y - dy
+            let to = ((usize)y * canvas.width + (usize)x) * 4
+            if sx >= 0 and sx < w and sy >= 0 and sy < h:
+                let source_at = ((usize)sy * canvas.width + (usize)sx) * 4
+                for channel in 0..<(usize)4:
+                    copy[to + channel] = copy[source_at + channel]
+            else:
+                for channel in 0..<(usize)4:
+                    copy[to + channel] = 0.0
+            x += step_x
+        y += step_y
+
+## The Porter-Duff operator or arithmetic combination `values` names: `above` is `in`,
+## the result replaces `below` (`in2`).
+func composite_operator(below: Canvas*, above: const Canvas*, values: f64[8]):
+    let operator = (i64)values[0]
+    for index in 0..<below.width * below.height:
+        let at = index * 4
+        let sa = (f64)above.pixels[at + 3]
+        let da = (f64)below.pixels[at + 3]
+        if operator == 5:
+            let k1 = values[1]
+            let k2 = values[2]
+            let k3 = values[3]
+            let k4 = values[4]
+            let a = math.clamp(k1 * sa * da + k2 * sa + k3 * da + k4, 0.0, 1.0)
+            if a <= 0.0:
+                for channel in 0..<(usize)4:
+                    below.pixels[at + channel] = 0.0
+                continue
+            for channel in 0..<(usize)3:
+                let i1 = (f64)above.pixels[at + channel]
+                let i2 = (f64)below.pixels[at + channel]
+                below.pixels[at + channel] = (f32)math.clamp(k1 * i1 * i2 + k2 * i1 + k3 * i2 + k4, 0.0, a)
+            below.pixels[at + 3] = (f32)a
+            continue
+        var fs = 1.0
+        var fd = 1.0 - sa
+        match operator:
+            1:
+                fs = da
+                fd = 0.0
+            2:
+                fs = 1.0 - da
+                fd = 0.0
+            3:
+                fs = da
+                fd = 1.0 - sa
+            4:
+                fs = 1.0 - da
+                fd = 1.0 - sa
+            _:
+                fs = 1.0
+        for channel in 0..<(usize)4:
+            below.pixels[at + channel] = (f32)((f64)above.pixels[at + channel] * fs + (f64)below.pixels[at + channel] * fd)
+
+## Repeat the part of `canvas` in `tile` across `region`.
+func tile_canvas(canvas: Canvas*, tile: Bounds, region: Bounds):
+    if tile.empty():
+        canvas.clear()
+        return
+    let w = (usize)(tile.x1 - tile.x0)
+    let h = (usize)(tile.y1 - tile.y0)
+    let copy = try_copy_rect(canvas, tile) else return
+    defer free(copy) in memory.heap
+    for row in 0..<canvas.height:
+        for column in 0..<canvas.width:
+            let at = (row * canvas.width + column) * 4
+            let x = (i64)column
+            let y = (i64)row
+            if x < region.x0 or x >= region.x1 or y < region.y0 or y >= region.y1:
+                continue
+            let tx = (usize)math.mod_floor(x - tile.x0, (i64)w)
+            let ty = (usize)math.mod_floor(y - tile.y0, (i64)h)
+            let from_at = (ty * w + tx) * 4
+            for channel in 0..<(usize)4:
+                canvas.pixels[at + channel] = copy[from_at + channel]
+
+## A heap copy of the pixels of `canvas` inside `rect` (clipped to it), or none.
+func try_copy_rect(canvas: const Canvas*, rect: Bounds) -> f32[]?:
+    let w = (usize)(rect.x1 - rect.x0)
+    let h = (usize)(rect.y1 - rect.y0)
+    let copy = new f32[w * h * 4] in memory.heap catch _:
+        return none
+    for row in 0..<h:
+        for column in 0..<w:
+            let x = rect.x0 + (i64)column
+            let y = rect.y0 + (i64)row
+            if x < 0 or y < 0 or x >= (i64)canvas.width or y >= (i64)canvas.height:
+                continue
+            let to = (row * w + column) * 4
+            let source_at = ((usize)y * canvas.width + (usize)x) * 4
+            for channel in 0..<(usize)4:
+                copy[to + channel] = canvas.pixels[source_at + channel]
+    return copy
+
+## feDisplacementMap: each pixel takes the source pixel its map displaces it to.
+func displace(out: Canvas*, source: const Canvas*, map: const Canvas*, sx: f64, sy: f64, x_channel: usize, y_channel: usize):
+    let w = (i64)out.width
+    let h = (i64)out.height
+    for y in 0..<h:
+        for x in 0..<w:
+            let at = ((usize)y * out.width + (usize)x) * 4
+            let dx = (f64)map.pixels[at + x_channel] - 0.5
+            let dy = (f64)map.pixels[at + y_channel] - 0.5
+            let ox = (i64)math.round((f64)x + dx * sx)
+            let oy = (i64)math.round((f64)y + dy * sy)
+            if ox >= 0 and ox < w and oy >= 0 and oy < h:
+                let source_at = ((usize)oy * out.width + (usize)ox) * 4
+                for channel in 0..<(usize)4:
+                    out.pixels[at + channel] = source.pixels[source_at + channel]

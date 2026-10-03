@@ -68,11 +68,12 @@ struct Renderer:
         if not isolated:
             try self.children(index, transform, canvas)
             return
+        if item.filter_count > 0:
+            try self.filtered_group(index, transform, canvas)
+            return
         var layer = try Canvas.make(canvas.x, canvas.y, canvas.width, canvas.height)
         defer layer.release()
         try self.children(index, transform, &layer)
-        if item.filter_count > 0:
-            try self.apply_filters(&item, transform, &layer)
         if item.clip != 0:
             try self.apply_clip(item.clip - 1, transform, &layer)
         if item.mask != 0:

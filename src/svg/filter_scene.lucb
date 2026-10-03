@@ -1,0 +1,91 @@
+#==============================================================================================
+#
+#   svg/filter_scene - Filters in the render tree
+#
+#   DESCRIPTION:
+#       A group's `filter` becomes a list of FilterServers, each a region in the group's
+#       user space and a run of primitives. A primitive names its inputs (the source
+#       graphic, its alpha, or an earlier primitive's result), its subregion, whether it
+#       works in linearRGB or sRGB, and its parameters: a few numbers, a color, a list of
+#       values (a color matrix, a kernel, transfer tables) and, for feComponentTransfer,
+#       four transfer functions. As resvg's usvg models filters.
+#
+#==============================================================================================
+
+## What a filter primitive does.
+enum FilterKind:
+    blend
+    color_matrix
+    component_transfer
+    composite
+    convolve
+    displacement
+    drop_shadow
+    flood
+    blur
+    image
+    merge
+    morphology
+    offset
+    tile
+    turbulence
+    diffuse
+    specular
+
+## A primitive's input: the source graphic (0), its alpha (1), or (2) the result of
+## primitive `result` of the same filter.
+struct FilterInput:
+    var source: u8 = 0
+    var result: usize = 0
+
+## One channel's feComponentTransfer function: 0 identity, 1 table, 2 discrete, 3 linear
+## (slope a, intercept b), 4 gamma (amplitude a, exponent b, offset c). Tables are
+## `count` of the picture's filter values, from `start`.
+struct TransferFn:
+    var kind: u8 = 0
+    var a: f64 = 0.0
+    var b: f64 = 0.0
+    var c: f64 = 0.0
+    var start: usize = 0
+    var count: usize = 0
+
+## A light source: 0 distant (azimuth, elevation), 1 point (x, y, z), 2 spot (x, y, z,
+## pointsAt x, y, z, specular exponent, cone angle, has a cone).
+struct Light:
+    var kind: u8 = 0
+    var values: f64[9] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var cone: bool = false
+
+## One filter primitive. `values` holds its numbers, by kind:
+##   blend: -; color_matrix: [kind (0 matrix, 1 saturate, 2 hueRotate, 3
+##   luminanceToAlpha), amount]; composite: [operator (0 over, 1 in, 2 out, 3 atop,
+##   4 xor, 5 arithmetic), k1, k2, k3, k4]; convolve: [columns, rows, target x, target y,
+##   divisor, bias, edge mode (0 duplicate, 1 wrap, 2 none), preserve alpha];
+##   displacement: [scale, x channel, y channel (0 R 1 G 2 B 3 A)]; drop_shadow: [dx,
+##   dy, std x, std y]; blur: [std x, std y]; morphology: [operator (0 erode, 1 dilate),
+##   rx, ry]; offset: [dx, dy]; turbulence: [base x, base y, octaves, seed, stitch,
+##   fractal]; diffuse: [surface scale, constant]; specular: [surface scale, constant,
+##   exponent].
+struct Primitive:
+    var kind: FilterKind = FilterKind.flood
+    var rect: Rect = Rect()
+    var linear: bool = true
+    var input1: FilterInput = FilterInput()
+    var input2: FilterInput = FilterInput()
+    var values: f64[8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var color: Rgba = Rgba()
+    var blend: Blend = Blend.normal
+    ## A list of numbers or (for merge) inputs, from the picture's filter values or
+    ## filter inputs.
+    var start: usize = 0
+    var count: usize = 0
+    var functions: TransferFn[4] = [TransferFn(), TransferFn(), TransferFn(), TransferFn()]
+    var light: Light = Light()
+    ## feImage's content: a detached group, drawn at the subregion's corner.
+    var root: u32 = 0
+
+## A filter: its region in the filtered group's user space and its primitives.
+struct FilterServer:
+    var rect: Rect = Rect()
+    var primitive_start: usize = 0
+    var primitive_count: usize = 0

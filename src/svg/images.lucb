@@ -31,9 +31,15 @@ enum ImageFormat:
 extend Converter:
     ## An `image` element into `parent`.
     mutating func image_element(node: u32, state: const State*, parent: u32) -> !:
+        let loaded = (try self.load_image(node)) else return
+        try self.place_image(node, loaded.0, loaded.1, state, parent)
+
+    ## The image `node`'s href names, as a detached group in its own pixels (a raster
+    ## item, or a converted SVG), with its size; none when it cannot be loaded.
+    mutating func load_image(node: u32) -> (u32, Rect)?!:
         let href = strings.trim(self.attribute(node, Attr.href) else "")
         if href.length == 0:
-            return
+            return none
         var bytes = List[u8]()
         defer bytes.release()
         var kind = ImageFormat.other
@@ -42,11 +48,10 @@ extend Converter:
         else:
             kind = try self.image_file(href, &bytes)
         if kind == ImageFormat.other or bytes.used == 0:
-            return
+            return none
         if kind == ImageFormat.svg_image:
-            try self.svg_image(node, bytes.view(), state, parent)
-            return
-        let raster = (try decode_raster(bytes.view(), kind)) else return
+            return try self.svg_image(bytes.view())
+        let raster = (try decode_raster(bytes.view(), kind)) else return none
         let index = self.picture.rasters.used
         try self.picture.rasters.push(raster)
         let size = Rect(w = (f64)raster.width, h = (f64)raster.height)
@@ -55,7 +60,7 @@ extend Converter:
         let visible = (self.find(node, Attr.visibility) else "visible") == "visible"
         discard(try self.picture.append(content, Item(kind = ItemKind.image, raster = index, view = size, visible = visible,
                                                       pixelated = image_quality(rendering))))
-        try self.place_image(node, content, size, state, parent)
+        return (content, size)
 
     ## Read `href`, a path relative to the resources directory, into `bytes`.
     mutating func image_file(href: str, bytes: List[u8]*) -> ImageFormat!:
@@ -76,25 +81,26 @@ extend Converter:
         let sniffed = sniff(data)
         return sniffed
 
-    ## An SVG image: converted into the picture as a group, fitted like a raster.
-    mutating func svg_image(node: u32, data: const u8[], state: const State*, parent: u32) -> !:
+    ## An SVG image converted into the picture: a detached group and its size.
+    mutating func svg_image(data: const u8[]) -> (u32, Rect)?!:
         var plain = List[u8]()
         defer plain.release()
         var text = data
         if data.length > 2 and data[0] == 0x1F and data[1] == 0x8B:
             if not try gunzip(data, &plain):
-                return
+                return none
             text = plain.view()
         var options = self.options
         options.resources = ""
-        let nested = (try convert_nested((str)text, options, self.picture)) else return
-        let size = Rect(w = nested.1.w, h = nested.1.h)
+        let nested = (try convert_nested((str)text, options, self.picture)) else return none
         let content = try self.picture.add_item(Item())
         self.picture.attach(content, nested.0)
-        try self.place_image(node, content, size, state, parent)
+        return (content, Rect(w = nested.1.w, h = nested.1.h))
 
     ## Fit `content` (an image `size` in its own pixels) into the element's box.
     mutating func place_image(node: u32, content: u32, size: Rect, state: const State*, parent: u32) -> !:
+        if not (size.w > 0.0) or not (size.h > 0.0):
+            return
         let zero = Length()
         let x = self.user_length(node, Attr.x, state, zero)
         let y = self.user_length(node, Attr.y, state, zero)
@@ -106,8 +112,16 @@ extend Converter:
             height = size.h * width / size.w
         elif has_height and not has_width:
             width = size.w * height / size.h
-        if not (width > 0.0) or not (height > 0.0) or not (size.w > 0.0) or not (size.h > 0.0):
+        if not (width > 0.0) or not (height > 0.0):
             return
+        try self.fit_image(node, content, size, Rect(x = x, y = y, w = width, h = height), parent)
+
+    ## Fit `content` of `size` into `box` by `node`'s preserveAspectRatio, under `parent`.
+    mutating func fit_image(node: u32, content: u32, size: Rect, box: Rect, parent: u32) -> !:
+        let x = box.x
+        let y = box.y
+        let width = box.w
+        let height = box.h
         var aspect = AspectRatio()
         if let text = self.attribute(node, Attr.preserve_aspect_ratio):
             aspect = parse_aspect_ratio(text) else AspectRatio()

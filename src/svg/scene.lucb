@@ -185,6 +185,10 @@ pub struct Picture:
     var clips: List[ClipServer] = List[ClipServer]()
     var masks: List[MaskServer] = List[MaskServer]()
     var rasters: List[Raster] = List[Raster]()
+    var filters: List[FilterServer] = List[FilterServer]()
+    var primitives: List[Primitive] = List[Primitive]()
+    var filter_values: List[f64] = List[f64]()
+    var filter_inputs: List[FilterInput] = List[FilterInput]()
 
     ## The document's width in pixels (its `width`, else its viewBox's).
     pub func width_px() -> f64:
@@ -210,6 +214,10 @@ pub struct Picture:
         self.clips.release()
         self.masks.release()
         self.rasters.release()
+        self.filters.release()
+        self.primitives.release()
+        self.filter_values.release()
+        self.filter_inputs.release()
 
     ## Add a detached item; answer its index.
     mutating func add_item(item: Item) -> u32!:

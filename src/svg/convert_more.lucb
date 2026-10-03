@@ -1,16 +1,12 @@
 #==============================================================================================
 #
-#   svg/convert_more - Elements still to come: images, text, filters and patterns
+#   svg/convert_more - Patterns, and text (still to come)
 #
 #==============================================================================================
 
 extend Converter:
     mutating func text_element(node: u32, state: const State*, parent: u32) -> !:
         return
-
-    ## Give `group` the filters `node` asks for; false when they hide it.
-    mutating func filters(node: u32, state: const State*, object_box: Rect?, group: u32) -> bool!:
-        return true
 
     ## The pattern `node` converts to (see `server`): its attributes from it or the
     ## patterns it references, its content from the first of them with any.

@@ -1,0 +1,322 @@
+#==============================================================================================
+#
+#   svg/filter_light - feTurbulence and the lighting primitives
+#
+#   DESCRIPTION:
+#       feTurbulence is the specification's reference Perlin noise, seeded the same way
+#       and sampled at each pixel's user-space position (so it scales with the
+#       transform), as turbulence or fractal noise, stitched when asked.
+#       feDiffuseLighting and feSpecularLighting light the input's alpha as a height map
+#       with Sobel normals (one-sided at the edges), from a distant, point or spot light
+#       mapped into device pixels, as resvg lights them.
+#
+#==============================================================================================
+
+## The noise tables a seed makes.
+struct Noise:
+    var lattice: usize[514]
+    var gradient: f64[4112]
+
+let perlin_n: i64 = 4096
+
+func noise_random(seed: i64) -> i64:
+    var result = 16807 * (seed % 127773) - 2836 * (seed // 127773)
+    if result <= 0:
+        result += 2147483647
+    return result
+
+## The lattice and gradients for `seed`.
+func noise_tables(seed_in: i64, noise: Noise*):
+    var seed = seed_in
+    if seed <= 0:
+        seed = -seed % (2147483647 - 1) + 1
+    if seed > 2147483647 - 1:
+        seed = 2147483647 - 1
+    for k in 0..<(usize)4:
+        for i in 0..<(usize)256:
+            noise.lattice[i] = i
+            for j in 0..<(usize)2:
+                seed = noise_random(seed)
+                noise.gradient[(k * 514 + i) * 2 + j] = (f64)((seed % 512) - 256) / 256.0
+            let at = (k * 514 + i) * 2
+            let s = math.sqrt(noise.gradient[at] * noise.gradient[at] + noise.gradient[at + 1] * noise.gradient[at + 1])
+            noise.gradient[at] /= s
+            noise.gradient[at + 1] /= s
+    var i: usize = 255
+    while i > 0:
+        let k = noise.lattice[i]
+        seed = noise_random(seed)
+        let j = (usize)(seed % 256)
+        noise.lattice[i] = noise.lattice[j]
+        noise.lattice[j] = k
+        i -= 1
+    for i2 in 0..<(usize)258:
+        noise.lattice[256 + i2] = noise.lattice[i2]
+        for k in 0..<(usize)4:
+            for j in 0..<(usize)2:
+                noise.gradient[(k * 514 + 256 + i2) * 2 + j] = noise.gradient[(k * 514 + i2) * 2 + j]
+
+## How the noise wraps when stitching.
+struct Stitch:
+    var on: bool = false
+    var width: i64 = 0
+    var height: i64 = 0
+    var wrap_x: i64 = 0
+    var wrap_y: i64 = 0
+
+func s_curve(t: f64) -> f64:
+    return t * t * (3.0 - 2.0 * t)
+
+func noise2(noise: const Noise*, channel: usize, x: f64, y: f64, stitch: const Stitch*) -> f64:
+    let tx = x + (f64)perlin_n
+    var bx0 = (i64)tx
+    var bx1 = bx0 + 1
+    let rx0 = tx - (f64)(i64)tx
+    let rx1 = rx0 - 1.0
+    let ty = y + (f64)perlin_n
+    var by0 = (i64)ty
+    var by1 = by0 + 1
+    let ry0 = ty - (f64)(i64)ty
+    let ry1 = ry0 - 1.0
+    if stitch.on:
+        if bx0 >= stitch.wrap_x:
+            bx0 -= stitch.width
+        if bx1 >= stitch.wrap_x:
+            bx1 -= stitch.width
+        if by0 >= stitch.wrap_y:
+            by0 -= stitch.height
+        if by1 >= stitch.wrap_y:
+            by1 -= stitch.height
+    let i = noise.lattice[(usize)(bx0 & 255)]
+    let j = noise.lattice[(usize)(bx1 & 255)]
+    let b00 = noise.lattice[i + (usize)(by0 & 255)]
+    let b10 = noise.lattice[j + (usize)(by0 & 255)]
+    let b01 = noise.lattice[i + (usize)(by1 & 255)]
+    let b11 = noise.lattice[j + (usize)(by1 & 255)]
+    let sx = s_curve(rx0)
+    let sy = s_curve(ry0)
+    let g = channel * 514
+    var q = (g + b00) * 2
+    var u = rx0 * noise.gradient[q] + ry0 * noise.gradient[q + 1]
+    q = (g + b10) * 2
+    var v = rx1 * noise.gradient[q] + ry0 * noise.gradient[q + 1]
+    let a = u + sx * (v - u)
+    q = (g + b01) * 2
+    u = rx0 * noise.gradient[q] + ry1 * noise.gradient[q + 1]
+    q = (g + b11) * 2
+    v = rx1 * noise.gradient[q] + ry1 * noise.gradient[q + 1]
+    let b = u + sx * (v - u)
+    return a + sy * (b - a)
+
+## The turbulence of one channel at `x`, `y` (user space) for the tile at (`tile_x`,
+## `tile_y`) of `tile_w` by `tile_h`.
+func turbulence(noise: const Noise*, channel: usize, x_in: f64, y_in: f64, tile_x: f64, tile_y: f64, tile_w: f64, tile_h: f64,
+                base_x: f64, base_y: f64, octaves: i64, fractal: bool, stitching: bool) -> f64:
+    var fx = base_x
+    var fy = base_y
+    var stitch = Stitch()
+    if stitching:
+        if fx != 0.0:
+            let low = math.floor(tile_w * fx) / tile_w
+            let high = math.ceil(tile_w * fx) / tile_w
+            fx = low if fx / low < high / fx else high
+        if fy != 0.0:
+            let low = math.floor(tile_h * fy) / tile_h
+            let high = math.ceil(tile_h * fy) / tile_h
+            fy = low if fy / low < high / fy else high
+        stitch.on = true
+        stitch.width = (i64)(tile_w * fx + 0.5)
+        stitch.height = (i64)(tile_h * fy + 0.5)
+        stitch.wrap_x = (i64)(tile_x * fx + (f64)perlin_n + (f64)stitch.width)
+        stitch.wrap_y = (i64)(tile_y * fy + (f64)perlin_n + (f64)stitch.height)
+    var sum = 0.0
+    var x = x_in * fx
+    var y = y_in * fy
+    var ratio = 1.0
+    for _ in 0..<octaves:
+        let n = noise2(noise, channel, x, y, &stitch)
+        sum += (n if fractal else math.abs(n)) / ratio
+        x *= 2.0
+        y *= 2.0
+        ratio *= 2.0
+        if stitch.on:
+            stitch.width *= 2
+            stitch.wrap_x = 2 * stitch.wrap_x - perlin_n
+            stitch.height *= 2
+            stitch.wrap_y = 2 * stitch.wrap_y - perlin_n
+    return sum
+
+extend Renderer:
+    ## feTurbulence and the lighting primitives.
+    mutating func generated(p: const Primitive*, region: Bounds, transform: Matrix, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
+        var canvas = try Canvas.make(0, 0, layer.width, layer.height)
+        let (sx, sy) = axis_scales(transform)
+        if p.kind == FilterKind.turbulence:
+            if sx <= 0.0 or sy <= 0.0:
+                return FilterImage(canvas = canvas, region = region, linear = p.linear)
+            let noise = try new Noise in memory.heap
+            defer free(noise) in memory.heap
+            noise_tables((i64)p.values[3], noise)
+            let fractal = p.values[5] != 0.0
+            let w = (f64)(region.x1 - region.x0)
+            let h = (f64)(region.y1 - region.y0)
+            for y in region.y0..<region.y1:
+                for x in region.x0..<region.x1:
+                    let ux = ((f64)x - transform.e) / sx
+                    let uy = ((f64)y - transform.f) / sy
+                    var c: f64[4] = [0.0, 0.0, 0.0, 0.0]
+                    for channel in 0..<(usize)4:
+                        let n = turbulence(noise, channel, ux, uy, (f64)(x - region.x0), (f64)(y - region.y0), w, h, p.values[0], p.values[1],
+                                           (i64)p.values[2], fractal, p.values[4] != 0.0)
+                        let v = (n * 255.0 + 255.0) / 2.0 if fractal else n * 255.0
+                        c[channel] = math.floor(math.clamp(v, 0.0, 255.0) + 0.5) / 255.0
+                    store_unpremultiplied(&canvas, (usize)y * canvas.width + (usize)x, c)
+            return FilterImage(canvas = canvas, region = region, linear = p.linear)
+        var input = try self.input(p.input1, region, layer, results)
+        defer input.canvas.release()
+        light_image(p, transform, &input.canvas, &canvas)
+        return FilterImage(canvas = canvas, region = region, linear = p.linear)
+
+## A surface normal: its Sobel sums and the factors that scale them.
+struct Normal:
+    var fx: f64 = 0.0
+    var fy: f64 = 0.0
+    var nx: f64 = 0.0
+    var ny: f64 = 0.0
+
+## The alpha (0..255) of `image` at (x, y).
+func height_at(image: const Canvas*, x: i64, y: i64) -> f64:
+    return (f64)image.pixels[((usize)y * image.width + (usize)x) * 4 + 3] * 255.0
+
+## The Sobel normal at (x, y), one-sided at the edges.
+func surface_normal(image: const Canvas*, x: i64, y: i64) -> Normal:
+    let w = (i64)image.width
+    let h = (i64)image.height
+    let left = x > 0
+    let right = x < w - 1
+    let top = y > 0
+    let bottom = y < h - 1
+    let xl = x - 1 if left else x
+    let xr = x + 1 if right else x
+    let yt = y - 1 if top else y
+    let yb = y + 1 if bottom else y
+    # The differences' weights: an interior pixel's, an edge row's, an edge column's, a corner's.
+    var fx = 2.0 / 3.0
+    var fy = 2.0 / 3.0
+    if left and right and top and bottom:
+        fx = 0.25
+        fy = 0.25
+    elif left and right:
+        fx = 1.0 / 3.0
+        fy = 0.5
+    elif top and bottom:
+        fx = 0.5
+        fy = 1.0 / 3.0
+    var nx = 0.0
+    var ny = 0.0
+    # Horizontal: right column minus left column, the middle row doubled.
+    for dy in -1..=1:
+        let yy = y + dy
+        if (dy == -1 and not top) or (dy == 1 and not bottom):
+            continue
+        let weight = 2.0 if dy == 0 else 1.0
+        nx += weight * (height_at(image, xr, yy) - height_at(image, xl, yy))
+    for dx in -1..=1:
+        let xx = x + dx
+        if (dx == -1 and not left) or (dx == 1 and not right):
+            continue
+        let weight = 2.0 if dx == 0 else 1.0
+        ny += weight * (height_at(image, xx, yb) - height_at(image, xx, yt))
+    return Normal(fx = fx, fy = fy, nx = -nx, ny = -ny)
+
+## Light `input` (its alpha as height) into `out`.
+func light_image(p: const Primitive*, transform: Matrix, input: const Canvas*, out: Canvas*):
+    if input.width < 3 or input.height < 3:
+        return
+    let specular = p.kind == FilterKind.specular
+    let surface = p.values[0]
+    let constant = p.values[1]
+    let exponent = p.values[2]
+    let light = p.light
+    # The light in device pixels.
+    var lx = light.values[0]
+    var ly = light.values[1]
+    var lz = light.values[2]
+    var px = light.values[3]
+    var py = light.values[4]
+    var pz = light.values[5]
+    if light.kind != 0:
+        let scale = math.sqrt(transform.a * transform.a + transform.d * transform.d) / math.sqrt(2.0)
+        let at = apply(transform, lx, ly)
+        lx = at.x
+        ly = at.y
+        lz *= scale
+        let aim = apply(transform, px, py)
+        px = aim.x
+        py = aim.y
+        pz *= scale
+    var light_x = 1.0
+    var light_y = 1.0
+    var light_z = 1.0
+    if light.kind == 0:
+        let azimuth = light.values[0] * math.pi / 180.0
+        let elevation = light.values[1] * math.pi / 180.0
+        light_x = math.cos(azimuth) * math.cos(elevation)
+        light_y = math.sin(azimuth) * math.cos(elevation)
+        light_z = math.sin(elevation)
+    let color: f64[3] = [math.round(p.color.r * 255.0), math.round(p.color.g * 255.0), math.round(p.color.b * 255.0)]
+    for y in 0..<(i64)input.height:
+        for x in 0..<(i64)input.width:
+            let normal = surface_normal(input, x, y)
+            if light.kind != 0:
+                let nz = height_at(input, x, y) / 255.0 * surface
+                let vx = lx - (f64)x
+                let vy = ly - (f64)y
+                let vz = lz - nz
+                let length = math.sqrt(vx * vx + vy * vy + vz * vz)
+                light_x = vx / length if length > 0.0 else vx
+                light_y = vy / length if length > 0.0 else vy
+                light_z = vz / length if length > 0.0 else vz
+            # The light's color here: dimmed outside a spot light's cone.
+            var shade: f64[3] = color
+            if light.kind == 2:
+                var dx = px - lx
+                var dy = py - ly
+                var dz = pz - lz
+                let length = math.sqrt(dx * dx + dy * dy + dz * dz)
+                if length > 0.0:
+                    dx /= length
+                    dy /= length
+                    dz /= length
+                let minus_l_dot_s = -(light_x * dx + light_y * dy + light_z * dz)
+                if minus_l_dot_s <= 0.0 or (light.cone and minus_l_dot_s < math.cos(light.values[7] * math.pi / 180.0)):
+                    shade = [0.0, 0.0, 0.0]
+                else:
+                    let factor = math.pow(minus_l_dot_s, light.values[6])
+                    for channel in 0..<(usize)3:
+                        shade[channel] = math.floor(math.clamp(color[channel] * factor, 0.0, 255.0) + 0.5)
+            var factor = 0.0
+            let flat = normal.nx == 0.0 and normal.ny == 0.0
+            let nx = normal.nx * (surface / 255.0) * normal.fx
+            let ny = normal.ny * (surface / 255.0) * normal.fy
+            let n_length = math.sqrt(nx * nx + ny * ny + 1.0)
+            if specular:
+                let hx = light_x
+                let hy = light_y
+                let hz = light_z + 1.0
+                let h_length = math.sqrt(hx * hx + hy * hy + hz * hz)
+                if h_length > 0.0:
+                    let n_dot_h = hz / h_length if flat else (nx * hx + ny * hy + hz) / n_length / h_length
+                    factor = constant * (n_dot_h if exponent == 1.0 else math.pow(n_dot_h, exponent))
+            else:
+                let k = light_z if flat else (nx * light_x + ny * light_y + light_z) / n_length
+                factor = constant * k
+            var rgb: f64[3] = [0.0, 0.0, 0.0]
+            for channel in 0..<(usize)3:
+                rgb[channel] = math.floor(math.clamp(shade[channel] * factor, 0.0, 255.0) + 0.5) / 255.0
+            let at = ((usize)y * out.width + (usize)x) * 4
+            let a = math.max(rgb[0], math.max(rgb[1], rgb[2])) if specular else 1.0
+            out.pixels[at] = (f32)rgb[0]
+            out.pixels[at + 1] = (f32)rgb[1]
+            out.pixels[at + 2] = (f32)rgb[2]
+            out.pixels[at + 3] = (f32)a

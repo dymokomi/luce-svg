@@ -1,0 +1,359 @@
+#==============================================================================================
+#
+#   svg/convert_fe - Each filter primitive's parameters
+#
+#   DESCRIPTION:
+#       Reads the attributes of every primitive resvg renders — feBlend, feColorMatrix,
+#       feComponentTransfer, feComposite, feConvolveMatrix, feDisplacementMap,
+#       feDropShadow, feFlood, feGaussianBlur, feImage, feMerge, feMorphology, feOffset,
+#       feTile, feTurbulence and the two lighting primitives with their light sources —
+#       with usvg's defaults, clamps and fallbacks (an invalid convolution or lighting
+#       primitive becomes a transparent flood).
+#
+#==============================================================================================
+
+extend Converter:
+    ## Fill in `primitive` for element `fe` (`tag`); false when it is not a primitive.
+    mutating func primitive_kind(fe: u32, tag: Tag, sx: f64, sy: f64, state: const State*, names: const ResultName[], index: usize,
+                                 primitive: Primitive*) -> bool!:
+        match tag:
+            .fe_blend:
+                primitive.kind = FilterKind.blend
+                primitive.blend = blend_mode(self.attribute(fe, Attr.mode) else "normal")
+            .fe_flood:
+                primitive.kind = FilterKind.flood
+                primitive.color = self.flood_color(fe)
+            .fe_offset:
+                primitive.kind = FilterKind.offset
+                primitive.values[0] = self.fe_number(fe, Attr.dx, 0.0) * sx
+                primitive.values[1] = self.fe_number(fe, Attr.dy, 0.0) * sy
+            .fe_gaussian_blur, .fe_drop_shadow:
+                let default = "2 2" if tag == Tag.fe_drop_shadow else "0 0"
+                var deviation: f64[3] = [0.0, 0.0, 0.0]
+                var count: usize = 0
+                if self.has(fe, Attr.std_deviation):
+                    count = self.number_list(fe, Attr.std_deviation, deviation, 3) else 0
+                else:
+                    var scanner = Scanner(data = default.bytes)
+                    deviation[0] = scanner.list_number() else 0.0
+                    deviation[1] = scanner.list_number() else 0.0
+                    count = 2
+                var x = 0.0
+                var y = 0.0
+                if count == 1:
+                    x = deviation[0]
+                    y = deviation[0]
+                elif count == 2:
+                    x = deviation[0]
+                    y = deviation[1]
+                if tag == Tag.fe_gaussian_blur:
+                    primitive.kind = FilterKind.blur
+                    primitive.values[0] = math.max(0.0, x * sx)
+                    primitive.values[1] = math.max(0.0, y * sy)
+                else:
+                    primitive.kind = FilterKind.drop_shadow
+                    primitive.values[0] = self.fe_number(fe, Attr.dx, 2.0) * sx
+                    primitive.values[1] = self.fe_number(fe, Attr.dy, 2.0) * sy
+                    primitive.values[2] = math.max(0.0, x * sx)
+                    primitive.values[3] = math.max(0.0, y * sy)
+                    primitive.color = self.flood_color(fe)
+            .fe_composite:
+                primitive.kind = FilterKind.composite
+                let operator = strings.trim(self.attribute(fe, Attr.operator) else "over")
+                let operators: str[5] = ["in", "out", "atop", "xor", "arithmetic"]
+                for at in 0..<operators.length:
+                    if operator == operators[at]:
+                        primitive.values[0] = (f64)(at + 1)
+                primitive.values[1] = self.fe_number(fe, Attr.k1, 0.0)
+                primitive.values[2] = self.fe_number(fe, Attr.k2, 0.0)
+                primitive.values[3] = self.fe_number(fe, Attr.k3, 0.0)
+                primitive.values[4] = self.fe_number(fe, Attr.k4, 0.0)
+            .fe_merge:
+                primitive.kind = FilterKind.merge
+                primitive.start = self.picture.filter_inputs.used
+                var node = self.tree.first_child(fe)
+                while node != 0:
+                    if self.tree.is_element(node):
+                        try self.picture.filter_inputs.push(self.filter_input(node, Attr.input, names, index))
+                    node = self.tree.next_sibling(node)
+                primitive.count = self.picture.filter_inputs.used - primitive.start
+            .fe_tile:
+                primitive.kind = FilterKind.tile
+            .fe_color_matrix:
+                try self.color_matrix(fe, primitive)
+            .fe_component_transfer:
+                primitive.kind = FilterKind.component_transfer
+                var node = self.tree.first_child(fe)
+                while node != 0:
+                    if self.tree.is_element(node):
+                        let channel_tag = self.tree.tag(node)
+                        var channel: usize = 4
+                        if channel_tag == Tag.fe_func_r:
+                            channel = 0
+                        elif channel_tag == Tag.fe_func_g:
+                            channel = 1
+                        elif channel_tag == Tag.fe_func_b:
+                            channel = 2
+                        elif channel_tag == Tag.fe_func_a:
+                            channel = 3
+                        if channel < 4:
+                            if let function = try self.transfer_function(node):
+                                primitive.functions[channel] = function
+                    node = self.tree.next_sibling(node)
+            .fe_morphology:
+                primitive.kind = FilterKind.morphology
+                primitive.values[0] = 1.0 if strings.trim(self.attribute(fe, Attr.operator) else "") == "dilate" else 0.0
+                primitive.values[1] = sx
+                primitive.values[2] = sy
+                var radius: f64[2] = [0.0, 0.0]
+                if let count = self.number_list(fe, Attr.radius, radius, 2):
+                    var rx = 0.0
+                    var ry = 0.0
+                    if count == 2:
+                        rx = radius[0]
+                        ry = radius[1]
+                    elif count == 1:
+                        rx = radius[0]
+                        ry = radius[0]
+                    if rx == 0.0 and ry == 0.0:
+                        rx = 1.0
+                        ry = 1.0
+                    if rx == 0.0:
+                        rx = 1.0
+                    if ry == 0.0:
+                        ry = 1.0
+                    if rx > 0.0 and ry > 0.0:
+                        primitive.values[1] = rx * sx
+                        primitive.values[2] = ry * sy
+            .fe_displacement_map:
+                primitive.kind = FilterKind.displacement
+                primitive.values[0] = self.fe_number(fe, Attr.scale, 0.0) * (sx + sy) * 0.5
+                primitive.values[1] = channel_of(self.attribute(fe, Attr.x_channel_selector) else "A")
+                primitive.values[2] = channel_of(self.attribute(fe, Attr.y_channel_selector) else "A")
+            .fe_turbulence:
+                primitive.kind = FilterKind.turbulence
+                var frequency: f64[2] = [0.0, 0.0]
+                if let count = self.number_list(fe, Attr.base_frequency, frequency, 2):
+                    var x = 0.0
+                    var y = 0.0
+                    if count == 2:
+                        x = frequency[0]
+                        y = frequency[1]
+                    elif count == 1:
+                        x = frequency[0]
+                        y = frequency[0]
+                    if x >= 0.0 and y >= 0.0:
+                        primitive.values[0] = x
+                        primitive.values[1] = y
+                primitive.values[2] = math.round(math.max(0.0, self.fe_number(fe, Attr.num_octaves, 1.0)))
+                primitive.values[3] = math.trunc(self.fe_number(fe, Attr.seed, 0.0))
+                primitive.values[4] = 1.0 if strings.trim(self.attribute(fe, Attr.stitch_tiles) else "") == "stitch" else 0.0
+                primitive.values[5] = 1.0 if strings.trim(self.attribute(fe, Attr.kind) else "") == "fractalNoise" else 0.0
+            .fe_convolve_matrix:
+                if not try self.convolve(fe, primitive):
+                    transparent_flood(primitive)
+            .fe_diffuse_lighting, .fe_specular_lighting:
+                if not self.lighting(fe, tag, primitive):
+                    transparent_flood(primitive)
+            .fe_image:
+                try self.fe_image(fe, state, primitive)
+            _:
+                return false
+        return true
+
+    ## flood-color with flood-opacity (black and 1 by default).
+    func flood_color(fe: u32) -> Rgba:
+        var color = Rgba()
+        if let text = self.attribute(fe, Attr.flood_color):
+            if strings.trim(text) == "currentColor":
+                color = parse_rgba(self.find(fe, Attr.color) else "black") else Rgba()
+            else:
+                color = parse_rgba(text) else Rgba()
+        color.a *= self.opacity(fe, Attr.flood_opacity, 1.0)
+        return color
+
+    mutating func color_matrix(fe: u32, primitive: Primitive*) -> !:
+        primitive.kind = FilterKind.color_matrix
+        let kind = strings.trim(self.attribute(fe, Attr.kind) else "matrix")
+        var first: f64[1] = [0.0]
+        let count = self.number_list(fe, Attr.values, first, 1)
+        if kind == "saturate":
+            if let n = count:
+                primitive.values[0] = 1.0
+                primitive.values[1] = math.clamp(first[0], 0.0, 1.0) if n > 0 else 1.0
+                return
+        elif kind == "hueRotate":
+            if let n = count:
+                primitive.values[0] = 2.0
+                primitive.values[1] = first[0] if n > 0 else 0.0
+                return
+        elif kind == "luminanceToAlpha":
+            primitive.values[0] = 3.0
+            return
+        else:
+            if let found_list = try self.value_list(fe, Attr.values):
+                let start = found_list.0
+                let length = found_list.1
+                if length == 20:
+                    primitive.start = start
+                    primitive.count = 20
+                    return
+                self.picture.filter_values.truncate(start)
+        # Anything else is the identity matrix.
+        let start = self.picture.filter_values.used
+        let unit_matrix: f64[20] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        for value in unit_matrix:
+            try self.picture.filter_values.push(value)
+        primitive.values[0] = 0.0
+        primitive.start = start
+        primitive.count = 20
+
+    ## A feFuncX element's function, or none for an unknown type.
+    mutating func transfer_function(node: u32) -> TransferFn?!:
+        let kind = strings.trim(self.attribute(node, Attr.kind) else return none)
+        if kind == "identity":
+            return TransferFn()
+        if kind == "table" or kind == "discrete":
+            var function = TransferFn(kind = 1 if kind == "table" else 2)
+            if let found_list = try self.value_list(node, Attr.table_values):
+                let start = found_list.0
+                let count = found_list.1
+                function.start = start
+                function.count = count
+            return function
+        if kind == "linear":
+            return TransferFn(kind = 3, a = self.fe_number(node, Attr.slope, 1.0), b = self.fe_number(node, Attr.intercept, 0.0))
+        if kind == "gamma":
+            return TransferFn(kind = 4, a = self.fe_number(node, Attr.amplitude, 1.0), b = self.fe_number(node, Attr.exponent, 1.0),
+                              c = self.fe_number(node, Attr.offset, 0.0))
+        return none
+
+    ## feConvolveMatrix's kernel and options; false when they are invalid.
+    mutating func convolve(fe: u32, primitive: Primitive*) -> bool!:
+        primitive.kind = FilterKind.convolve
+        var columns = 3.0
+        var rows = 3.0
+        var order: f64[2] = [0.0, 0.0]
+        if let count = self.number_list(fe, Attr.order, order, 2):
+            let x = math.trunc(order[0]) if count >= 1 else 3.0
+            let y = math.trunc(order[1]) if count >= 2 else x
+            if x > 0.0 and y > 0.0:
+                columns = x
+                rows = y
+        var sum = 0.0
+        primitive.start = self.picture.filter_values.used
+        primitive.count = 0
+        if let found_list = try self.value_list(fe, Attr.kernel_matrix):
+            let start = found_list.0
+            let count = found_list.1
+            if (f64)count == columns * rows:
+                primitive.start = start
+                primitive.count = count
+                for at in start..<start + count:
+                    sum += self.picture.filter_values.items[at]
+            else:
+                self.picture.filter_values.truncate(start)
+        if primitive.count == 0:
+            return false
+        sum = math.round(sum * 1000000.0) / 1000000.0
+        if sum == 0.0:
+            sum = 1.0
+        let divisor = self.fe_number(fe, Attr.divisor, sum)
+        if divisor == 0.0:
+            return false
+        let target_x = math.trunc(self.fe_number(fe, Attr.target_x, math.floor(columns / 2.0)))
+        let target_y = math.trunc(self.fe_number(fe, Attr.target_y, math.floor(rows / 2.0)))
+        if target_x < 0.0 or target_x >= columns or target_y < 0.0 or target_y >= rows:
+            return false
+        let edge = strings.trim(self.attribute(fe, Attr.edge_mode) else "duplicate")
+        primitive.values = [columns, rows, target_x, target_y, divisor, self.fe_number(fe, Attr.bias, 0.0),
+                            1.0 if edge == "wrap" else (2.0 if edge == "none" else 0.0),
+                            1.0 if strings.trim(self.attribute(fe, Attr.preserve_alpha) else "false") == "true" else 0.0]
+        return true
+
+    ## A lighting primitive's parameters and light; false when it has none or an
+    ## out-of-range exponent.
+    func lighting(fe: u32, tag: Tag, primitive: Primitive*) -> bool:
+        var light_node: u32 = 0
+        var child = self.tree.first_child(fe)
+        while child != 0:
+            if self.tree.is_element(child):
+                let child_tag = self.tree.tag(child)
+                if child_tag == Tag.fe_distant_light or child_tag == Tag.fe_point_light or child_tag == Tag.fe_spot_light:
+                    light_node = child
+                    break
+            child = self.tree.next_sibling(child)
+        if light_node == 0:
+            return false
+        let light_tag = self.tree.tag(light_node)
+        var light = Light()
+        if light_tag == Tag.fe_distant_light:
+            light.values[0] = self.fe_number(light_node, Attr.azimuth, 0.0)
+            light.values[1] = self.fe_number(light_node, Attr.elevation, 0.0)
+        else:
+            light.kind = 1 if light_tag == Tag.fe_point_light else 2
+            light.values[0] = self.fe_number(light_node, Attr.x, 0.0)
+            light.values[1] = self.fe_number(light_node, Attr.y, 0.0)
+            light.values[2] = self.fe_number(light_node, Attr.z, 0.0)
+            if light.kind == 2:
+                light.values[3] = self.fe_number(light_node, Attr.points_at_x, 0.0)
+                light.values[4] = self.fe_number(light_node, Attr.points_at_y, 0.0)
+                light.values[5] = self.fe_number(light_node, Attr.points_at_z, 0.0)
+                let exponent = self.fe_number(light_node, Attr.specular_exponent, 1.0)
+                light.values[6] = exponent if exponent > 0.0 else 1.0
+                if let cone = parse_number(self.attribute(light_node, Attr.limiting_cone_angle) else ""):
+                    light.values[7] = cone
+                    light.cone = true
+        primitive.light = light
+        primitive.values[0] = self.fe_number(fe, Attr.surface_scale, 1.0)
+        primitive.color = self.lighting_color(fe)
+        if tag == Tag.fe_diffuse_lighting:
+            primitive.kind = FilterKind.diffuse
+            primitive.values[1] = self.fe_number(fe, Attr.diffuse_constant, 1.0)
+        else:
+            primitive.kind = FilterKind.specular
+            primitive.values[1] = self.fe_number(fe, Attr.specular_constant, 1.0)
+            let exponent = self.fe_number(fe, Attr.specular_exponent, 1.0)
+            if exponent < 1.0 or exponent > 128.0:
+                return false
+            primitive.values[2] = exponent
+        return true
+
+    ## lighting-color: white by default, its own opacity dropped.
+    func lighting_color(fe: u32) -> Rgba:
+        let text = strings.trim(self.attribute(fe, Attr.lighting_color) else return Rgba(r = 1.0, g = 1.0, b = 1.0))
+        if text == "currentColor":
+            var color = parse_rgba(self.find(fe, Attr.color) else "black") else Rgba()
+            color.a = 1.0
+            return color
+        var color = parse_rgba(text) else Rgba(r = 1.0, g = 1.0, b = 1.0)
+        color.a = 1.0
+        return color
+
+extend Converter:
+    ## feImage: an element of the document, or an image fitted into the subregion; its
+    ## content is drawn at the subregion's corner.
+    mutating func fe_image(fe: u32, state: const State*, primitive: Primitive*) -> !:
+        primitive.kind = FilterKind.image
+        let root = try self.picture.add_item(Item())
+        primitive.root = root
+        let href = strings.trim(self.attribute(fe, Attr.href) else "")
+        if let id = iri(href):
+            if let link = self.tree.element_by_id(id):
+                try self.element(link, state, root)
+                return
+        let loaded = (try self.load_image(fe)) else return
+        try self.fit_image(fe, loaded.0, loaded.1, Rect(w = primitive.rect.w, h = primitive.rect.h), root)
+
+## Make `primitive` a transparent flood, what an invalid primitive draws.
+func transparent_flood(primitive: Primitive*):
+    primitive.kind = FilterKind.flood
+    primitive.color = Rgba(a = 0.0)
+
+## A channel selector: R 0, G 1, B 2, anything else A 3.
+func channel_of(text: str) -> f64:
+    let value = strings.trim(text)
+    if value == "R": return 0.0
+    if value == "G": return 1.0
+    if value == "B": return 2.0
+    return 3.0

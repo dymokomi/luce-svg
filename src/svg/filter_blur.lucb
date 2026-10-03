@@ -1,0 +1,188 @@
+#==============================================================================================
+#
+#   svg/filter_blur - Blurs, drop shadows and morphology
+#
+#   DESCRIPTION:
+#       feGaussianBlur scales its deviations to device pixels; a deviation under 0.05
+#       blurs nothing on that axis. Large blurs (a deviation of two pixels or more) run
+#       resvg's five successive box blurs, which approximate a Gaussian; small ones
+#       convolve with a true Gaussian kernel. Pixels past the image are transparent.
+#       feDropShadow blurs the input's alpha in the shadow color, offsets it and draws
+#       the input over it. feMorphology erodes or dilates by the minimum or maximum over
+#       a window of twice the radius.
+#
+#==============================================================================================
+
+extend Renderer:
+    mutating func blur_family(p: const Primitive*, region: Bounds, transform: Matrix, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
+        let linear = p.linear
+        let (sx, sy) = axis_scales(transform)
+        var image = try self.input_in(p.input1, linear, region, layer, results)
+        match p.kind:
+            .blur:
+                try blur_canvas(&image.canvas, p.values[0] * sx, p.values[1] * sy)
+            .drop_shadow:
+                var shadow = try Canvas.make(0, 0, image.canvas.width, image.canvas.height)
+                defer shadow.release()
+                memory.copy(shadow.pixels, image.canvas.pixels, shadow.pixels.length)
+                try blur_canvas(&shadow, p.values[2] * sx, p.values[3] * sy)
+                # The shadow's color, in the primitive's color space, at the blurred alpha.
+                var color = p.color.rgb()
+                if linear:
+                    color = Color(r = transfer.srgb_decode(color.r), g = transfer.srgb_decode(color.g), b = transfer.srgb_decode(color.b))
+                for index in 0..<shadow.width * shadow.height:
+                    let a = (f64)shadow.pixels[index * 4 + 3] * p.color.a
+                    shadow.pixels[index * 4] = (f32)(color.r * a)
+                    shadow.pixels[index * 4 + 1] = (f32)(color.g * a)
+                    shadow.pixels[index * 4 + 2] = (f32)(color.b * a)
+                    shadow.pixels[index * 4 + 3] = (f32)a
+                let dx = (i64)(p.values[0] * sx)
+                let dy = (i64)(p.values[1] * sy)
+                shift_canvas(&shadow, dx, dy)
+                composite_layer(&shadow, &image.canvas, 1.0, Blend.normal)
+                memory.copy(image.canvas.pixels, shadow.pixels, shadow.pixels.length)
+            .morphology:
+                let rx = p.values[1] * sx
+                let ry = p.values[2] * sy
+                if not (rx > 0.0 and ry > 0.0):
+                    image.canvas.clear()
+                else:
+                    try morphology(&image.canvas, p.values[0] != 0.0, rx, ry)
+            _:
+                return image
+        image.linear = linear
+        return image
+
+## Blur `canvas` by the deviations `dx` and `dy` (device pixels).
+func blur_canvas(canvas: Canvas*, deviation_x: f64, deviation_y: f64) -> !:
+    var dx = deviation_x
+    var dy = deviation_y
+    if dx < 0.05:
+        dx = 0.0
+    if dy < 0.05:
+        dy = 0.0
+    if dx == 0.0 and dy == 0.0:
+        return
+    let scratch = try new f32[canvas.pixels.length] in memory.heap
+    defer free(scratch) in memory.heap
+    if dx >= 2.0 or dy >= 2.0:
+        let boxes_x = box_sizes(dx)
+        let boxes_y = box_sizes(dy)
+        for step in 0..<(usize)5:
+            box_pass(canvas.pixels, scratch, canvas.width, canvas.height, (boxes_y[step] - 1) // 2, false)
+            box_pass(scratch, canvas.pixels, canvas.width, canvas.height, (boxes_x[step] - 1) // 2, true)
+        return
+    gauss_pass(canvas.pixels, scratch, canvas.width, canvas.height, dx, true)
+    gauss_pass(scratch, canvas.pixels, canvas.width, canvas.height, dy, false)
+
+## The five box widths whose successive blurs approximate a Gaussian of `sigma`.
+func box_sizes(sigma: f64) -> usize[5]:
+    if not (sigma > 0.0):
+        return [1, 1, 1, 1, 1]
+    let n = 5.0
+    let ideal = math.sqrt(12.0 * sigma * sigma / n) + 1.0
+    var wl = (i64)math.floor(ideal)
+    if wl % 2 == 0:
+        wl -= 1
+    let wu = wl + 2
+    let wlf = (f64)wl
+    let m = (i64)math.round((12.0 * sigma * sigma - n * wlf * wlf - 4.0 * n * wlf - 3.0 * n) / (-4.0 * wlf - 4.0))
+    var sizes: usize[5] = [1, 1, 1, 1, 1]
+    for at in 0..<(usize)5:
+        sizes[at] = (usize)(wl if (i64)at < m else wu)
+    return sizes
+
+## One box blur of `radius` from `source` into `target`, along rows (`horizontal`) or
+## columns; pixels past the edge count as transparent.
+func box_pass(source: const f32[], target: f32[], width: usize, height: usize, radius: usize, horizontal: bool):
+    if radius == 0:
+        memory.copy(target, source, target.length)
+        return
+    let lines = height if horizontal else width
+    let length = width if horizontal else height
+    let stride: usize = 4 if horizontal else width * 4
+    let scale = 1.0 / (f32)(2 * radius + 1)
+    for line in 0..<lines:
+        let base = line * width * 4 if horizontal else line * 4
+        var sum: f32[4] = [0.0, 0.0, 0.0, 0.0]
+        for at in 0..<math_min(radius, length):
+            for channel in 0..<(usize)4:
+                sum[channel] += source[base + at * stride + channel]
+        for at in 0..<length:
+            let entering = at + radius
+            if entering < length:
+                for channel in 0..<(usize)4:
+                    sum[channel] += source[base + entering * stride + channel]
+            for channel in 0..<(usize)4:
+                target[base + at * stride + channel] = sum[channel] * scale
+            if at >= radius:
+                let leaving = at - radius
+                for channel in 0..<(usize)4:
+                    sum[channel] -= source[base + leaving * stride + channel]
+
+## A true Gaussian blur of `sigma` from `source` into `target` along one axis.
+func gauss_pass(source: const f32[], target: f32[], width: usize, height: usize, sigma: f64, horizontal: bool):
+    if sigma <= 0.0:
+        memory.copy(target, source, target.length)
+        return
+    let radius = (usize)math.ceil(sigma * 3.0)
+    var weights: f32[64]
+    let taps = math_min(radius, 63)
+    var total = 0.0
+    for at in 0..<taps + 1:
+        let w = math.exp(-((f64)(at * at)) / (2.0 * sigma * sigma))
+        weights[at] = (f32)w
+        total += w if at == 0 else 2.0 * w
+    for at in 0..<taps + 1:
+        weights[at] = (f32)((f64)weights[at] / total)
+    let lines = height if horizontal else width
+    let length = width if horizontal else height
+    let stride: usize = 4 if horizontal else width * 4
+    for line in 0..<lines:
+        let base = line * width * 4 if horizontal else line * 4
+        for at in 0..<length:
+            var sum: f32[4] = [0.0, 0.0, 0.0, 0.0]
+            for tap in 0..<taps + 1:
+                let w = weights[tap]
+                if at >= tap:
+                    for channel in 0..<(usize)4:
+                        sum[channel] += source[base + (at - tap) * stride + channel] * w
+                if tap > 0 and at + tap < length:
+                    for channel in 0..<(usize)4:
+                        sum[channel] += source[base + (at + tap) * stride + channel] * w
+            for channel in 0..<(usize)4:
+                target[base + at * stride + channel] = sum[channel]
+
+## Erode (`dilate` false) or dilate `canvas` over a window of twice the radii.
+func morphology(canvas: Canvas*, dilate: bool, rx: f64, ry: f64) -> !:
+    let columns = math_min((usize)math.ceil(rx) * 2, canvas.width)
+    let rows = math_min((usize)math.ceil(ry) * 2, canvas.height)
+    let target_x = columns // 2
+    let target_y = rows // 2
+    let source = try new f32[canvas.pixels.length] in memory.heap
+    defer free(source) in memory.heap
+    memory.copy(source, canvas.pixels, source.length)
+    let w = (i64)canvas.width
+    let h = (i64)canvas.height
+    for y in 0..<h:
+        for x in 0..<w:
+            var value: f32[4] = [0.0, 0.0, 0.0, 0.0] if dilate else [1.0, 1.0, 1.0, 1.0]
+            for oy in 0..<rows:
+                let ty = y - (i64)target_y + (i64)oy
+                if ty < 0 or ty >= h:
+                    continue
+                for ox in 0..<columns:
+                    let tx = x - (i64)target_x + (i64)ox
+                    if tx < 0 or tx >= w:
+                        continue
+                    let at = ((usize)ty * canvas.width + (usize)tx) * 4
+                    for channel in 0..<(usize)4:
+                        let s = source[at + channel]
+                        if dilate:
+                            if s > value[channel]:
+                                value[channel] = s
+                        elif s < value[channel]:
+                            value[channel] = s
+            let at = ((usize)y * canvas.width + (usize)x) * 4
+            for channel in 0..<(usize)4:
+                canvas.pixels[at + channel] = value[channel]

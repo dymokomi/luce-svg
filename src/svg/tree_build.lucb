@@ -328,6 +328,22 @@ func append_node(tree: Tree*, parent: u32, node: Node) -> u32!:
 ## and clip paths, masks and filters that apply themselves, directly or through what
 ## they reference.
 func break_cycles(tree: Tree*) -> !:
+    # An feImage drawing the element its own filter is on: that element loses the filter.
+    for index in 1..<tree.nodes.used:
+        let node = (u32)index
+        if tree.nodes.items[node].kind != Kind.element or tree.tag(node) != Tag.fe_image:
+            continue
+        let target = tree.linked(node, Attr.href) else continue
+        let filter = tree.nodes.items[node].parent
+        let id = tree.element_id(filter)
+        if id.length == 0:
+            continue
+        let value = tree.attribute(target, Attr.filter) else continue
+        var wanted: u8[256]
+        let reference = format(wanted, f"url(#{id})") catch _:
+            recover ""
+        if reference.length > 0 and strings.contains(value, reference):
+            set_none(tree, target, Attr.filter)
     for _ in 0..<1024:
         let found = (try find_cycle(tree)) else return
         set_none(tree, found.0, found.1)

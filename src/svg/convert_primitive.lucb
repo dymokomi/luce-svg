@@ -1,0 +1,189 @@
+#==============================================================================================
+#
+#   svg/convert_primitive - Filter elements and their primitives
+#
+#   DESCRIPTION:
+#       A filter element's region (filterUnits, -10%/120% by default) and its
+#       primitives, from the first filter in its `href` chain that has any. Each
+#       primitive's subregion defaults to the filter region (feFlood and feImage in
+#       bounding-box units default to the box); its inputs resolve by result name to an
+#       earlier primitive, an unknown name to the one just before, a missing `in` too,
+#       and the first primitive's to the source graphic. Numbers follow usvg's
+#       defaults and limits, scaled by the box with primitiveUnits objectBoundingBox.
+#
+#==============================================================================================
+
+## A primitive's result name and its index within its filter.
+struct ResultName:
+    var name: str = ""
+    var index: usize = 0
+
+extend Converter:
+    ## Add the filter element `node` for an element with `object_box`; false when it is
+    ## not a usable filter.
+    mutating func filter_element(node: u32, state: const State*, object_box: Rect?) -> bool!:
+        if self.tree.tag(node) != Tag.filter:
+            return false
+        let units_source = self.filter_source(node, Attr.filter_units)
+        let bbox_units = strings.trim(self.attribute(units_source, Attr.filter_units) else "") != "userSpaceOnUse"
+        let primitive_source = self.filter_source(node, Attr.primitive_units)
+        let primitive_bbox = strings.trim(self.attribute(primitive_source, Attr.primitive_units) else "") == "objectBoundingBox"
+        var rect = Rect(x = self.length(self.filter_source(node, Attr.x), Attr.x, bbox_units, state, Length(number = -10.0, unit = Unit.percent)),
+                        y = self.length(self.filter_source(node, Attr.y), Attr.y, bbox_units, state, Length(number = -10.0, unit = Unit.percent)),
+                        w = self.length(self.filter_source(node, Attr.width), Attr.width, bbox_units, state, Length(number = 120.0, unit = Unit.percent)),
+                        h = self.length(self.filter_source(node, Attr.height), Attr.height, bbox_units, state, Length(number = 120.0, unit = Unit.percent)))
+        if not (rect.w > 0.0) or not (rect.h > 0.0):
+            return false
+        if bbox_units:
+            let box = object_box else return false
+            rect = rect_in_bbox(rect, box)
+        let holder = self.filter_holder(node) else return false
+        let start = self.picture.primitives.used
+        try self.active.push(node)
+        defer self.active.used -= 1
+        try self.primitives(holder, primitive_bbox, state, object_box, rect)
+        let count = self.picture.primitives.used - start
+        if count == 0:
+            return false
+        try self.picture.filters.push(FilterServer(rect = rect, primitive_start = start, primitive_count = count))
+        return true
+
+    ## The filter in `node`'s href chain that sets `name`, else `node`.
+    func filter_source(node: u32, name: Attr) -> u32:
+        var at = node
+        for _ in 0..<64:
+            if self.has(at, name):
+                return at
+            let next = self.tree.linked(at, Attr.href) else return node
+            if next == at or next == node or self.tree.tag(next) != Tag.filter:
+                return node
+            at = next
+        return node
+
+    ## The first filter in `node`'s href chain with children, or none.
+    func filter_holder(node: u32) -> u32?:
+        var at = node
+        for _ in 0..<64:
+            if self.tree.tag(at) != Tag.filter:
+                return none
+            if self.tree.first_element_child(at) != 0:
+                return at
+            let next = self.tree.linked(at, Attr.href) else return none
+            if next == at or next == node:
+                return none
+            at = next
+        return none
+
+    ## Convert the primitives of filter `holder` into the picture.
+    mutating func primitives(holder: u32, bbox_units: bool, state: const State*, object_box: Rect?, region: Rect) -> !:
+        var names = List[ResultName]()
+        defer names.release()
+        var sx = 1.0
+        var sy = 1.0
+        if bbox_units:
+            let box = object_box else return
+            sx = box.w
+            sy = box.h
+        let start = self.picture.primitives.used
+        var child = self.tree.first_child(holder)
+        while child != 0:
+            let fe = child
+            child = self.tree.next_sibling(child)
+            if not self.tree.is_element(fe):
+                continue
+            let tag = self.tree.tag(fe)
+            let subregion = self.subregion(fe, tag, bbox_units, state, object_box, region) else break
+            let index = self.picture.primitives.used - start
+            var primitive = Primitive(rect = subregion)
+            let interpolation = strings.trim(self.find(fe, Attr.color_interpolation_filters) else "linearRGB")
+            primitive.linear = interpolation != "sRGB"
+            primitive.input1 = self.filter_input(fe, Attr.input, names.view(), index)
+            primitive.input2 = self.filter_input(fe, Attr.in2, names.view(), index)
+            if not try self.primitive_kind(fe, tag, sx, sy, state, names.view(), index, &primitive):
+                continue
+            try self.picture.primitives.push(primitive)
+            if let name = self.attribute(fe, Attr.result):
+                try names.push(ResultName(name = name, index = index))
+
+    ## A primitive's subregion in user space, or none when it is empty.
+    func subregion(fe: u32, tag: Tag, bbox_units: bool, state: const State*, object_box: Rect?, region: Rect) -> Rect?:
+        let x = self.optional_length(fe, Attr.x, bbox_units, state)
+        let y = self.optional_length(fe, Attr.y, bbox_units, state)
+        let w = self.optional_length(fe, Attr.width, bbox_units, state)
+        let h = self.optional_length(fe, Attr.height, bbox_units, state)
+        var base = region
+        if (tag == Tag.fe_flood or tag == Tag.fe_image) and bbox_units:
+            let box = object_box else return none
+            let r = Rect(x = x else 0.0, y = y else 0.0, w = w else 1.0, h = h else 1.0)
+            if not (r.w > 0.0) or not (r.h > 0.0):
+                return none
+            return rect_in_bbox(r, box)
+        if bbox_units:
+            let r = Rect(x = x else 0.0, y = y else 0.0, w = w else 1.0, h = h else 1.0)
+            if not (r.w > 0.0) or not (r.h > 0.0):
+                return none
+            # As usvg computes it: the region placed by the subregion's fractions.
+            return rect_in_bbox(base, r)
+        let result = Rect(x = x else base.x, y = y else base.y, w = w else base.w, h = h else base.h)
+        if not (result.w > 0.0) or not (result.h > 0.0):
+            return none
+        return result
+
+    ## A length attribute when it is set and readable.
+    func optional_length(node: u32, name: Attr, bbox_units: bool, state: const State*) -> f64?:
+        let text = self.attribute(node, name) else return none
+        let value = parse_length(text) else return none
+        return self.resolve_length(node, name, value, bbox_units, state)
+
+    ## The input `in` or `in2` names: a source, an earlier result, else the previous
+    ## primitive's result (the source graphic for the first).
+    func filter_input(fe: u32, name: Attr, names: const ResultName[], index: usize) -> FilterInput:
+        let previous = FilterInput(source = 2, result = index - 1) if index > 0 else FilterInput()
+        let text = strings.trim(self.attribute(fe, name) else return previous)
+        if text == "SourceGraphic" or text == "BackgroundImage" or text == "BackgroundAlpha" or text == "FillPaint" or text == "StrokePaint":
+            return FilterInput()
+        if text == "SourceAlpha":
+            return FilterInput(source = 1)
+        var at = names.length
+        while at > 0:
+            at -= 1
+            if names[at].name == text:
+                return FilterInput(source = 2, result = names[at].index)
+        return previous
+
+    ## A number attribute of a primitive, else `default`.
+    func fe_number(fe: u32, name: Attr, default: f64) -> f64:
+        return parse_number(self.attribute(fe, name) else "") else default
+
+    ## Up to `most` numbers of a list attribute into `out`; how many, or none when the
+    ## attribute is absent or unreadable.
+    func number_list(fe: u32, name: Attr, out: f64[], most: usize) -> usize?:
+        let text = self.attribute(fe, name) else return none
+        var scanner = Scanner(data = text.bytes)
+        var count: usize = 0
+        while true:
+            scanner.skip_spaces()
+            if scanner.at_end():
+                break
+            let value = scanner.list_number() else return none
+            if count < most:
+                out[count] = value
+            count += 1
+        return count
+
+    ## Push a list attribute's numbers to the picture's filter values: (start, count),
+    ## or none when it is unreadable.
+    mutating func value_list(fe: u32, name: Attr) -> (usize, usize)?!:
+        let text = self.attribute(fe, name) else return none
+        let start = self.picture.filter_values.used
+        var scanner = Scanner(data = text.bytes)
+        while true:
+            scanner.skip_spaces()
+            if scanner.at_end():
+                break
+            if let value = scanner.list_number():
+                try self.picture.filter_values.push(value)
+            else:
+                self.picture.filter_values.truncate(start)
+                return none
+        return (start, self.picture.filter_values.used - start)

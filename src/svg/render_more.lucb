@@ -1,6 +1,6 @@
 #==============================================================================================
 #
-#   svg/render_more - Images, filters and patterns still to come
+#   svg/render_more - Drawing images and pattern tiles
 #
 #==============================================================================================
 
@@ -34,9 +34,6 @@ extend Renderer:
         let shader = Shader(kind = BrushKind.pattern, linear = self.linear, inverse = inverse, tile = &tile, nearest = nearest, pad = true)
         paint_coverage(canvas, &self.cover, &shader)
 
-    mutating func apply_filters(item: const Item*, transform: Matrix, layer: Canvas*) -> !:
-        return
-
     ## The shader of pattern brush `brush` for `item` under `transform`: the tile drawn
     ## at the device's scale into `self.tile`, as resvg draws it, and repeated.
     mutating func pattern_shader(brush: Brush, item: const Item*, transform: Matrix) -> Shader?!:
@@ -55,8 +52,7 @@ extend Renderer:
         if let view = pattern.view_box:
             content = view_box_transform(view, pattern.aspect, rect.w, rect.h)
         let pattern_space = multiply(base, pattern.transform)
-        let sx = math.hypot(pattern_space.a, pattern_space.b)
-        let sy = math.hypot(pattern_space.c, pattern_space.d)
+        let (sx, sy) = axis_scales(pattern_space)
         let tile_w = math.round(rect.w * sx)
         let tile_h = math.round(rect.h * sy)
         if not (tile_w >= 1.0) or not (tile_h >= 1.0) or tile_w * tile_h > 16777216.0:

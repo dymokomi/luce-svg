@@ -1,0 +1,215 @@
+#==============================================================================================
+#
+#   svg/convert_filter - Filters: the `filter` property and filter elements
+#
+#   DESCRIPTION:
+#       `filter` is a list of filter functions (blur, drop-shadow, brightness, contrast,
+#       grayscale, hue-rotate, invert, opacity, saturate, sepia), each one primitive over
+#       a region round the element's box, and `url(#id)` references to filter
+#       elements. A filter element (its attributes and primitives possibly inherited
+#       through `href`) has a region in its filterUnits and primitives whose subregions
+#       and lengths are in its primitiveUnits; each primitive reads its inputs by
+#       result name. An unreadable list means no filter; a list of only broken
+#       references hides the element. As resvg's usvg converts them.
+#
+#==============================================================================================
+
+extend Converter:
+    ## Give `group` the filters `node` asks for; false when they hide it.
+    mutating func filters(node: u32, state: const State*, object_box: Rect?, group: u32) -> bool!:
+        let text = self.attribute(node, Attr.filter) else return true
+        if strings.trim(text) == "none":
+            return true
+        let start = self.picture.filters.used
+        var broken_link = false
+        var scanner = Scanner(data = text.bytes)
+        while true:
+            scanner.skip_spaces()
+            if scanner.at_end():
+                break
+            let name = scanner.identifier()
+            scanner.skip_spaces()
+            if scanner.peek() != '(':
+                self.picture.filters.truncate(start)
+                return true
+            scanner.pos += 1
+            scanner.skip_spaces()
+            if name == "url":
+                if scanner.peek() != '#':
+                    self.picture.filters.truncate(start)
+                    return true
+                scanner.pos += 1
+                let id_start = scanner.pos
+                while not scanner.at_end() and scanner.peek() != ' ' and scanner.peek() != ')':
+                    scanner.pos += 1
+                let id = (str)scanner.data[id_start..<scanner.pos]
+                scanner.skip_spaces()
+                if scanner.peek() != ')' or id.length == 0:
+                    self.picture.filters.truncate(start)
+                    return true
+                scanner.pos += 1
+                if let link = self.tree.element_by_id(id):
+                    # A filter whose feImage draws this element again is ignored.
+                    if not self.entered(link):
+                        if not try self.filter_element(link, state, object_box):
+                            broken_link = true
+                else:
+                    broken_link = true
+                continue
+            let ok = try self.filter_function(node, name, &scanner, state, object_box)
+            if not ok:
+                self.picture.filters.truncate(start)
+                return true
+        let count = self.picture.filters.used - start
+        if count == 0 and broken_link:
+            return false
+        self.picture.items.items[group].filter_start = start
+        self.picture.items.items[group].filter_count = count
+        return true
+
+    ## Read one filter function after its `(` and add it as a filter; false when it does
+    ## not parse (the whole list is then ignored).
+    mutating func filter_function(node: u32, name: str, scanner: Scanner*, state: const State*, object_box: Rect?) -> bool!:
+        var primitive = Primitive(linear = false)
+        var region = Rect(x = -0.1, y = -0.1, w = 1.2, h = 1.2)
+        if name == "blur" or name == "drop-shadow":
+            region = Rect(x = -0.5, y = -0.5, w = 2.0, h = 2.0)
+        if name == "blur":
+            primitive.kind = FilterKind.blur
+            var deviation = 0.0
+            if scanner.peek() != ')':
+                let value = scanner.length() else return false
+                if value.number < 0.0 or value.unit == Unit.percent:
+                    return false
+                deviation = self.resolve_length(node, Attr.dx, value, false, state)
+            primitive.values[0] = math.max(0.0, deviation)
+            primitive.values[1] = math.max(0.0, deviation)
+        elif name == "drop-shadow":
+            if scanner.peek() == ')':
+                return false
+            primitive.kind = FilterKind.drop_shadow
+            var color: Rgba? = try_color(scanner)
+            var current = false
+            if color == none and scanner.starts_with("currentColor"):
+                scanner.pos += 12
+                current = true
+            scanner.skip_spaces()
+            let dx = scanner.length() else return false
+            scanner.skip_spaces()
+            let dy = scanner.length() else return false
+            if dx.unit == Unit.percent or dy.unit == Unit.percent:
+                return false
+            scanner.skip_spaces()
+            var deviation = 0.0
+            let before = scanner.pos
+            if let value = scanner.length():
+                if value.number >= 0.0 and value.unit != Unit.percent:
+                    deviation = self.resolve_length(node, Attr.dx, value, false, state)
+                else:
+                    scanner.pos = before
+            scanner.skip_spaces()
+            if color == none and not current:
+                color = try_color(scanner)
+                if color == none and scanner.starts_with("currentColor"):
+                    scanner.pos += 12
+            let found = color else parse_rgba(self.find(node, Attr.color) else "black") else Rgba()
+            primitive.color = found
+            primitive.values = [self.resolve_length(node, Attr.dx, dx, false, state), self.resolve_length(node, Attr.dy, dy, false, state),
+                                deviation, deviation, 0.0, 0.0, 0.0, 0.0]
+        elif name == "hue-rotate":
+            primitive.kind = FilterKind.color_matrix
+            primitive.values[0] = 2.0
+            if scanner.peek() != ')':
+                let value = scanner.number() else return false
+                var degrees = value
+                if scanner.starts_with("deg"):
+                    scanner.pos += 3
+                elif scanner.starts_with("grad"):
+                    scanner.pos += 4
+                    degrees = value * 0.9
+                elif scanner.starts_with("rad"):
+                    scanner.pos += 3
+                    degrees = value * 180.0 / math.pi
+                elif scanner.starts_with("turn"):
+                    scanner.pos += 4
+                    degrees = value * 360.0
+                elif value != 0.0:
+                    return false
+                primitive.values[1] = degrees
+        else:
+            var amount = 1.0
+            if scanner.peek() != ')':
+                let value = scanner.number() else return false
+                amount = value
+                if scanner.peek() == '%':
+                    scanner.pos += 1
+                    amount = value / 100.0
+                if amount < 0.0:
+                    return false
+            if not try self.color_function(name, amount, &primitive):
+                return false
+        scanner.skip_spaces()
+        if scanner.peek() != ')':
+            return false
+        scanner.pos += 1
+        let box = object_box else return true
+        let rect = rect_in_bbox(region, box)
+        primitive.rect = rect
+        let at = self.picture.primitives.used
+        try self.picture.primitives.push(primitive)
+        try self.picture.filters.push(FilterServer(rect = rect, primitive_start = at, primitive_count = 1))
+        return true
+
+    ## brightness, contrast, grayscale, invert, opacity, saturate and sepia as
+    ## primitives; false for an unknown name.
+    mutating func color_function(name: str, amount: f64, primitive: Primitive*) -> bool!:
+        let a = math.min(amount, 1.0)
+        if name == "brightness" or name == "contrast":
+            primitive.kind = FilterKind.component_transfer
+            let intercept = 0.0 if name == "brightness" else 0.5 - 0.5 * amount
+            for channel in 0..<(usize)3:
+                primitive.functions[channel] = TransferFn(kind = 3, a = amount, b = intercept)
+        elif name == "invert" or name == "opacity":
+            primitive.kind = FilterKind.component_transfer
+            let start = self.picture.filter_values.used
+            if name == "invert":
+                try self.picture.filter_values.push(a)
+                try self.picture.filter_values.push(1.0 - a)
+                for channel in 0..<(usize)3:
+                    primitive.functions[channel] = TransferFn(kind = 1, start = start, count = 2)
+            else:
+                try self.picture.filter_values.push(0.0)
+                try self.picture.filter_values.push(a)
+                primitive.functions[3] = TransferFn(kind = 1, start = start, count = 2)
+        elif name == "saturate":
+            primitive.kind = FilterKind.color_matrix
+            primitive.values[0] = 1.0
+            primitive.values[1] = math.max(0.0, amount)
+        elif name == "grayscale" or name == "sepia":
+            primitive.kind = FilterKind.color_matrix
+            let start = self.picture.filter_values.used
+            let k = 1.0 - a
+            var m: f64[20] = [0.2126 + 0.7874 * k, 0.7152 - 0.7152 * k, 0.0722 - 0.0722 * k, 0.0, 0.0,
+                              0.2126 - 0.2126 * k, 0.7152 + 0.2848 * k, 0.0722 - 0.0722 * k, 0.0, 0.0,
+                              0.2126 - 0.2126 * k, 0.7152 - 0.7152 * k, 0.0722 + 0.9278 * k, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 1.0, 0.0]
+            if name == "sepia":
+                m = [0.393 + 0.607 * k, 0.769 - 0.769 * k, 0.189 - 0.189 * k, 0.0, 0.0,
+                     0.349 - 0.349 * k, 0.686 + 0.314 * k, 0.168 - 0.168 * k, 0.0, 0.0,
+                     0.272 - 0.272 * k, 0.534 - 0.534 * k, 0.131 + 0.869 * k, 0.0, 0.0,
+                     0.0, 0.0, 0.0, 1.0, 0.0]
+            for value in m:
+                try self.picture.filter_values.push(value)
+            primitive.start = start
+            primitive.count = 20
+        else:
+            return false
+        return true
+
+## A color at the scanner, which moves past it only when one is there.
+func try_color(scanner: Scanner*) -> Rgba?:
+    let saved = scanner.pos
+    if let color = scan_color(scanner):
+        return color
+    scanner.pos = saved
+    return none

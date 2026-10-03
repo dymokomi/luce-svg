@@ -1,0 +1,194 @@
+#==============================================================================================
+#
+#   svg/filter_render - Running a group's filters
+#
+#   DESCRIPTION:
+#       A filtered group is drawn into a layer covering its filters' regions (on the
+#       device grid, up to twice the canvas past each side), so effects can pull in
+#       content beyond the canvas. Each filter then runs its primitives in turn over
+#       images the size of the layer: an image is cleared outside the primitive's
+#       subregion, tagged with the color space its values are in (sRGB or linearRGB)
+#       and converted when a primitive working in the other one reads it. The last
+#       result, back in the working space, replaces the layer. As resvg runs them.
+#
+#==============================================================================================
+
+## A whole-pixel rectangle: columns `x0..<x1`, rows `y0..<y1`.
+struct Bounds:
+    var x0: i64 = 0
+    var y0: i64 = 0
+    var x1: i64 = 0
+    var y1: i64 = 0
+
+    func empty() -> bool:
+        return self.x1 <= self.x0 or self.y1 <= self.y0
+
+    ## The overlap with `other`.
+    func clipped(other: Bounds) -> Bounds:
+        return Bounds(x0 = math.imax(self.x0, other.x0), y0 = math.imax(self.y0, other.y0), x1 = math.imin(self.x1, other.x1),
+                      y1 = math.imin(self.y1, other.y1))
+
+## `rect` mapped by `m`, on the pixel grid as tiny-skia rounds it: the corner floored,
+## the size rounded up.
+func pixel_bounds(rect: Rect, m: Matrix) -> Bounds:
+    let r = transform_rect(rect, m)
+    let x = (i64)math.floor(r.x)
+    let y = (i64)math.floor(r.y)
+    let w = math.imax(1, (i64)math.ceil(r.w))
+    let h = math.imax(1, (i64)math.ceil(r.h))
+    return Bounds(x0 = x, y0 = y, x1 = x + w, y1 = y + h)
+
+## A filter result: a layer-sized image, the pixels it may cover, and its color space.
+struct FilterImage:
+    var canvas: Canvas
+    var region: Bounds
+    var linear: bool = false
+
+extend Renderer:
+    ## A group with filters: drawn into a layer round its filter regions, filtered,
+    ## clipped and masked there, then composited onto `canvas`.
+    mutating func filtered_group(index: u32, transform: Matrix, canvas: Canvas*) -> !:
+        let item = self.picture.items.items[index]
+        var area = Bounds(x0 = (i64)1 << 40, y0 = (i64)1 << 40, x1 = -((i64)1 << 40), y1 = -((i64)1 << 40))
+        for at in item.filter_start..<item.filter_start + item.filter_count:
+            let b = pixel_bounds(self.picture.filters.items[at].rect, transform)
+            area = Bounds(x0 = math.imin(area.x0, b.x0), y0 = math.imin(area.y0, b.y0), x1 = math.imax(area.x1, b.x1), y1 = math.imax(area.y1, b.y1))
+        let w = (i64)canvas.width
+        let h = (i64)canvas.height
+        area = area.clipped(Bounds(x0 = -2 * w, y0 = -2 * h, x1 = 3 * w, y1 = 3 * h))
+        if area.empty():
+            return
+        let layer_w = (usize)(area.x1 - area.x0)
+        let layer_h = (usize)(area.y1 - area.y0)
+        let shifted = multiply(Matrix(e = -(f64)area.x0, f = -(f64)area.y0), transform)
+        var layer = try Canvas.make(canvas.x + area.x0, canvas.y + area.y0, layer_w, layer_h)
+        defer layer.release()
+        var inner = try Renderer.make(self.picture, layer_w, layer_h, self.linear)
+        defer inner.release()
+        inner.context_transform = multiply(Matrix(e = -(f64)area.x0, f = -(f64)area.y0), self.context_transform)
+        inner.context_box = self.context_box
+        try inner.children(index, shifted, &layer)
+        for at in item.filter_start..<item.filter_start + item.filter_count:
+            try inner.run_filter(&self.picture.filters.items[at], shifted, &layer)
+        if item.clip != 0:
+            try inner.apply_clip(item.clip - 1, shifted, &layer)
+        if item.mask != 0:
+            try inner.apply_mask(item.mask - 1, shifted, &layer)
+        composite_at(canvas, &layer, area.x0, area.y0, item.opacity, item.blend)
+
+    ## Run `filter` over `layer` (whose pixels `transform` maps user space into).
+    mutating func run_filter(filter: const FilterServer*, transform: Matrix, layer: Canvas*) -> !:
+        let whole = Bounds(x1 = (i64)layer.width, y1 = (i64)layer.height)
+        let region = pixel_bounds(filter.rect, transform).clipped(whole)
+        if region.empty():
+            layer.clear()
+            return
+        var results = List[FilterImage]()
+        defer:
+            for result in results.view():
+                var held = result.canvas
+                held.release()
+            results.release()
+        for at in filter.primitive_start..<filter.primitive_start + filter.primitive_count:
+            let primitive = self.picture.primitives.items[at]
+            var subregion = pixel_bounds(primitive.rect, transform)
+            if primitive.kind == FilterKind.offset and primitive.input1.source == 2:
+                subregion = results.items[primitive.input1.result].region
+            var image = try self.primitive(&primitive, region, transform, layer, results.view())
+            if primitive.kind == FilterKind.offset:
+                # An offset keeps what it moved, and the region of what it read.
+                image.region = subregion
+            else:
+                image.region = subregion.clipped(region)
+                clear_outside(&image.canvas, image.region)
+            try results.push(image)
+        let last = results.items[results.used - 1]
+        var final = try self.converted(&last, self.linear)
+        defer final.release()
+        memory.copy(layer.pixels, final.pixels, layer.pixels.length)
+
+    ## An input of `primitive`: the source graphic, its alpha, or an earlier result. The
+    ## copy is the caller's to release.
+    mutating func input(which: FilterInput, region: Bounds, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
+        if which.source == 2 and which.result < results.length:
+            let found = results[which.result]
+            var copy = try Canvas.make(0, 0, layer.width, layer.height)
+            memory.copy(copy.pixels, found.canvas.pixels, copy.pixels.length)
+            return FilterImage(canvas = copy, region = found.region, linear = found.linear)
+        var copy = try Canvas.make(0, 0, layer.width, layer.height)
+        memory.copy(copy.pixels, layer.pixels, copy.pixels.length)
+        clear_outside(&copy, region)
+        if which.source == 1:
+            for at in 0..<copy.width * copy.height:
+                copy.pixels[at * 4] = 0.0
+                copy.pixels[at * 4 + 1] = 0.0
+                copy.pixels[at * 4 + 2] = 0.0
+        return FilterImage(canvas = copy, region = region, linear = self.linear)
+
+    ## A copy of `image` with its values in linear light (`linear`) or sRGB.
+    func converted(image: const FilterImage*, linear: bool) -> Canvas!:
+        var copy = try Canvas.make(0, 0, image.canvas.width, image.canvas.height)
+        memory.copy(copy.pixels, image.canvas.pixels, copy.pixels.length)
+        if image.linear != linear:
+            convert_space(&copy, linear)
+        return copy
+
+    ## An input already in the color space `linear` asks for.
+    mutating func input_in(which: FilterInput, linear: bool, region: Bounds, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
+        var image = try self.input(which, region, layer, results)
+        if image.linear != linear:
+            convert_space(&image.canvas, linear)
+            image.linear = linear
+        return image
+
+## Convert premultiplied pixels to linear light (`linear`) or back to sRGB.
+func convert_space(canvas: Canvas*, linear: bool):
+    for index in 0..<canvas.width * canvas.height:
+        let at = index * 4
+        let a = (f64)canvas.pixels[at + 3]
+        if a <= 0.0:
+            continue
+        for channel in 0..<(usize)3:
+            let value = math.clamp((f64)canvas.pixels[at + channel] / a, 0.0, 1.0)
+            let mapped = transfer.srgb_decode(value) if linear else transfer.srgb_encode(value)
+            canvas.pixels[at + channel] = (f32)(mapped * a)
+
+## Clear every pixel of `canvas` outside `region`.
+func clear_outside(canvas: Canvas*, region: Bounds):
+    for row in 0..<canvas.height:
+        let y = (i64)row
+        for column in 0..<canvas.width:
+            let x = (i64)column
+            if x < region.x0 or x >= region.x1 or y < region.y0 or y >= region.y1:
+                let at = (row * canvas.width + column) * 4
+                canvas.pixels[at] = 0.0
+                canvas.pixels[at + 1] = 0.0
+                canvas.pixels[at + 2] = 0.0
+                canvas.pixels[at + 3] = 0.0
+
+## Composite `layer` onto `target` with its top-left at (`x`, `y`) of `target`.
+func composite_at(target: Canvas*, layer: const Canvas*, x: i64, y: i64, opacity: f64, blend: Blend):
+    let alpha = (f32)opacity
+    for row in 0..<layer.height:
+        let ty = y + (i64)row
+        if ty < 0 or ty >= (i64)target.height:
+            continue
+        for column in 0..<layer.width:
+            let tx = x + (i64)column
+            if tx < 0 or tx >= (i64)target.width:
+                continue
+            let source_at = (row * layer.width + column) * 4
+            let sa = layer.pixels[source_at + 3] * alpha
+            if sa <= 0.0:
+                continue
+            let to = ((usize)ty * target.width + (usize)tx) * 4
+            let s: f32[4] = [layer.pixels[source_at] * alpha, layer.pixels[source_at + 1] * alpha, layer.pixels[source_at + 2] * alpha, sa]
+            let d: f32[4] = [target.pixels[to], target.pixels[to + 1], target.pixels[to + 2], target.pixels[to + 3]]
+            var out = d
+            if blend == Blend.normal:
+                let keep = 1.0 - sa
+                out = [s[0] + d[0] * keep, s[1] + d[1] * keep, s[2] + d[2] * keep, sa + d[3] * keep]
+            else:
+                out = blend_pixel(blend, s, d)
+            for channel in 0..<(usize)4:
+                target.pixels[to + channel] = out[channel]

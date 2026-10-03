@@ -58,6 +58,19 @@ the bitmap). It is built in four stages, each its own set of fragments:
   SVG and gzip-compressed SVGZ images convert into the picture as vector groups. Fitted
   by preserveAspectRatio (clipped when slicing), sampled as image-rendering asks. GIF
   and WebP are recognised but not decoded.
+- **Filters** (`convert_filter.lucb`, `convert_primitive.lucb`, `convert_fe.lucb`,
+  `filter_*.lucb`): `filter` lists of `url(#id)` and the CSS filter functions (blur,
+  drop-shadow, brightness, contrast, grayscale, hue-rotate, invert, opacity, saturate,
+  sepia); filter elements with `href` inheritance, filterUnits and primitiveUnits,
+  subregions, named results and color-interpolation-filters (each image converted
+  between sRGB and linearRGB as a primitive needs); every primitive resvg renders —
+  feBlend, feColorMatrix, feComponentTransfer, feComposite (with arithmetic),
+  feConvolveMatrix, feDisplacementMap, feDropShadow, feFlood, feGaussianBlur (box
+  blurs for large deviations, a Gaussian kernel for small), feImage (images and
+  document elements), feMerge, feMorphology, feOffset, feTile, feTurbulence, and
+  feDiffuseLighting and feSpecularLighting with distant, point and spot lights. A
+  filtered group is drawn in a layer round its filter regions, up to twice the
+  canvas past each side, so offsets and blurs can bring in content from beyond it.
 
 **Compositing is in sRGB**, as browsers and resvg composite: colors blend as their
 encoded values, so half-transparent black over white is 50 % grey. This is the default
