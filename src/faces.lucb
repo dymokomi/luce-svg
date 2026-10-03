@@ -15,7 +15,7 @@
 
 import memory
 import strings
-import luce_fonts.fonts
+from luce_fonts import fonts
 import svg
 
 ## How many faces each generic family tries.

@@ -11,8 +11,7 @@
 #
 #==============================================================================================
 
-import luce_std.files
-import luce_std.math
+from luce_std import files, math
 import memory
 import c as c_api
 import strings

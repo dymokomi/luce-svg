@@ -16,12 +16,12 @@
 #
 #==============================================================================================
 
-import luce_std.math
+from luce_std import math
 import memory
 import strings
-import luce_fonts.fonts
+from luce_fonts import fonts
 import svg
-import luce_color.transfer
+from luce_color import transfer
 from faces import FaceCache
 
 ## Where the next run goes, in the coordinates of its `<text>`.
