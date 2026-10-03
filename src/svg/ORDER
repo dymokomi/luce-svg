@@ -34,6 +34,8 @@ convert_filter.lucb
 convert_primitive.lucb
 convert_fe.lucb
 text_fonts.lucb
+text_font_catalog.lucb
+text_font_files.lucb
 text_chunks.lucb
 text_spans.lucb
 text_layout.lucb
@@ -55,3 +57,4 @@ raster_tests.lucb
 text_tests.lucb
 picture_tests.lucb
 text_tests_full.lucb
+text_tests_files.lucb

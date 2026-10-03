@@ -38,6 +38,9 @@
 #       convert*.lucb      converting the tree: structure, paints, servers, use, clips
 #       canvas.lucb        layers and blend modes
 #       shade.lucb         painting coverage with colors, gradients and patterns
+#       text_*.lucb        text: glyph sources, layout, shaping, text paths and bidi;
+#                          text_font_files.lucb is FontFiles, the default glyph source
+#                          over font files (the catalog in text_font_catalog.lucb)
 #       render_scene.lucb  drawing the render tree, clip paths and masks
 #       render_more.lucb   images, filters and patterns (to come)
 #       picture.lucb       the full renderer's public entry points
@@ -47,9 +50,12 @@
 
 import memory
 import interop
+import os
 from luce_std import math
 import strings
+import sync
 from luce_color import transfer
+from luce_fonts import opentype, shaping
 
 ## An SVG the parser could not read.
 pub let invalid: ErrorCode = ErrorCode.package(320)

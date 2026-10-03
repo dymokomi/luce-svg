@@ -52,7 +52,7 @@ extend Converter:
         var content = TextContent()
         defer content.release()
         try self.read_text(node, state, &content)
-        let source = self.options.glyphs else return
+        let source = self.glyph_source() else return
         var fonts = source
         var clusters = List[Cluster]()
         defer clusters.release()

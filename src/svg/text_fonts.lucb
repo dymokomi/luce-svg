@@ -3,11 +3,11 @@
 #   svg/text_fonts - Where SVG text gets its glyphs
 #
 #   DESCRIPTION:
-#       luce-svg reads no font files: a caller that wants `<text>` drawn by the full
-#       renderer passes a GlyphSource in Options, and the text layout (text_layout.lucb)
-#       asks it for faces, glyphs, advances, kerning and outlines. A source might wrap
-#       luce-fonts' OpenType faces, a font set loaded from files, or a test's synthetic
-#       glyphs. Without one, text is laid out but draws nothing. A source that shapes
+#       The text layout (text_layout.lucb) asks a GlyphSource for faces, glyphs, advances,
+#       kerning and outlines. A caller passes one in Options (a font set of its own, or a
+#       test's synthetic glyphs); without one, `load` uses FontFiles over the system's font
+#       directories (text_font_files.lucb), read and shaped by luce-fonts, and with
+#       `system_fonts` false text is laid out but draws nothing. A source that shapes
 #       (ligatures, marks, Arabic joining, Indic reordering) does so in `shape`; one that
 #       does not maps a scalar at a time with kerning between pairs. Scalars a face lacks
 #       are looked up in the source's fallback face.

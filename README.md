@@ -8,8 +8,8 @@ records its element (an element's subpaths fill together by the nonzero rule)
 and its paints: fill and stroke as sRGB colors, currentColor or gradients,
 opacities, and its pen (width, caps, joins, miter limit, dashes). The parser
 depends on luce-std and luce-color (sRGB decoding); the picture renderer adds
-luce-fonts for text, and the full renderer luce-png, luce-jpeg and luce-compress for
-images.
+luce-fonts for text (its platform faces), and the full renderer luce-fonts' font files
+and shaping for text and luce-png, luce-jpeg and luce-compress for images.
 
 ## The full renderer
 
@@ -79,20 +79,29 @@ the bitmap). It is built in four stages, each its own set of fragments:
   painted as the element that asks for them, text along a path (startOffset, glyphs
   turned with the path and hidden past its ends), and each span's fill, stroke and
   paint-order, with bounding-box paint servers measuring the whole text, and vertical
-  writing modes (CJK upright, other scripts turned a quarter). **luce-svg
-  reads no font files**: glyphs come from a `GlyphSource` the caller passes in
-  `Options.glyphs` — faces chosen by family list, weight, style and stretch, glyphs
-  by scalar with a fallback face, advances, pair kerning, metrics and outlines, and
+  writing modes (CJK upright, other scripts turned a quarter). Glyphs come from a
+  `GlyphSource` — faces chosen by family list, weight, style and stretch, glyphs by
+  scalar with a fallback face, advances, pair kerning, metrics and outlines, and
   (optionally) `shape`, which shapes a run of one direction as HarfBuzz does
   (ligatures, marks, contextual forms, small caps); a source that does not shape maps
   a scalar at a time with pair kerning. luce-svg itself splits each chunk into bidi
   runs (UAX #9 for one left-to-right paragraph, `text_bidi.lucb`), shapes the chunk
-  per span as usvg does, and forms clusters from the shaped glyphs. Without a source,
-  text is laid out but draws nothing. The intended source is luce-fonts once it
-  carries the browser's OpenType reader and shaper; Arabic joining and Indic
-  reordering need that shaper's complex-script shapers, and variable fonts
-  (font-variation-settings), vertical glyph substitutes and color fonts need
-  additions to the source interface.
+  per span as usvg does, and forms clusters from the shaped glyphs.
+- **Fonts** (`text_font_files.lucb`, `text_font_catalog.lucb`): `FontFiles` is the
+  GlyphSource over font files, read and shaped by luce-fonts' `opentype` and
+  `shaping` modules (HarfBuzz's default shaper). `FontFiles.system()` catalogues the
+  platform's font directories, `FontFiles.open(directories)` the caller's (recursively;
+  .ttf, .otf, .ttc and .otc); only each face's small tables are read until its glyphs
+  are needed. Families match without regard to case, styles and weights by CSS's
+  rules, generic families stand for each platform's usual faces unless
+  `set_generic("serif", "Noto Serif")` says otherwise, an uninstalled list falls back
+  to serif, and a character a face lacks comes from the first face that has it. Faces
+  with bitmap or SVG color glyphs are left out. When `Options.glyphs` is none, `load`
+  sets text in `FontFiles.system()` (catalogued once per process, on the first text
+  that needs it; conversions that use it take turns); `Options(system_fonts = false)`
+  leaves such text undrawn. Arabic joining and Indic reordering need the shaper's
+  complex-script shapers, and variable fonts (font-variation-settings), vertical glyph
+  substitutes and color fonts need additions to luce-fonts and the source interface.
 
 **Compositing is in sRGB**, as browsers and resvg composite: colors blend as their
 encoded values, so half-transparent black over white is 50 % grey. This is the default
@@ -223,11 +232,11 @@ Baseline (2026-10-03, the Drawing renderer before this work, in linear light): 4
 
 The full renderer (2026-10-03): 1308 of 1719 without a GlyphSource — filters 389/397,
 masking 88/93, paint-servers 151/153, painting 285/306, shapes 133/133, structure
-244/258, text 18/379 (text needs glyphs). With a GlyphSource over the browser's
-OpenType reader and the suite's fonts (a measurement tool kept outside this repository,
-run with `--tool` and `--tool-arg`): 1671 of 1719 — filters 396, masking 93,
-paint-servers 152, painting 305, shapes 133, structure 254, text 338. What still
-fails: GIF and WebP images (no decoders), `rgba()` with a percentage alpha (read as
+244/258, text 18/379 (text needs glyphs). With FontFiles over the suite's fonts
+(`crates/resvg/tests/fonts`, which `tools/suite.py` passes as `--fonts`, with resvg's
+generic families; `--system-fonts` sets text in the system's instead), 2026-10-03:
+1671 of 1719 — filters 396, masking 93, paint-servers 152, painting 305, shapes 133,
+structure 254, text 338. What still fails: GIF and WebP images (no decoders), `rgba()` with a percentage alpha (read as
 CSS Color 4 reads it; resvg rejects it), two transform-precision cases, and text that
 needs more of its source than that one gives — Arabic joining and Indic shaping,
 variable fonts, color fonts.

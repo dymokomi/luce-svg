@@ -1,0 +1,64 @@
+#==============================================================================================
+#
+#   svg/text_tests_files - Tests of FontFiles, the GlyphSource over font files
+#
+#   DESCRIPTION:
+#       The fonts are luce-fonts' test fonts (SerenitySans, Lato Bold, Noto Emoji and the CFF
+#       Noto Sans Tifinagh), from its checkout beside this one, as the tests run from the
+#       repository root.
+#
+#==============================================================================================
+
+## The test fonts' directory.
+let test_font_directory: str = "../luce-fonts/tests/fonts"
+
+## Draw `source` with `options` into a fresh `width` by `height` bitmap (in the heap).
+func draw_with_options(source: str, options: Options, width: u32, height: u32) -> u8[]!:
+    let picture = try load(source, options)
+    defer picture.release()
+    let pixels = try new u8[(usize)width * (usize)height * 4] in memory.heap
+    errdefer free(pixels) in memory.heap
+    try render(picture.value(), fit_transform(picture.value(), width, height), width, height, pixels)
+    return pixels
+
+## How many pixels of `pixels` are painted.
+func painted_count(pixels: const u8[]) -> usize:
+    var count: usize = 0
+    for at in 0..<pixels.length // 4:
+        if pixels[at * 4 + 3] > 0:
+            count += 1
+    return count
+
+test "font files are catalogued by family, weight and slant":
+    let directories: str[1] = [test_font_directory]
+    var fonts = try FontFiles.open(directories)
+    defer fonts.close()
+    assert(fonts.face_count() == 4)
+    let lato = fonts.select_face(FaceQuery(families = "\"lato\", serif", weight = 700)) else trap("no Lato")
+    assert(fonts.family(lato) == "Lato")
+    # A list with nothing installed falls back to serif, here set to SerenitySans.
+    try fonts.set_generic("serif", "SerenitySans")
+    let fallback = fonts.select_face(FaceQuery(families = "Nonesuch")) else trap("no fallback")
+    assert(fonts.family(fallback) == "SerenitySans")
+    # A character Lato lacks comes from a face that has it.
+    let emoji = fonts.fallback_face(lato, 0x1F600) else trap("no emoji face")
+    assert(fonts.family(emoji) == "Noto Emoji")
+    assert(fonts.glyph_index(lato, (u32)'A') == 36)
+    assert(fonts.face_metrics(lato).units_per_em == 2000.0)
+
+test "text is shaped and drawn from font files, and not drawn without a source":
+    let directories: str[1] = [test_font_directory]
+    var fonts = try FontFiles.open(directories)
+    defer fonts.close()
+    try fonts.set_generic("sans-serif", "Lato")
+    let source = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"30\"><text x=\"4\" y=\"22\" font-size=\"20\" font-family=\"sans-serif\">Hi fi</text></svg>"
+    let drawn = try draw_with_options(source, Options(glyphs = &fonts), 80, 30)
+    defer free(drawn) in memory.heap
+    # The H's left stem at x 4..7, from the cap height down to the baseline.
+    assert(rgba_at(drawn, 80, 6, 15)[3] == 255 and rgba_at(drawn, 80, 6, 25)[3] == 0)
+    var outlines = Path()
+    defer outlines.release()
+    assert(try fonts.glyph_outline(1, 36, &outlines) or try fonts.glyph_outline(2, 36, &outlines))
+    let blank = try draw_with_options(source, Options(system_fonts = false), 80, 30)
+    defer free(blank) in memory.heap
+    assert(painted_count(blank) == 0 and painted_count(drawn) > 100)

@@ -113,7 +113,7 @@ extend Converter:
         let order = paint_order(self.find(node, Attr.paint_order) else "normal")
         span.stroke_first = order[0] == 1 or (order[0] == 2 and order[1] == 1)
         span.visible = (self.find(node, Attr.visibility) else "visible") == "visible"
-        if let source = self.options.glyphs:
+        if let source = self.glyph_source():
             var fonts = source
             span.face = fonts.select_face(self.face_query(node))
         span.kerning = not (self.found_length(node, Attr.kerning, state, -1.0) == 0.0 or strings.trim(self.find(node, Attr.font_kerning) else "") == "none")

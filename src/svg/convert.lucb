@@ -27,8 +27,12 @@ pub struct Options:
     pub var languages: str = "en"
     ## The directory relative image references resolve against; "" loads no files.
     pub var resources: str = ""
-    ## Where `<text>` gets its glyphs; without a source text is not drawn.
+    ## Where `<text>` gets its glyphs. Without a source, text is set in the system's fonts
+    ## (FontFiles.system(), made once, on the first text that needs it), or not drawn when
+    ## `system_fonts` is false.
     pub var glyphs: GlyphSource? = none
+    ## Whether text without a GlyphSource is set in the system's fonts.
+    pub var system_fonts: bool = true
 
 ## What the conversion of one element knows about where it stands.
 struct State:
@@ -55,12 +59,30 @@ struct Converter:
     ## Elements being converted as clip paths, masks or patterns, so references back to
     ## one of them are refused rather than followed for ever.
     var active: List[u32] = List[u32]()
+    ## Whether this conversion holds the system fonts (system_glyphs).
+    var system_fonts_held: bool = false
 
     mutating func release():
         if self.servers.length > 0:
             free(self.servers) in memory.heap
         self.server_colors.release()
         self.active.release()
+        if self.system_fonts_held:
+            system_fonts_lock.unlock()
+            self.system_fonts_held = false
+
+    ## Where text gets its glyphs: the caller's source, else the system's fonts, which the
+    ## conversion holds (one at a time) until it is released.
+    mutating func glyph_source() -> GlyphSource?:
+        if let source = self.options.glyphs:
+            return source
+        if not self.options.system_fonts:
+            return none
+        if not self.system_fonts_held:
+            system_fonts_lock.lock()
+            self.system_fonts_held = true
+        let system = system_glyphs() else return none
+        return system
 
     func entered(node: u32) -> bool:
         for at in self.active.view():

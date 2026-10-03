@@ -10,7 +10,9 @@ when at most --allowed (0.5 %) of its pixels differ. The fuzzy rule absorbs
 anti-aliasing differences — tiny-skia samples four sub-scanlines a pixel, so its edge
 coverage is quantised to quarters, up to an eighth (32 levels) from the exact area this
 renderer computes — but not a missing or misplaced feature. --drawing measures the
-Drawing renderer instead (the baseline). Prints a pass table per feature directory and per category.
+Drawing renderer instead (the baseline). Text is set in the suite's fonts
+(crates/resvg/tests/fonts, with resvg's generic families); --system-fonts sets it in the
+system's fonts instead. Prints a pass table per feature directory and per category.
 
   build/env/bin/python tools/suite.py [--only painting/fill] [--save run.json]
                                       [--compare run.json] [--list-failing] [--jobs 8]
@@ -23,6 +25,7 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITE = ROOT.parent / ".donors/resvg/crates/resvg/tests/tests"
+FONTS = SUITE.parent / "fonts"
 OUT = ROOT / "build/suite-out"
 TOOL = ROOT / "build/suite"
 
@@ -105,6 +108,7 @@ def main():
     p.add_argument("--list-failing", action="store_true")
     p.add_argument("--no-build", action="store_true")
     p.add_argument("--drawing", action="store_true", help="draw with the Drawing renderer (the baseline)")
+    p.add_argument("--system-fonts", action="store_true", help="set text in the system's fonts, not the suite's")
     p.add_argument("--tool", default="", help="a renderer built elsewhere taking the same arguments")
     p.add_argument("--tool-arg", action="append", default=[], help="an argument the tool takes after them")
     a = p.parse_args()
@@ -118,6 +122,8 @@ def main():
     EXTRA.extend(a.tool_arg)
     if a.drawing:
         EXTRA.append("--drawing")
+    elif not a.system_fonts and not a.tool:
+        EXTRA.extend(["--fonts", str(FONTS)])
     OUT.mkdir(parents=True, exist_ok=True)
     for stale in OUT.rglob("*.rgba"):
         stale.unlink()

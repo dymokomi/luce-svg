@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-svg" {
     str owner = "dymokomi"
-    str version = "0.6.0"
+    str version = "0.6.1"
     str kind = "package"
     str language = "luce-base"
     str description = "A small SVG parser, flattener and rasteriser (coverage masks and linear RGBA) for Luce/Base, with SVG files drawn as pictures, their text set in the system's fonts."
@@ -16,7 +16,7 @@ def package "luce-svg" {
 
     def dependency "luce-fonts" {
         str owner = "dymokomi"
-        str version = "^0.3.0"
+        str version = "^0.3.2"
         str path = "../luce-fonts"
     }
 

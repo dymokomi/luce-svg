@@ -1,0 +1,260 @@
+#==============================================================================================
+#
+#   svg/text_font_catalog - The font files of some directories, described without loading them
+#
+#   DESCRIPTION:
+#       FontFiles (text_font_files.lucb) picks faces from every font file under a set of
+#       directories, the system's by default, which can hold hundreds of files and a
+#       gigabyte of fonts. So the catalog reads only each face's table directory and its
+#       small tables (head, maxp, hhea, OS/2, post, name and cmap) and keeps them as a
+#       compact font of their own, an `opentype.SfntFace` that answers the face's family,
+#       weight, width, slope, vertical metrics and which characters it has. The whole file
+#       is read the first time a face's glyphs, advances or shaping are needed. Faces with
+#       color glyphs (COLR, CBDT, sbix, SVG), which this renderer cannot paint, and faces
+#       without outlines are left out.
+#
+#==============================================================================================
+
+## One face of a font file: what the catalog read, and the whole face once loaded.
+struct CatalogFace:
+    ## The file (NUL-terminated: `path_storage` holds the NUL too) and the face's index in it.
+    var path: str
+    var path_storage: u8[]
+    var index: u32
+    ## The compact font of the face's small tables, and the face read from it.
+    var compact: u8[]
+    var probe: opentype.SfntFace*
+    ## The whole file and its HarfBuzz font, once loaded; `failed` when loading failed.
+    var data: u8[]
+    var font: shaping.HbFontT*? = none
+    var failed: bool = false
+
+    ## The loaded face, or none when it is not loaded.
+    func face() -> opentype.SfntFace*?:
+        let font = self.font else return none
+        return font.face.face
+
+    ## Free what the face holds.
+    mutating func release():
+        if let font = self.font:
+            if let face = font.face.face:
+                opentype.sfnt_face_destroy(face)
+            free(font.face) in memory.heap
+            free(font) in memory.heap
+        if self.data.length > 0:
+            free(self.data) in memory.heap
+        opentype.sfnt_face_destroy(self.probe)
+        free(self.compact) in memory.heap
+        free(self.path_storage) in memory.heap
+
+    ## Read the whole file and make its HarfBuzz font; false when that fails.
+    mutating func load() -> bool:
+        if self.font != none:
+            return true
+        if self.failed:
+            return false
+        with memory.heap:
+            let data: u8[]? = files.read((c_api.str)self.path) catch:
+                recover none
+            if let bytes = data:
+                let face = shaping.hb_face_create(shaping.hb_blob_create(bytes), self.index)
+                if face.face != none:
+                    self.data = bytes
+                    self.font = shaping.hb_font_create(face)
+                    return true
+                free(face)
+                free(bytes)
+        self.failed = true
+        return false
+
+## The tables the catalog keeps of a face; the outline tables only as markers.
+let catalog_tables: str[7] = ["head", "maxp", "hhea", "OS/2", "post", "name", "cmap"]
+let catalog_markers: str[4] = ["glyf", "loca", "CFF ", "CFF2"]
+let catalog_color_tables: str[3] = ["CBDT", "sbix", "SVG "]
+
+## The largest small table the catalog reads (a name or cmap table past it is skipped).
+let catalog_table_limit: u32 = 1 << 22
+
+## The tag of a four-character name.
+func catalog_tag(name: str) -> u32:
+    return opentype.sfnt_tag(name.bytes[0], name.bytes[1], name.bytes[2], name.bytes[3])
+
+## Fill `out` from `offset` of `file`; false when the file is shorter.
+func read_exactly(file: files.File*, offset: u64, out: u8[]) -> bool!:
+    discard(try file.seek((i64)offset))
+    var filled: usize = 0
+    while filled < out.length:
+        let count = try file.read(out[filled..])
+        if count == 0:
+            return false
+        filled += count
+    return true
+
+## The faces of `path` (one for a font file, each of a collection) appended to `faces`.
+func catalog_file(path: str, faces: List[CatalogFace]*) -> !:
+    var file = try files.File.open((c_api.str)path)
+    defer file.destroy()
+    var header: u8[12]
+    if not try read_exactly(&file, 0, header):
+        return
+    if opentype.sfnt_u32(header, 0) == opentype.sfnt_tag('t', 't', 'c', 'f'):
+        let count = (usize)(opentype.sfnt_u32(header, 8) if opentype.sfnt_u32(header, 8) < 256 else 256)
+        let offsets = try new u8[count * 4] in memory.heap
+        defer free(offsets) in memory.heap
+        if not try read_exactly(&file, 12, offsets):
+            return
+        for index in 0..<count:
+            try catalog_face(path, &file, (u64)opentype.sfnt_u32(offsets, index * 4), (u32)index, faces)
+        return
+    try catalog_face(path, &file, 0, 0, faces)
+
+## The face whose table directory starts at `directory` of `file`, if it can be drawn.
+func catalog_face(path: str, file: files.File*, directory: u64, index: u32, faces: List[CatalogFace]*) -> !:
+    var header: u8[12]
+    if not try read_exactly(file, directory, header):
+        return
+    let table_count = (usize)opentype.sfnt_u16(header, 4)
+    if table_count == 0 or table_count > 512:
+        return
+    let records = try new u8[table_count * 16] in memory.heap
+    defer free(records) in memory.heap
+    if not try read_exactly(file, directory + 12, records):
+        return
+    # Which tables to keep, and the size of the compact font.
+    var kept: (u32, u32, u32)[11]
+    var kept_count: usize = 0
+    var size: usize = 12
+    for at in 0..<table_count:
+        let tag = opentype.sfnt_u32(records, at * 16)
+        let length = opentype.sfnt_u32(records, at * 16 + 12)
+        for name in catalog_color_tables:
+            if tag == catalog_tag(name):
+                return
+        var wanted = false
+        var marker = false
+        for name in catalog_tables:
+            wanted = wanted or tag == catalog_tag(name)
+        for name in catalog_markers:
+            marker = marker or tag == catalog_tag(name)
+        if (wanted and length <= catalog_table_limit) or (marker and length > 0):
+            if kept_count < kept.length:
+                let kept_length: u32 = 1 if marker else length
+                kept[kept_count] = (tag, opentype.sfnt_u32(records, at * 16 + 8), kept_length)
+                kept_count += 1
+                size += 16 + (usize)((kept_length + 3) & ~(u32)3)
+    # The compact font: a table directory and the kept tables (a marker is one zero byte).
+    let compact = try new u8[size] in memory.heap
+    var keep_compact = false
+    defer:
+        if not keep_compact:
+            free(compact) in memory.heap
+    compact[0] = header[0]
+    compact[1] = header[1]
+    compact[2] = header[2]
+    compact[3] = header[3]
+    compact[5] = (u8)kept_count
+    var data_at = 12 + 16 * kept_count
+    for at in 0..<kept_count:
+        let (tag, offset, length) = kept[at]
+        let record = 12 + at * 16
+        put_u32_be(compact, record, tag)
+        put_u32_be(compact, record + 8, (u32)data_at)
+        put_u32_be(compact, record + 12, length)
+        var is_marker = false
+        for name in catalog_markers:
+            is_marker = is_marker or tag == catalog_tag(name)
+        if not is_marker and length > 0:
+            if not try read_exactly(file, (u64)offset, compact[data_at..<data_at + (usize)length]):
+                return
+        data_at += (usize)((length + 3) & ~(u32)3)
+    var probe: opentype.SfntFace*? = none
+    with memory.heap:
+        probe = opentype.sfnt_face_create(compact, 0) catch:
+            recover none
+    let face = probe else return
+    if face.outline_format == opentype.SfntOutlineFormat.none_ or face.family_name.length == 0:
+        with memory.heap:
+            opentype.sfnt_face_destroy(face)
+        return
+    errdefer:
+        with memory.heap:
+            opentype.sfnt_face_destroy(face)
+    let copied = try new u8[path.length + 1] in memory.heap
+    errdefer free(copied) in memory.heap
+    memory.copy(copied, path.bytes, path.length)
+    try faces.push(CatalogFace(path = (str)copied[..<path.length], path_storage = copied, index = index, compact = compact, probe = face))
+    keep_compact = true
+
+## Writes `value` big-endian at `offset` of `data`.
+func put_u32_be(data: u8[], offset: usize, value: u32):
+    data[offset] = (u8)(value >> 24)
+    data[offset + 1] = (u8)((value >> 16) & 0xFF)
+    data[offset + 2] = (u8)((value >> 8) & 0xFF)
+    data[offset + 3] = (u8)(value & 0xFF)
+
+## Whether `name` ends like a font file (.ttf, .otf, .ttc, .otc, any case).
+func is_font_file(name: str) -> bool:
+    if name.length < 4 or name.bytes[name.length - 4] != '.':
+        return false
+    var extension: u8[3]
+    for at in 0..<(usize)3:
+        let byte = name.bytes[name.length - 3 + at]
+        extension[at] = byte + 32 if byte >= 'A' and byte <= 'Z' else byte
+    let text = (str)extension[0..<3]
+    return text == "ttf" or text == "otf" or text == "ttc" or text == "otc"
+
+## Collects the faces of the font files under a directory tree.
+struct CatalogWalk: files.WalkVisitor:
+    var faces: List[CatalogFace]*
+
+    mutating func visit(path: str, info: files.Metadata, depth: usize) -> bool!:
+        if info.kind == files.FileKind.directory:
+            return true
+        if info.kind == files.FileKind.regular and is_font_file(path):
+            # A file that cannot be read or is not a font is skipped.
+            catalog_file(path, self.faces) catch:
+                recover ()
+        return false
+
+## The faces under each of `directories` (missing directories are skipped), in the heap.
+func catalog_directories(directories: const str[], faces: List[CatalogFace]*) -> !:
+    for directory in directories:
+        var buffer: u8[1024]
+        let root = format(buffer, f"{directory}") else continue
+        if not files.exists((c_api.str)root):
+            continue
+        var walk = CatalogWalk(faces = faces)
+        with memory.heap:
+            files.walk((c_api.str)root, &walk, 16) catch:
+                recover ()
+
+## `text` NUL-terminated in `arena`.
+func store_c(arena: Arena*, text: str) -> str!:
+    let stored = try arena.reserve(text.length + 1)
+    memory.copy(stored, text.bytes, text.length)
+    stored[text.length] = 0
+    return (str)stored[..<text.length]
+
+## The directories a platform keeps its fonts in, as NUL-terminated strings in `arena`.
+func system_font_directories(arena: Arena*, out: List[str]*) -> !:
+    var buffer: u8[1024]
+    if os.macos:
+        try out.push("/System/Library/Fonts")
+        try out.push("/Library/Fonts")
+        if let home = os.env("HOME"):
+            try out.push(try store_c(arena, try format(buffer, f"{home}/Library/Fonts")))
+    elif os.windows:
+        if let windows = os.env("WINDIR"):
+            try out.push(try store_c(arena, try format(buffer, f"{windows}\\Fonts")))
+        else:
+            try out.push("C:\\Windows\\Fonts")
+        if let app_data = os.env("LOCALAPPDATA"):
+            try out.push(try store_c(arena, try format(buffer, f"{app_data}\\Microsoft\\Windows\\Fonts")))
+    else:
+        try out.push("/usr/share/fonts")
+        try out.push("/usr/local/share/fonts")
+        if let data = os.env("XDG_DATA_HOME"):
+            try out.push(try store_c(arena, try format(buffer, f"{data}/fonts")))
+        if let home = os.env("HOME"):
+            try out.push(try store_c(arena, try format(buffer, f"{home}/.local/share/fonts")))
+            try out.push(try store_c(arena, try format(buffer, f"{home}/.fonts")))
