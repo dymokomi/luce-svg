@@ -76,3 +76,16 @@ test "textLength stretches spacing, or spacing and glyphs":
     assert(rgba_at(pixels, 40, 8, 6)[3] == 255 and rgba_at(pixels, 40, 22, 6)[3] == 255 and rgba_at(pixels, 40, 25, 6)[3] == 0)
     # Spaced: boxes at 0..6 and, the gap spread, 18..24.
     assert(rgba_at(pixels, 40, 8, 21)[3] == 0 and rgba_at(pixels, 40, 20, 21)[3] == 255)
+
+test "path lengths and positions along a path, as kurbo measures them":
+    # A straight cubic 100 long, and a cubic quarter circle of radius 100.
+    let line = straight(Point(0.0, 0.0), Point(60.0, 80.0))
+    assert(math.abs(line.length(0.5) - 100.0) < 1e-9)
+    let point = line.at(line.parameter(50.0, 1e-6))
+    assert(math.abs(point.x - 30.0) < 1e-4 and math.abs(point.y - 40.0) < 1e-4)
+    let k = 0.5522847498
+    let arc = Bezier(p0 = Point(100.0, 0.0), p1 = Point(100.0, 100.0 * k), p2 = Point(100.0 * k, 100.0), p3 = Point(0.0, 100.0))
+    assert(math.abs(arc.length(0.01) - 157.08) < 0.05)
+    # Half way along lies on the diagonal.
+    let middle = arc.at(arc.parameter(arc.length(1e-6) * 0.5, 1e-6))
+    assert(math.abs(middle.x - middle.y) < 1e-3)

@@ -74,6 +74,9 @@ struct TextContent:
     var spans: List[TextSpan] = List[TextSpan]()
     var paths: List[Path] = List[Path]()
     var vertical: bool = false
+    ## How far the text is scaled up on the canvas: the root mean of its transform's
+    ## axis scales, from the `<text>` out.
+    var scale: f64 = 1.0
 
     mutating func release():
         for index in 0..<self.paths.used:
@@ -109,6 +112,13 @@ extend Converter:
         try self.read_scalars(node, content)
         let mode = strings.trim(self.find(node, Attr.writing_mode) else "lr-tb")
         content.vertical = mode == "tb" or mode == "tb-rl" or mode == "vertical-rl" or mode == "vertical-lr"
+        var transform = Matrix()
+        var at = node
+        while at != 0:
+            transform = multiply(self.transform_of(at, Attr.transform, state), transform)
+            at = self.tree.nodes.items[at].parent
+        let (sx, sy) = axis_scales(transform)
+        content.scale = math.sqrt(sx * sy)
         var reader = ChunkReader()
         try self.read_chunks(node, state, content, &reader)
 
