@@ -163,7 +163,9 @@ extend Converter:
                         _:
                             content.positions.items[index].dy = value
                     at += 1
-        if let text = self.attribute(node, Attr.rotate):
+        let rotate = self.attribute(node, Attr.rotate) else ""
+        if rotate.length > 0 and number_list(rotate):
+            let text = rotate
             let count = self.count_chars(node)
             var scanner = Scanner(data = text.bytes)
             var last = 0.0
@@ -185,3 +187,13 @@ extend Converter:
             elif item.kind == Kind.element:
                 try self.read_positions(child, state, content, offset)
             child = item.next
+
+## Whether `text` is a list of numbers; one that is not (such as `5mm`) is ignored.
+func number_list(text: str) -> bool:
+    var scanner = Scanner(data = text.bytes)
+    while true:
+        scanner.skip_spaces()
+        if scanner.at_end():
+            return true
+        if scanner.list_number() == none:
+            return false

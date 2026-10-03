@@ -202,7 +202,7 @@ func place_on_path(content: const TextContent*, chunk: const TextChunk*, path: c
     var dy = 0.0
     var end = Point()
     for at in 0..<clusters.length:
-        let position = content.positions.items[clusters[at].index]
+        let position = content.positions.items[clusters[at].order]
         advance += position.dx
         let half = clusters[at].width * 0.5
         let offset = advance + half
