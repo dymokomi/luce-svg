@@ -333,8 +333,8 @@ func displace(out: Canvas*, source: const Canvas*, map: const Canvas*, sx: f64, 
             let at = ((usize)y * out.width + (usize)x) * 4
             let dx = (f64)map.pixels[at + x_channel] - 0.5
             let dy = (f64)map.pixels[at + y_channel] - 0.5
-            let ox = (i64)math.round((f64)x + dx * sx)
-            let oy = (i64)math.round((f64)y + dy * sy)
+            let ox = saturated(math.round((f64)x + dx * sx))
+            let oy = saturated(math.round((f64)y + dy * sy))
             if ox >= 0 and ox < w and oy >= 0 and oy < h:
                 let source_at = ((usize)oy * out.width + (usize)ox) * 4
                 for channel in 0..<(usize)4:

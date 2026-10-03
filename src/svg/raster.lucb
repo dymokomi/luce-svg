@@ -74,7 +74,9 @@ func flatten(path: const Path*, transform: Matrix, scale: f64, out: Polylines*) 
                 let ddx = math.max(math.abs(current.x - 2.0 * p1.x + p2.x), math.abs(p1.x - 2.0 * p2.x + p3.x))
                 let ddy = math.max(math.abs(current.y - 2.0 * p1.y + p2.y), math.abs(p1.y - 2.0 * p2.y + p3.y))
                 let deviation = math.sqrt(ddx * ddx + ddy * ddy) * 0.75 * per_unit
-                let pieces = (i64)math.clamp(math.ceil(math.sqrt(deviation / flatness)), 1.0, 1000.0)
+                # (Wild coordinates can make the deviation NaN: then the most pieces.)
+                let wanted = math.ceil(math.sqrt(deviation / flatness))
+                let pieces = (i64)math.clamp(wanted, 1.0, 1000.0) if wanted == wanted else 1000
                 for step in 1..<pieces + 1:
                     try out.add(cubic_point(current, p1, p2, p3, (f64)step / (f64)pieces))
                 current = p3

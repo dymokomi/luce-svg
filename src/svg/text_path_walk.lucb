@@ -44,6 +44,12 @@ struct Bezier:
         let ay = 3.0 * u * u * (self.p1.y - self.p0.y) + 6.0 * u * t * (self.p2.y - self.p1.y) + 3.0 * t * t * (self.p3.y - self.p2.y)
         return Point(ax, ay)
 
+    ## The length of the control polygon, which the curve is no longer than.
+    func rough_length() -> f64:
+        let first = math.hypot(self.p1.x - self.p0.x, self.p1.y - self.p0.y)
+        let second = math.hypot(self.p2.x - self.p1.x, self.p2.y - self.p1.y)
+        return first + second + math.hypot(self.p3.x - self.p2.x, self.p3.y - self.p2.y)
+
     ## The part of the curve from `t0` to `t1`.
     func part(t0: f64, t1: f64) -> Bezier:
         let a = self.at(t0)
@@ -57,6 +63,13 @@ struct Bezier:
     ## quadrature of 8, 16 or 24 points by an error estimate, halving the curve when
     ## none is close enough.
     func length(accuracy: f64, depth: usize = 0) -> f64:
+        if depth == 0:
+            # Curves of wild size are measured relative to their size, not to half a unit.
+            let rough = self.rough_length()
+            if not math.is_finite(rough):
+                return rough
+            if rough * 1e-9 > accuracy:
+                return self.length(rough * 1e-9, 1)
         let d03 = Point(self.p3.x - self.p0.x, self.p3.y - self.p0.y)
         let d01 = Point(self.p1.x - self.p0.x, self.p1.y - self.p0.y)
         let d12 = Point(self.p2.x - self.p1.x, self.p2.y - self.p1.y)
@@ -89,10 +102,13 @@ struct Bezier:
 
     ## The parameter `distance` along the curve falls at, as kurbo's inv_arclen finds
     ## it: an ITP root search on the length so far, to `accuracy`.
-    func parameter(distance: f64, accuracy: f64) -> f64:
+    func parameter(distance: f64, wanted: f64) -> f64:
         if distance <= 0.0:
             return 0.0
+        let accuracy = math.max(wanted, self.rough_length() * 1e-9)
         let total = self.length(accuracy)
+        if not math.is_finite(total):
+            return 0.0
         if distance >= total:
             return 1.0
         var t_last = 0.0

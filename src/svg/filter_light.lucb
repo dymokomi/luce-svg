@@ -69,14 +69,14 @@ func s_curve(t: f64) -> f64:
 
 func noise2(noise: const Noise*, channel: usize, x: f64, y: f64, stitch: const Stitch*) -> f64:
     let tx = x + (f64)perlin_n
-    var bx0 = (i64)tx
+    var bx0 = saturated(tx)
     var bx1 = bx0 + 1
-    let rx0 = tx - (f64)(i64)tx
+    let rx0 = tx - (f64)saturated(tx)
     let rx1 = rx0 - 1.0
     let ty = y + (f64)perlin_n
-    var by0 = (i64)ty
+    var by0 = saturated(ty)
     var by1 = by0 + 1
-    let ry0 = ty - (f64)(i64)ty
+    let ry0 = ty - (f64)saturated(ty)
     let ry1 = ry0 - 1.0
     if stitch.on:
         if bx0 >= stitch.wrap_x:
@@ -125,15 +125,16 @@ func turbulence(noise: const Noise*, channel: usize, x_in: f64, y_in: f64, tile_
             let high = math.ceil(tile_h * fy) / tile_h
             fy = low if fy / low < high / fy else high
         stitch.on = true
-        stitch.width = (i64)(tile_w * fx + 0.5)
-        stitch.height = (i64)(tile_h * fy + 0.5)
-        stitch.wrap_x = (i64)(tile_x * fx + (f64)perlin_n + (f64)stitch.width)
-        stitch.wrap_y = (i64)(tile_y * fy + (f64)perlin_n + (f64)stitch.height)
+        stitch.width = saturated(tile_w * fx + 0.5)
+        stitch.height = saturated(tile_h * fy + 0.5)
+        stitch.wrap_x = saturated(tile_x * fx + (f64)perlin_n + (f64)stitch.width)
+        stitch.wrap_y = saturated(tile_y * fy + (f64)perlin_n + (f64)stitch.height)
     var sum = 0.0
     var x = x_in * fx
     var y = y_in * fy
     var ratio = 1.0
-    for _ in 0..<octaves:
+    # Past 64 octaves the frequencies double beyond what an f64 resolves.
+    for _ in 0..<math.imin(octaves, 64):
         let n = noise2(noise, channel, x, y, &stitch)
         sum += (n if fractal else math.abs(n)) / ratio
         x *= 2.0
@@ -156,7 +157,7 @@ extend Renderer:
                 return FilterImage(canvas = canvas, region = region, linear = p.linear)
             let noise = try new Noise in memory.heap
             defer free(noise) in memory.heap
-            noise_tables((i64)p.values[3], noise)
+            noise_tables(saturated(p.values[3]), noise)
             let fractal = p.values[5] != 0.0
             let w = (f64)(region.x1 - region.x0)
             let h = (f64)(region.y1 - region.y0)
@@ -167,7 +168,7 @@ extend Renderer:
                     var c: f64[4] = [0.0, 0.0, 0.0, 0.0]
                     for channel in 0..<(usize)4:
                         let n = turbulence(noise, channel, ux, uy, (f64)(x - region.x0), (f64)(y - region.y0), w, h, p.values[0], p.values[1],
-                                           (i64)p.values[2], fractal, p.values[4] != 0.0)
+                                           saturated(p.values[2]), fractal, p.values[4] != 0.0)
                         let v = (n * 255.0 + 255.0) / 2.0 if fractal else n * 255.0
                         c[channel] = math.floor(math.clamp(v, 0.0, 255.0) + 0.5) / 255.0
                     store_unpremultiplied(&canvas, (usize)y * canvas.width + (usize)x, c)

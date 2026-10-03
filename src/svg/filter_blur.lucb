@@ -80,13 +80,14 @@ func box_sizes(sigma: f64) -> usize[5]:
     if not (sigma > 0.0):
         return [1, 1, 1, 1, 1]
     let n = 5.0
-    let ideal = math.sqrt(12.0 * sigma * sigma / n) + 1.0
+    let held = math.min(sigma, 1e6)
+    let ideal = math.sqrt(12.0 * held * held / n) + 1.0
     var wl = (i64)math.floor(ideal)
     if wl % 2 == 0:
         wl -= 1
     let wu = wl + 2
     let wlf = (f64)wl
-    let m = (i64)math.round((12.0 * sigma * sigma - n * wlf * wlf - 4.0 * n * wlf - 3.0 * n) / (-4.0 * wlf - 4.0))
+    let m = (i64)math.round((12.0 * held * held - n * wlf * wlf - 4.0 * n * wlf - 3.0 * n) / (-4.0 * wlf - 4.0))
     var sizes: usize[5] = [1, 1, 1, 1, 1]
     for at in 0..<(usize)5:
         sizes[at] = (usize)(wl if (i64)at < m else wu)
@@ -125,7 +126,7 @@ func gauss_pass(source: const f32[], target: f32[], width: usize, height: usize,
     if sigma <= 0.0:
         memory.copy(target, source, target.length)
         return
-    let radius = (usize)math.ceil(sigma * 3.0)
+    let radius = (usize)saturated(math.ceil(math.min(sigma, 1e6) * 3.0))
     var weights: f32[64]
     let taps = math_min(radius, 63)
     var total = 0.0
@@ -155,8 +156,8 @@ func gauss_pass(source: const f32[], target: f32[], width: usize, height: usize,
 
 ## Erode (`dilate` false) or dilate `canvas` over a window of twice the radii.
 func morphology(canvas: Canvas*, dilate: bool, rx: f64, ry: f64) -> !:
-    let columns = math_min((usize)math.ceil(rx) * 2, canvas.width)
-    let rows = math_min((usize)math.ceil(ry) * 2, canvas.height)
+    let columns = math_min((usize)saturated(math.ceil(math.min(rx, (f64)canvas.width))) * 2, canvas.width)
+    let rows = math_min((usize)saturated(math.ceil(math.min(ry, (f64)canvas.height))) * 2, canvas.height)
     let target_x = columns // 2
     let target_y = rows // 2
     let source = try new f32[canvas.pixels.length] in memory.heap

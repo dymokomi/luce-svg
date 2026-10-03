@@ -28,14 +28,21 @@ struct Bounds:
         return Bounds(x0 = math.imax(self.x0, other.x0), y0 = math.imax(self.y0, other.y0), x1 = math.imin(self.x1, other.x1),
                       y1 = math.imin(self.y1, other.y1))
 
+## `v` as a whole number of pixels, held to ±10^12 (NaN as 0) so wild coordinates
+## stay countable.
+func saturated(v: f64) -> i64:
+    if not (v == v):
+        return 0
+    return (i64)math.clamp(v, -1e12, 1e12)
+
 ## `rect` mapped by `m`, on the pixel grid as tiny-skia rounds it: the corner floored,
 ## the size rounded up.
 func pixel_bounds(rect: Rect, m: Matrix) -> Bounds:
     let r = transform_rect(rect, m)
-    let x = (i64)math.floor(r.x)
-    let y = (i64)math.floor(r.y)
-    let w = math.imax(1, (i64)math.ceil(r.w))
-    let h = math.imax(1, (i64)math.ceil(r.h))
+    let x = saturated(math.floor(r.x))
+    let y = saturated(math.floor(r.y))
+    let w = math.imax(1, saturated(math.ceil(r.w)))
+    let h = math.imax(1, saturated(math.ceil(r.h)))
     return Bounds(x0 = x, y0 = y, x1 = x + w, y1 = y + h)
 
 ## A filter result: a layer-sized image, the pixels it may cover, and its color space.

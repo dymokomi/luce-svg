@@ -219,11 +219,16 @@ func dash_run(points: const Point[], shape: const StrokeShape*, out: Polylines*)
     var on = slot % 2 == 0
     if on:
         try out.begin(points[0])
+    # As tiny-skia, give up on a pattern of more than a million dashes.
+    var cuts: usize = 0
     for index in 0..<points.length - 1:
         var a = points[index]
         let b = points[index + 1]
         var length = gap_between(a, b)
         while length >= remaining:
+            cuts += 1
+            if cuts > 1000000:
+                return
             let t = remaining / length if length > 0.0 else 0.0
             let cut = Point(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
             if on:
@@ -232,8 +237,8 @@ func dash_run(points: const Point[], shape: const StrokeShape*, out: Polylines*)
                 try out.begin(cut)
             on = not on
             slot = (slot + 1) % dashes.length
+            length -= remaining
             remaining = dashes[slot]
-            length -= gap_between(a, cut)
             a = cut
         remaining -= length
         if on:
