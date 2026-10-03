@@ -11,5 +11,35 @@ extend Renderer:
     mutating func apply_filters(item: const Item*, transform: Matrix, layer: Canvas*) -> !:
         return
 
+    ## The shader of pattern brush `brush` for `item` under `transform`: the tile drawn
+    ## at the device's scale into `self.tile`, as resvg draws it, and repeated.
     mutating func pattern_shader(brush: Brush, item: const Item*, transform: Matrix) -> Shader?!:
-        return none
+        let pattern = self.picture.patterns.items[brush.server]
+        var rect = pattern.rect
+        var content = Matrix()
+        if pattern.bbox_units or pattern.content_bbox_units:
+            let box = self.picture.paths.items[item.path].bounds() else return none
+            if not (box.w > 0.0) or not (box.h > 0.0):
+                return none
+            if pattern.bbox_units:
+                rect = rect_in_bbox(rect, box)
+            if pattern.content_bbox_units:
+                content = Matrix(a = box.w, d = box.h)
+        if let view = pattern.view_box:
+            content = view_box_transform(view, pattern.aspect, rect.w, rect.h)
+        let pattern_space = multiply(transform, pattern.transform)
+        let sx = math.hypot(pattern_space.a, pattern_space.b)
+        let sy = math.hypot(pattern_space.c, pattern_space.d)
+        let tile_w = math.round(rect.w * sx)
+        let tile_h = math.round(rect.h * sy)
+        if not (tile_w >= 1.0) or not (tile_h >= 1.0) or tile_w * tile_h > 16777216.0:
+            return none
+        self.tile.release()
+        self.tile = try Canvas.make(0, 0, (usize)tile_w, (usize)tile_h)
+        var tiler = try Renderer.make(self.picture, (usize)tile_w, (usize)tile_h, self.linear)
+        defer tiler.release()
+        try tiler.children(pattern.root, multiply(Matrix(a = sx, d = sy), content), &self.tile)
+        let to_tile = multiply(multiply(pattern_space, Matrix(e = rect.x, f = rect.y)), Matrix(a = 1.0 / sx, d = 1.0 / sy))
+        let inverse = invert(to_tile) else return none
+        let nearest = math.abs(to_tile.a - 1.0) < 1e-6 and math.abs(to_tile.b) < 1e-6 and math.abs(to_tile.c) < 1e-6 and math.abs(to_tile.d - 1.0) < 1e-6
+        return Shader(kind = BrushKind.pattern, opacity = brush.opacity, linear = self.linear, inverse = inverse, tile = &self.tile, nearest = nearest)

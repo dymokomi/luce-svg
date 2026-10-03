@@ -33,7 +33,7 @@ the bitmap). It is built in four stages, each its own set of fragments:
   viewport, `display`, `visibility`, conditional processing (`switch`,
   `systemLanguage`, `requiredFeatures`), `use`/`symbol`/nested `svg` viewports with
   viewBox, preserveAspectRatio and overflow clipping, transforms with
-  `transform-origin`, fills and strokes (colors, `currentColor`, gradients with
+  `transform-origin` (lengths and keywords, as svgtypes reads them), fills and strokes (colors, `currentColor`, gradients with
   fallbacks, `fill-rule`, dashes, caps, joins including `miter-clip`, `paint-order`,
   `shape-rendering`), groups only where one is needed (opacity, blend mode, isolation,
   clip path, mask, filter).
@@ -44,7 +44,10 @@ the bitmap). It is built in four stages, each its own set of fragments:
   skews them), gradients with pad, reflect and repeat spreads and two-point conical
   radial gradients (the focal radius `fr` included), group layers composited with
   opacity and all sixteen CSS blend modes, clip paths (nested, with clip-rule) and
-  masks (luminance or alpha, nested, with their region).
+  masks (luminance or alpha, nested, with their region). Patterns (with `href`
+  inheritance, both unit systems, viewBox and patternTransform) are drawn as a tile at
+  the device's scale and repeated, sampled bicubically unless the tile lands on the
+  pixel grid, as resvg samples them.
 
 **Compositing is in sRGB**, as browsers and resvg composite: colors blend as their
 encoded values, so half-transparent black over white is 50 % grey. This is the default
@@ -157,7 +160,7 @@ their analytic areas to 0.05 %. Needs `brew install resvg` and
 
 ## resvg's test suite
 
-`tools/suite.py` measures the renderer against resvg's ~1700 feature tests
+`tools/suite.py` measures the renderer against resvg's 1719 feature tests
 (`crates/resvg/tests/tests` of https://github.com/linebender/resvg, cloned into
 `../.donors/resvg`; the suite is never committed here). `tools/suite.lucb` draws
 each test 300 pixels wide, as resvg drew its reference PNGs; a pixel differs when a
@@ -167,6 +170,6 @@ or misplaced feature. It prints a pass table per feature directory and category;
 `--save run.json` and `--compare run.json` track changes between runs,
 `--list-failing` names the failures, and `--only painting/fill` runs a subset.
 
-Baseline (2026-10-03, the `Drawing` renderer in linear light): 458 of 1725 —
-filters 75/398, masking 8/93, paint-servers 97/154, painting 116/306, shapes 90/133,
-structure 54/262, text 18/379.
+Baseline (2026-10-03, the `Drawing` renderer in linear light): 458 of 1719 —
+filters 75/397, masking 8/93, paint-servers 97/153, painting 116/306, shapes 90/133,
+structure 54/258, text 18/379.

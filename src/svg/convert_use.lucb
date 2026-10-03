@@ -43,18 +43,17 @@ extend Converter:
                 # The viewport clips: an outer group carries the use's transform and the clip.
                 let outer = try self.clip_group(clip_rect, transform, parent)
                 let group = try self.open_group(node, &use_state, outer)
-                try self.children(child, &use_state, group)
-                self.picture.items.items[group].transform = inner
+                try self.transformed_children(child, inner, &use_state, group)
+                self.picture.items.items[group].transform = Matrix()
                 try self.close_group(node, &use_state, outer, group, true)
                 if self.picture.items.items[outer].first == 0:
                     self.picture.items.items[outer].parent = 0
                     return
                 self.picture.attach(parent, outer)
                 return
-            transform = multiply(transform, inner)
             let group = try self.open_group(node, &use_state, parent)
-            try self.children(child, &use_state, group)
-            self.picture.items.items[group].transform = transform
+            try self.transformed_children(child, multiply(transform, inner), &use_state, group)
+            self.picture.items.items[group].transform = Matrix()
             try self.close_group(node, &use_state, parent, group, false)
             return
         transform = multiply(transform, inner)

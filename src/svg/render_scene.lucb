@@ -19,6 +19,8 @@ struct Renderer:
     var cover: Coverage
     var lines: Polylines = Polylines()
     var linear: bool = false
+    ## The tile of the pattern being painted with, if any.
+    var tile: Canvas = Canvas()
 
     static func make(picture: const Picture*, width: usize, height: usize, linear: bool) -> Renderer!:
         return Renderer(picture = picture, cover = try Coverage.make(width, height), linear = linear)
@@ -26,6 +28,7 @@ struct Renderer:
     mutating func release():
         self.cover.release()
         self.lines.release()
+        self.tile.release()
 
     # mark: Traversal ===========================================================================
 
@@ -115,6 +118,8 @@ struct Renderer:
                 return Shader(color = premultiplied(brush.color, brush.opacity, self.linear), linear = self.linear)
             .linear, .radial:
                 let gradient = self.picture.gradients.items[brush.server]
+                if gradient.radial and gradient.spread != Spread.hold and math.abs(gradient.r - gradient.fr) < 1e-9 and math.abs(gradient.cx - gradient.fx) + math.abs(gradient.cy - gradient.fy) < 1e-9:
+                    return none
                 var space = transform
                 if gradient.bbox_units:
                     let box = self.picture.paths.items[item.path].bounds() else return none

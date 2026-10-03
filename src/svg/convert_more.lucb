@@ -15,5 +15,59 @@ extend Converter:
     mutating func filters(node: u32, state: const State*, object_box: Rect?, group: u32) -> bool!:
         return true
 
+    ## The pattern `node` converts to (see `server`): its attributes from it or the
+    ## patterns it references, its content from the first of them with any.
     mutating func pattern_server(node: u32) -> (u32, usize)!:
-        return (0, 0)
+        let state = State(view_box = self.root_view())
+        let holder = self.pattern_holder(node) else return (0, 0)
+        let units = self.pattern_source(node, Attr.pattern_units)
+        let bbox_units = strings.trim(self.attribute(units, Attr.pattern_units) else "") != "userSpaceOnUse"
+        let content_units = self.pattern_source(node, Attr.pattern_content_units)
+        let content_bbox = strings.trim(self.attribute(content_units, Attr.pattern_content_units) else "") == "objectBoundingBox"
+        let zero = Length()
+        let rect = Rect(x = self.length(self.pattern_source(node, Attr.x), Attr.x, bbox_units, &state, zero),
+                        y = self.length(self.pattern_source(node, Attr.y), Attr.y, bbox_units, &state, zero),
+                        w = self.length(self.pattern_source(node, Attr.width), Attr.width, bbox_units, &state, zero),
+                        h = self.length(self.pattern_source(node, Attr.height), Attr.height, bbox_units, &state, zero))
+        if not (rect.w > 0.0) or not (rect.h > 0.0):
+            return (0, 0)
+        var server = PatternServer(rect = rect, bbox_units = bbox_units, content_bbox_units = content_bbox,
+                                   transform = self.transform_of(self.pattern_source(node, Attr.pattern_transform), Attr.pattern_transform, &state))
+        server.view_box = parse_view_box(self.attribute(self.pattern_source(node, Attr.view_box), Attr.view_box) else "")
+        if let text = self.attribute(self.pattern_source(node, Attr.preserve_aspect_ratio), Attr.preserve_aspect_ratio):
+            server.aspect = parse_aspect_ratio(text) else AspectRatio()
+        try self.active.push(node)
+        defer self.active.used -= 1
+        server.root = try self.picture.add_item(Item())
+        try self.children(holder, &state, server.root)
+        if self.picture.items.items[server.root].first == 0:
+            return (0, 0)
+        let index = self.picture.patterns.used
+        try self.picture.patterns.push(server)
+        return (2, index)
+
+    ## The first pattern in `node`'s href chain with element children, or none.
+    func pattern_holder(node: u32) -> u32?:
+        var at = node
+        for _ in 0..<64:
+            if self.tree.tag(at) != Tag.pattern:
+                return none
+            if self.tree.first_element_child(at) != 0:
+                return at
+            let next = self.tree.linked(at, Attr.href) else return none
+            if next == at or next == node:
+                return none
+            at = next
+        return none
+
+    ## The pattern in `node`'s href chain that sets `name`, else `node`.
+    func pattern_source(node: u32, name: Attr) -> u32:
+        var at = node
+        for _ in 0..<64:
+            if self.has(at, name):
+                return at
+            let next = self.tree.linked(at, Attr.href) else return node
+            if next == at or next == node or self.tree.tag(next) != Tag.pattern:
+                return node
+            at = next
+        return node

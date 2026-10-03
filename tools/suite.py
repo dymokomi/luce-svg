@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Render resvg's test suite with luce-svg and compare every test with its reference PNG.
 
-The suite is resvg's crates/resvg/tests/tests (clone https://github.com/linebender/resvg
-into ../.donors/resvg; it is never committed here). Each SVG is drawn 300 pixels wide by
+The suite is resvg's crates/resvg/tests/tests, the tests its integration/render.rs runs
+(clone https://github.com/linebender/resvg into ../.donors/resvg; it is never committed
+here). Each SVG is drawn 300 pixels wide by
 build/suite (tools/suite.lucb), as resvg draws its references. A pixel differs when any
 of its premultiplied RGBA8 channels is off by more than --threshold; a test passes when
 at most --allowed of its pixels differ (a fraction of the image). The fuzzy rule absorbs
@@ -12,7 +13,7 @@ or misplaced feature. Prints a pass table per feature directory and per category
   build/env/bin/python tools/suite.py [--only painting/fill] [--save run.json]
                                       [--compare run.json] [--list-failing] [--jobs 8]
 """
-import argparse, json, os, struct, subprocess, sys
+import argparse, json, os, re, struct, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import numpy as np
@@ -106,7 +107,11 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     for stale in OUT.rglob("*.rgba"):
         stale.unlink()
-    tests = sorted(t for t in SUITE.rglob("*.svg") if a.only in str(t.relative_to(SUITE)))
+    # The suite is what resvg's integration tests run (a few files there are not run).
+    listing = SUITE.parent / "integration/render.rs"
+    listed = set(re.findall(r'render\("tests/([^"]*)"\)', listing.read_text())) if listing.exists() else None
+    tests = sorted(t for t in SUITE.rglob("*.svg")
+                   if a.only in str(t.relative_to(SUITE)) and (listed is None or str(t.relative_to(SUITE))[:-4] in listed))
     chunks = [tests[i::a.jobs] for i in range(a.jobs)]
     with ThreadPoolExecutor(a.jobs) as pool:
         crashes = list(pool.map(lambda j: render_chunk(j, chunks[j], a.timeout), range(len(chunks))))

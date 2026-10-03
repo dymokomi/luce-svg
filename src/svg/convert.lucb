@@ -168,50 +168,79 @@ struct Converter:
     func transform_of(node: u32, name: Attr, state: const State*) -> Matrix:
         let text = self.attribute(node, name) else return Matrix()
         var transform = parse_transform_list(text) else return Matrix()
+        # A singular transform reads as none (elements with one are not drawn at all).
+        if not invertible(transform):
+            return Matrix()
         if let origin = self.attribute(node, Attr.transform_origin):
             let (ox, oy) = self.transform_origin(node, origin, state)
             transform = multiply(multiply(Matrix(e = ox, f = oy), transform), Matrix(e = -ox, f = -oy))
         return transform
 
-    ## The point a transform-origin value names: up to two lengths or keywords.
+    ## The point a transform-origin value names, as svgtypes reads one: one or two
+    ## positions (lengths, or left, center, right, top and bottom in either order) and
+    ## an optional z length; anything else is the origin.
     func transform_origin(node: u32, text: str, state: const State*) -> (f64, f64):
-        var values: f64[2] = [0.0, 0.0]
-        var count: usize = 0
         var scanner = Scanner(data = text.bytes)
-        var x_set = false
-        var y_set = false
-        while count < 2:
+        var parts: Length[2] = [Length(), Length()]
+        var kinds: u8[2] = [0, 0]
+        var count: usize = 0
+        while count < 3:
             scanner.skip_spaces()
             if scanner.at_end():
                 break
+            if count == 2:
+                let z = scanner.length() else return (0.0, 0.0)
+                if z.unit == Unit.percent:
+                    return (0.0, 0.0)
+                count += 1
+                scanner.skip_separator()
+                continue
+            # kind: 1 horizontal keyword, 2 vertical keyword, 3 center or a length.
             if is_alpha(scanner.peek()):
                 let word = scanner.identifier()
-                if word == "left" or word == "right":
-                    values[0] = 0.0 if word == "left" else state.view_box.w
-                    x_set = true
-                elif word == "top" or word == "bottom":
-                    values[1] = 0.0 if word == "top" else state.view_box.h
-                    y_set = true
+                let percent = Unit.percent
+                if word == "left":
+                    parts[count] = Length(number = 0.0, unit = percent)
+                    kinds[count] = 1
+                elif word == "right":
+                    parts[count] = Length(number = 100.0, unit = percent)
+                    kinds[count] = 1
+                elif word == "top":
+                    parts[count] = Length(number = 0.0, unit = percent)
+                    kinds[count] = 2
+                elif word == "bottom":
+                    parts[count] = Length(number = 100.0, unit = percent)
+                    kinds[count] = 2
                 elif word == "center":
-                    if not x_set and count == 0:
-                        values[0] = state.view_box.w * 0.5
-                        x_set = true
-                    else:
-                        values[1] = state.view_box.h * 0.5
-                        y_set = true
+                    parts[count] = Length(number = 50.0, unit = percent)
+                    kinds[count] = 3
                 else:
-                    break
+                    return (0.0, 0.0)
             else:
-                let value = scanner.length() else break
-                let axis: usize = 1 if x_set else 0
-                values[axis] = self.resolve_length(node, Attr.width if axis == 0 else Attr.height, value, false, state)
-                if axis == 0:
-                    x_set = true
-                else:
-                    y_set = true
+                parts[count] = scanner.length() else return (0.0, 0.0)
+                kinds[count] = 3
             count += 1
             scanner.skip_separator()
-        return (values[0], values[1])
+        scanner.skip_spaces()
+        if count == 0 or not scanner.at_end():
+            return (0.0, 0.0)
+        let center = Length(number = 50.0, unit = Unit.percent)
+        var x = parts[0]
+        var y = center
+        if count == 1:
+            if kinds[0] == 2:
+                x = center
+                y = parts[0]
+        elif kinds[0] == 3 and kinds[1] == 3:
+            y = parts[1]
+        elif kinds[0] != 2 and kinds[1] != 1:
+            y = parts[1]
+        elif kinds[0] != 1 and kinds[1] != 2:
+            x = parts[1]
+            y = parts[0]
+        else:
+            return (0.0, 0.0)
+        return (self.resolve_length(node, Attr.width, x, false, state), self.resolve_length(node, Attr.height, y, false, state))
 
     ## Whether a transform attribute, when set, parses to an invertible transform.
     func transform_valid(node: u32) -> bool:
@@ -286,6 +315,16 @@ extend Converter:
         let root_transform = view_box_transform(view, aspect, size.w, size.h)
         let state = State(view_box = view)
         let group = try self.picture.append(0, Item(transform = root_transform))
+        # resvg's non-standard background-color on the root fills the viewBox first.
+        if let text = self.attribute(svg, Attr.background_color):
+            if let color = parse_rgba(text):
+                var background = Path()
+                errdefer background.release()
+                try background.rect(view.x, view.y, view.w, view.h)
+                let index = self.picture.paths.used
+                try self.picture.paths.push(background)
+                let fill = FillPaint(brush = Brush(color = color.rgb(), opacity = color.a))
+                discard(try self.picture.append(group, Item(kind = ItemKind.shape, path = index, fill = fill)))
         try self.element(svg, &state, group)
 
     ## The document's size and viewBox: width and height (100% of the viewBox, or of the

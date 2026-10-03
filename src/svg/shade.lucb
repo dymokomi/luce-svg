@@ -26,8 +26,10 @@ struct Shader:
     var stops: const GradientStop[]
     ## Device pixel centre to the gradient's or pattern's space.
     var inverse: Matrix = Matrix()
-    ## A pattern's rendered tile and its size.
+    ## A pattern's rendered tile, sampled at its nearest pixel when the tile maps to the
+    ## device by a translation alone (as Skia does), else bicubically.
     var tile: const Canvas*? = none
+    var nearest: bool = false
 
 ## Decode an encoded sRGB channel to linear light.
 func decode_channel(value: f64) -> f64:
@@ -68,6 +70,10 @@ func gradient_parameter(gradient: const GradientServer*, p: Point) -> f64?:
     let cdx = gradient.cx - gradient.fx
     let cdy = gradient.cy - gradient.fy
     let dr = gradient.r - gradient.fr
+    if math.abs(cdx) + math.abs(cdy) < 1e-9 and math.abs(dr) < 1e-9:
+        # Two equal circles: the first color inside, the last outside, as Skia draws it.
+        let inside_ring = (p.x - gradient.cx) * (p.x - gradient.cx) + (p.y - gradient.cy) * (p.y - gradient.cy) < gradient.r * gradient.r
+        return 0.0 if inside_ring else 1.0
     let pdx = p.x - gradient.fx
     let pdy = p.y - gradient.fy
     let a = cdx * cdx + cdy * cdy - dr * dr
@@ -123,22 +129,50 @@ func shader_color(shader: const Shader*, x: f64, y: f64, cover: f64) -> f32[4]:
         .pattern:
             let tile = shader.tile else return [0.0, 0.0, 0.0, 0.0]
             let p = apply(shader.inverse, x, y)
+            if shader.nearest:
+                let at = (wrap_index(p.y, tile.height) * tile.width + wrap_index(p.x, tile.width)) * 4
+                let k = (f32)(shader.opacity * cover)
+                return [tile.pixels[at] * k, tile.pixels[at + 1] * k, tile.pixels[at + 2] * k, tile.pixels[at + 3] * k]
             return sample_tile(tile, p, shader.opacity * cover)
 
-## The tile's pixel under pattern-space point `p`, the tile repeating in both directions,
-## scaled by `alpha`.
+## The tile's color at pattern-space point `p` (tile pixels), the tile repeating in both
+## directions, filtered bicubically as resvg samples patterns, scaled by `alpha`.
 func sample_tile(tile: const Canvas*, p: Point, alpha: f64) -> f32[4]:
     if tile.width == 0 or tile.height == 0:
         return [0.0, 0.0, 0.0, 0.0]
-    let w = (f64)tile.width
-    let h = (f64)tile.height
-    let fx = p.x - math.floor(p.x / w) * w
-    let fy = p.y - math.floor(p.y / h) * h
-    let column = math_min((usize)fx, tile.width - 1)
-    let row = math_min((usize)fy, tile.height - 1)
-    let at = (row * tile.width + column) * 4
-    let k = (f32)alpha
-    return [tile.pixels[at] * k, tile.pixels[at + 1] * k, tile.pixels[at + 2] * k, tile.pixels[at + 3] * k]
+    let fx = p.x + 0.5 - math.floor(p.x + 0.5)
+    let fy = p.y + 0.5 - math.floor(p.y + 0.5)
+    let wx: f64[4] = [cubic_far(1.0 - fx), cubic_near(1.0 - fx), cubic_near(fx), cubic_far(fx)]
+    let wy: f64[4] = [cubic_far(1.0 - fy), cubic_near(1.0 - fy), cubic_near(fy), cubic_far(fy)]
+    var sum: f64[4] = [0.0, 0.0, 0.0, 0.0]
+    for j in 0..<(usize)4:
+        let row = wrap_index(p.y - 1.5 + (f64)j, tile.height)
+        for i in 0..<(usize)4:
+            let column = wrap_index(p.x - 1.5 + (f64)i, tile.width)
+            let weight = wx[i] * wy[j]
+            let at = (row * tile.width + column) * 4
+            for channel in 0..<(usize)4:
+                sum[channel] += (f64)tile.pixels[at + channel] * weight
+    let a = math.clamp(sum[3], 0.0, 1.0)
+    var out: f32[4] = [0.0, 0.0, 0.0, 0.0]
+    for channel in 0..<(usize)3:
+        out[channel] = (f32)(math.clamp(sum[channel], 0.0, a) * alpha)
+    out[3] = (f32)(a * alpha)
+    return out
+
+## The pixel index `x` falls in, repeating over `size`.
+func wrap_index(x: f64, size: usize) -> usize:
+    let n = (f64)size
+    let wrapped = x - math.floor(x / n) * n
+    let index = (usize)wrapped
+    return index if index < size else size - 1
+
+## Skia's bicubic weights: for the two nearer and the two farther samples.
+func cubic_near(t: f64) -> f64:
+    return t * (t * (-21.0 / 18.0 * t + 27.0 / 18.0) + 9.0 / 18.0) + 1.0 / 18.0
+
+func cubic_far(t: f64) -> f64:
+    return t * t * (7.0 / 18.0 * t - 6.0 / 18.0)
 
 ## Composite `shader` source-over into `canvas` through the resolved region of `cover`.
 func paint_coverage(canvas: Canvas*, cover: const Coverage*, shader: const Shader*):
