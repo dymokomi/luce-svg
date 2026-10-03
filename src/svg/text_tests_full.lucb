@@ -68,3 +68,11 @@ test "text follows a text path":
     let pixels = try draw_text_test("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"40\"><path id=\"p\" d=\"M5 30 H35\"/><text font-size=\"10\"><textPath href=\"#p\" startOffset=\"10\">A</textPath></text></svg>", 40, 40)
     defer free(pixels) in memory.heap
     assert(rgba_at(pixels, 40, 17, 27)[3] == 255 and rgba_at(pixels, 40, 13, 27)[3] == 0)
+
+test "textLength stretches spacing, or spacing and glyphs":
+    let pixels = try draw_text_test("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"30\"><text x=\"0\" y=\"10\" font-size=\"10\" textLength=\"24\" lengthAdjust=\"spacingAndGlyphs\">AA</text><text x=\"0\" y=\"25\" font-size=\"10\" textLength=\"24\">AA</text></svg>", 40, 30)
+    defer free(pixels) in memory.heap
+    # Stretched glyphs: 0..12 and 12..24 solid.
+    assert(rgba_at(pixels, 40, 8, 6)[3] == 255 and rgba_at(pixels, 40, 22, 6)[3] == 255 and rgba_at(pixels, 40, 25, 6)[3] == 0)
+    # Spaced: boxes at 0..6 and, the gap spread, 18..24.
+    assert(rgba_at(pixels, 40, 8, 21)[3] == 0 and rgba_at(pixels, 40, 20, 21)[3] == 255)

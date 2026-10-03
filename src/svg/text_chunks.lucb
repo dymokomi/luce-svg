@@ -106,10 +106,24 @@ extend Converter:
             try content.positions.push(CharPosition())
         var offset: usize = 0
         try self.read_positions(node, state, content, &offset)
+        try self.read_scalars(node, content)
         let mode = strings.trim(self.find(node, Attr.writing_mode) else "lr-tb")
         content.vertical = mode == "tb" or mode == "tb-rl" or mode == "vertical-rl" or mode == "vertical-lr"
         var reader = ChunkReader()
         try self.read_chunks(node, state, content, &reader)
+
+    ## Every character below `node`, in order, whether it is drawn or not, so a
+    ## character's index means the same in the scalars and the positions.
+    mutating func read_scalars(node: u32, content: TextContent*) -> !:
+        var child = self.tree.first_child(node)
+        while child != 0:
+            let item = self.tree.nodes.items[child]
+            if item.kind == Kind.text:
+                for character in item.text:
+                    try content.scalars.push((u32)character)
+            elif item.kind == Kind.element:
+                try self.read_scalars(child, content)
+            child = item.next
 
     ## Apply the x, y, dx, dy and rotate lists of `node` and the elements below it.
     mutating func read_positions(node: u32, state: const State*, content: TextContent*, offset: usize*) -> !:

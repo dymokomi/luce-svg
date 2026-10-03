@@ -22,6 +22,10 @@ struct Cluster:
     var advance: f64 = 0.0
     var width: f64 = 0.0
     var transform: Matrix = Matrix()
+    ## In vertical text, how an upright glyph turns inside its cluster.
+    var path_transform: Matrix = Matrix()
+    var ascent: f64 = 0.0
+    var descent: f64 = 0.0
     var visible: bool = true
     var shifted: bool = false
 
@@ -72,6 +76,8 @@ extend Converter:
             try self.shape_chunk(&content, &chunk, fonts, &clusters)
             if clusters.used == 0:
                 continue
+            if content.vertical:
+                turn_vertical(&content, clusters.view())
             space_clusters(&content, clusters.view())
             adjust_length(&content, &chunk, clusters.view())
             var end = Point()
@@ -85,13 +91,22 @@ extend Converter:
                 let metrics = fonts.face_metrics(face)
                 let scale = span.size / math.max(metrics.units_per_em, 1.0)
                 var span_ts = Matrix(e = x, f = y)
+                if content.vertical and chunk.path == 0:
+                    # Vertical text runs down: the line turns a quarter about its start.
+                    span_ts = multiply(multiply(multiply(Matrix(e = x, f = y), rotation_matrix(90.0)), Matrix(e = -x, f = -y)), span_ts)
                 if chunk.path == 0:
-                    span_ts = multiply(span_ts, Matrix(f = baseline_offset(&span, metrics, scale)))
+                    span_ts = multiply(span_ts, Matrix(f = baseline_offset(&span, metrics, scale, content.vertical)))
                 try self.span_outlines(fonts, &content, span_index, clusters.view(), span_ts, &self.picture.paths.items[path_start + span_index], &box)
                 try decorate(&span, metrics, scale, span_index, clusters.view(), span_ts, decorations.items[span_index * 3..<span_index * 3 + 3], &box)
+            if content.vertical and chunk.path == 0:
+                end = Point(end.y, end.x)
             last_x = x + end.x
             last_y = y + end.y
         let text_box = box.rect()
+        # The text's box (its advances by the faces' heights) is its group's object box.
+        if let found = text_box:
+            if parent != 0:
+                self.picture.items.items[parent].box = found
         for span_index in 0..<content.spans.used:
             let span = content.spans.items[span_index]
             # Underline and overline go under the glyphs, line-through over them.
@@ -122,13 +137,20 @@ extend Converter:
             while span_index + 1 < chunk.span_end and content.spans.items[span_index].end <= index:
                 span_index += 1
             let span = content.spans.items[span_index]
+            # Characters of hidden elements fall between a chunk's spans.
+            if index < span.start or index >= span.end:
+                continue
             let face = span.face else continue
             let glyph = shape_scalar(source, face, content.scalars.items[index], span.size)
-            var cluster = Cluster(index = index, span = span_index, glyph = glyph, advance = glyph.advance, width = glyph.advance)
+            var cluster = Cluster(index = index, span = span_index, glyph = glyph, advance = glyph.advance, width = glyph.advance,
+                                  ascent = glyph.ascent, descent = glyph.descent)
             if clusters.used > 0 and span.kerning:
                 let previous = &clusters.items[clusters.used - 1]
                 if previous.glyph.face == glyph.face:
-                    previous.advance += source.glyph_kerning(glyph.face, previous.glyph.glyph, glyph.glyph) * glyph.scale
+                    # A kerned glyph's shaped advance is its width, as a shaper reports it.
+                    let kern = source.glyph_kerning(glyph.face, previous.glyph.glyph, glyph.glyph) * glyph.scale
+                    previous.advance += kern
+                    previous.width += kern
             try clusters.push(cluster)
 
     ## Append the outlines of `span_index`'s visible clusters, through `span_ts`, to `out`.
@@ -142,16 +164,16 @@ extend Converter:
                 continue
             let placed = multiply(span_ts, cluster.transform)
             # Every visible cluster counts towards the text's box: its advance by its height.
-            let height = cluster.glyph.ascent - cluster.glyph.descent
+            let height = cluster.ascent - cluster.descent
             if height > 0.0:
-                let r = transform_rect(Rect(y = -cluster.glyph.ascent, w = math.max(cluster.advance, 1.0), h = height), placed)
+                let r = transform_rect(Rect(y = -cluster.ascent, w = math.max(cluster.advance, 1.0), h = height), multiply(placed, cluster.path_transform))
                 box.add_rect(r)
             if cluster.span != span_index:
                 continue
             glyph_path.release()
             if not try source.glyph_outline(cluster.glyph.face, cluster.glyph.glyph, &glyph_path):
                 continue
-            let to_user = multiply(placed, Matrix(a = cluster.glyph.scale, d = -cluster.glyph.scale))
+            let to_user = multiply(multiply(placed, cluster.path_transform), Matrix(a = cluster.glyph.scale, d = -cluster.glyph.scale))
             try append_path(out, &glyph_path, to_user)
 
 ## Append `path`'s verbs, mapped through `m`, to `out`.
@@ -244,13 +266,42 @@ func place_on_line(content: const TextContent*, chunk: const TextChunk*, cluster
 
 ## How far a span's baseline moves down: its baseline shift, then its dominant or
 ## alignment baseline.
-func baseline_offset(span: const TextSpan*, metrics: FaceMetrics, scale: f64) -> f64:
+func baseline_offset(span: const TextSpan*, metrics: FaceMetrics, scale: f64, vertical: bool = false) -> f64:
     var shift = span.shift
     shift -= (f64)span.subscripts * (metrics.subscript_offset * scale if span.subscripts > 0 else metrics.superscript_offset * scale)
     var offset = -shift
+    if vertical:
+        return offset
     let code = span.alignment if span.alignment > 1 else span.dominant
     offset += alignment_shift(code, metrics, scale)
     return offset
+
+## Turn clusters for vertical text: glyphs that stand upright (CJK and the like) turn back
+## to stand in the column; the rest lie along it, centred on it.
+func turn_vertical(content: const TextContent*, clusters: Cluster[]):
+    for at in 0..<clusters.length:
+        let middle = (clusters[at].ascent + clusters[at].descent) * 0.5
+        if upright(content.scalars.items[clusters[at].index]):
+            let w = clusters[at].width * 0.5
+            var t = Matrix(f = middle)
+            t = multiply(t, multiply(multiply(Matrix(e = w, f = -middle), rotation_matrix(-90.0)), Matrix(e = -w, f = middle)))
+            clusters[at].path_transform = t
+            clusters[at].ascent = w
+            clusters[at].descent = -w
+        else:
+            clusters[at].transform = multiply(clusters[at].transform, Matrix(f = middle))
+
+## Whether `scalar` stands upright in vertical text (the Unicode vertical orientation
+## U and Tu ranges, roughly: CJK, Hangul, kana, their symbols and full-width forms).
+func upright(scalar: u32) -> bool:
+    let ranges: u32[22] = [0x1100, 0x11FF, 0x2E80, 0x303F, 0x3041, 0x33FF, 0x3400, 0x4DBF, 0x4E00, 0x9FFF, 0xA960, 0xA97F,
+                           0xAC00, 0xD7FF, 0xF900, 0xFAFF, 0xFE30, 0xFE4F, 0xFF00, 0xFFEF, 0x20000, 0x3FFFD]
+    var at: usize = 0
+    while at < ranges.length:
+        if scalar >= ranges[at] and scalar <= ranges[at + 1]:
+            return true
+        at += 2
+    return false
 
 func alignment_shift(code: u8, metrics: FaceMetrics, scale: f64) -> f64:
     let ascent = metrics.ascent * scale

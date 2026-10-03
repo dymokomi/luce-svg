@@ -78,14 +78,15 @@ the bitmap). It is built in four stages, each its own set of fragments:
   dominant-baseline and alignment-baseline, underline, overline and line-through
   painted as the element that asks for them, text along a path (startOffset, glyphs
   turned with the path and hidden past its ends), and each span's fill, stroke and
-  paint-order, with bounding-box paint servers measuring the whole text. **luce-svg
+  paint-order, with bounding-box paint servers measuring the whole text, and vertical
+  writing modes (CJK upright, other scripts turned a quarter). **luce-svg
   reads no font files**: glyphs come from a `GlyphSource` the caller passes in
   `Options.glyphs` — faces chosen by family list, weight, style and stretch, glyphs
   by scalar with a fallback face, advances, pair kerning, metrics and outlines.
   Without a source, text is laid out but draws nothing. The intended source is
   luce-fonts once it carries the browser's OpenType reader and shaper; contextual
   shaping (ligatures, Arabic and Indic scripts), bidirectional text, vertical glyph
-  orientation and color fonts wait for that.
+  substitutes and color fonts wait for that.
 
 **Compositing is in sRGB**, as browsers and resvg composite: colors blend as their
 encoded values, so half-transparent black over white is 50 % grey. This is the default

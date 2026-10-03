@@ -12,7 +12,7 @@
 #==============================================================================================
 
 ## Samples a segment's arc length is measured on.
-let arc_samples: usize = 64
+let arc_samples: usize = 1024
 
 ## A path segment as a cubic (lines and closes as straight cubics).
 struct Bezier:

@@ -54,10 +54,9 @@ extend Converter:
             let anchor_text = strings.trim(self.find(parent, Attr.text_anchor) else "start")
             let anchor: u8 = 1 if anchor_text == "middle" else (2 if anchor_text == "end" else 0)
             var new_span = true
-            for character in item.text:
+            for _ in item.text:
                 let index = reader.chars
                 let position = content.positions.items[index]
-                try content.scalars.push((u32)character)
                 let new_chunk = position.x != none or position.y != none or reader.split or content.chunks.used == 0
                 reader.split = false
                 if new_chunk:
@@ -126,7 +125,11 @@ extend Converter:
                 if value >= 0.0:
                     span.text_length = value
         span.spacing_and_glyphs = strings.trim(self.find(node, Attr.length_adjust) else "") == "spacingAndGlyphs"
-        span.dominant = baseline_code(self.find(node, Attr.dominant_baseline) else "auto")
+        var dominant = strings.trim(self.find(node, Attr.dominant_baseline) else "auto")
+        if dominant == "no-change":
+            let parent = self.tree.nodes.items[node].parent
+            dominant = strings.trim(self.find(parent, Attr.dominant_baseline) else "auto") if parent != 0 else "auto"
+        span.dominant = baseline_code(dominant)
         span.alignment = baseline_code(self.attribute(node, Attr.alignment_baseline) else "auto")
         # Baseline shifts add up from the span's element out to the `<text>`.
         var at = node
