@@ -15,8 +15,8 @@
 
 import memory
 import strings
-import fonts
-import luce_svg.svg as svg
+import luce_fonts.fonts
+import svg
 
 ## How many faces each generic family tries.
 let generic_width: usize = 6

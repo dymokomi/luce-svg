@@ -10,6 +10,6 @@ env = dict(os.environ, LUCE_BASE=str(BASE))
 for flags in MODES:
     # The parser (a directory module) and the picture renderer with its text.
     for module in ["svg", "render.lucb"]:
-        subprocess.run([str(BASE), "test", str(ROOT / "src/luce_svg" / module), *flags],
+        subprocess.run([str(BASE), "test", str(ROOT / "src" / module), *flags],
                        env=env, check=True, timeout=180)
 print("PASS luce-svg parser, flattener, rasterisers and picture renderer")

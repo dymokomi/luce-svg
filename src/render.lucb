@@ -11,13 +11,13 @@
 #
 #==============================================================================================
 
-import files
-import math
+import luce_std.files
+import luce_std.math
 import memory
 import c as c_api
 import strings
-import luce_svg.svg as svg
-from luce_svg.text import draw_with_text
+import svg
+from text import draw_with_text
 
 ## The rasterised drawing: its size and its pixels (straight RGBA, linear
 ## light, 4 floats a pixel, allocated in the heap; free them there).

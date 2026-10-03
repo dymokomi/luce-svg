@@ -16,13 +16,13 @@
 #
 #==============================================================================================
 
-import math
+import luce_std.math
 import memory
 import strings
-import fonts
-import luce_svg.svg as svg
-import transfer
-from luce_svg.faces import FaceCache
+import luce_fonts.fonts
+import svg
+import luce_color.transfer
+from faces import FaceCache
 
 ## Where the next run goes, in the coordinates of its `<text>`.
 struct Pen:

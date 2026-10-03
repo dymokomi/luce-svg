@@ -2,7 +2,7 @@
 ## the conformance comparison in tools/conformance.py.
 ##   render <input.svg> <size> <output.pgm>
 import c
-import files
+import luce_std.files
 import memory
 import strings
 import svg

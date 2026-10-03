@@ -33,9 +33,9 @@
 
 import memory
 import interop
-import math
+import luce_std.math
 import strings
-import transfer
+import luce_color.transfer
 
 ## An SVG the parser could not read.
 pub let invalid: ErrorCode = ErrorCode.package(320)
