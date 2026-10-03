@@ -16,7 +16,7 @@
 from luce_color import lab, oklab, xyz
 # `from luce_color import color as ...` does not parse yet; these two names would clash
 # with locals called `color` and `space`.
-import luce_color.color as color_model
+from luce_color import color as color_model
 import luce_color.space as color_spaces
 
 ## A color with its alpha: sRGB-encoded channels and opacity, each 0..1.
