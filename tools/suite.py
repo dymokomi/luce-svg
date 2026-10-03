@@ -105,11 +105,17 @@ def main():
     p.add_argument("--list-failing", action="store_true")
     p.add_argument("--no-build", action="store_true")
     p.add_argument("--drawing", action="store_true", help="draw with the Drawing renderer (the baseline)")
+    p.add_argument("--tool", default="", help="a renderer built elsewhere taking the same arguments")
+    p.add_argument("--tool-arg", action="append", default=[], help="an argument the tool takes after them")
     a = p.parse_args()
     if not SUITE.exists():
         sys.exit(f"no suite at {SUITE}: clone https://github.com/linebender/resvg into ../.donors/resvg")
-    if not a.no_build:
+    global TOOL
+    if a.tool:
+        TOOL = Path(a.tool).resolve()
+    elif not a.no_build:
         build()
+    EXTRA.extend(a.tool_arg)
     if a.drawing:
         EXTRA.append("--drawing")
     OUT.mkdir(parents=True, exist_ok=True)
