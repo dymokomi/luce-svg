@@ -42,8 +42,9 @@ pub func main(arguments: str[]) -> i32!:
         at += 1
     let list_path = try strings.copy(arguments[1])
     defer strings.release(list_path)
-    let list = try files.read((c.str)list_path)
-    defer free(list)
+    let list_file = try files.read((c.str)list_path)
+    defer list_file.release()
+    let list = list_file.value
     var index: usize = 0
     var start: usize = 0
     for position in 0..<list.length + 1:
@@ -66,8 +67,9 @@ pub func main(arguments: str[]) -> i32!:
 func render_one(path: str, outdir: str, index: usize, drawing: bool, fonts: svg.FontFiles*?) -> !:
     let input = try strings.copy(path)
     defer strings.release(input)
-    let data = try files.read((c.str)input)
-    defer free(data)
+    let data_file = try files.read((c.str)input)
+    defer data_file.release()
+    let data = data_file.value
     # Image files resolve against the test's own directory, as resvg's suite has them.
     let slash = strings.find_last(path, "/") else 0
     let drawn = (try draw_flattened((str)data)) if drawing else (try draw_full((str)data, (str)path.bytes[..<slash], fonts))

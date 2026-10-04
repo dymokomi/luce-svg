@@ -71,14 +71,14 @@ extend Converter:
             recover ""
         if path.length == 0:
             return ImageFormat.other
-        let data = files.read_limit((c_api.str)path, 268435456) catch _:
+        let data = files.read((c_api.str)path, limit = 268435456) catch _:
             return ImageFormat.other
-        defer free(data)
-        for byte in data:
+        defer data.release()
+        for byte in data.value:
             try bytes.push(byte)
         if strings.ends_with(href, ".svg") or strings.ends_with(href, ".svgz"):
             return ImageFormat.svg_image
-        let sniffed = sniff(data)
+        let sniffed = sniff(data.value)
         return sniffed
 
     ## An SVG image converted into the picture: a detached group and its size.

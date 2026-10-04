@@ -13,8 +13,9 @@ pub func main(arguments: str[]) -> i32!:
         return 2
     let input = try strings.copy(arguments[1])
     defer strings.release(input)
-    let data = try files.read((c.str)input)
-    defer free(data)
+    let data_file = try files.read((c.str)input)
+    defer data_file.release()
+    let data = data_file.value
     let size = (u32)(try strings.parse_f64(arguments[2]))
     let drawing = try svg.parse((str)data)
     defer drawing.release()

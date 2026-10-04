@@ -25,7 +25,7 @@ struct CatalogFace:
     var compact: u8[]
     var probe: opentype.SfntFace*
     ## The whole file and its HarfBuzz font, once loaded; `failed` when loading failed.
-    var data: u8[]
+    var data: interop.Owned[const u8[]]? = none
     var font: shaping.HbFontT*? = none
     var failed: bool = false
 
@@ -41,8 +41,8 @@ struct CatalogFace:
                 opentype.sfnt_face_destroy(face)
             free(font.face) in memory.heap
             free(font) in memory.heap
-        if self.data.length > 0:
-            free(self.data) in memory.heap
+        if let data = self.data:
+            data.release()
         opentype.sfnt_face_destroy(self.probe)
         free(self.compact) in memory.heap
         free(self.path_storage) in memory.heap
@@ -54,16 +54,16 @@ struct CatalogFace:
         if self.failed:
             return false
         with memory.heap:
-            let data: u8[]? = files.read((c_api.str)self.path) catch:
+            let data: interop.Owned[const u8[]]? = files.read((c_api.str)self.path) catch:
                 recover none
             if let bytes = data:
-                let face = shaping.hb_face_create(shaping.hb_blob_create(bytes), self.index)
+                let face = shaping.hb_face_create(shaping.hb_blob_create(bytes.value), self.index)
                 if face.face != none:
                     self.data = bytes
                     self.font = shaping.hb_font_create(face)
                     return true
                 free(face)
-                free(bytes)
+                bytes.release()
         self.failed = true
         return false
 
@@ -225,7 +225,7 @@ func catalog_directories(directories: const str[], faces: List[CatalogFace]*) ->
             continue
         var walk = CatalogWalk(faces = faces)
         with memory.heap:
-            files.walk((c_api.str)root, &walk, 16) catch:
+            files.walk_with((c_api.str)root, &walk, 16) catch:
                 recover ()
 
 ## `text` NUL-terminated in `arena`.

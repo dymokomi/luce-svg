@@ -35,14 +35,12 @@ pub func is_svg(path: str) -> bool:
 ## The SVG at `path` drawn as pixels, refusing more than `max_pixels`.
 pub func render_svg(path: str, max_bytes: usize, max_pixels: usize) -> Rendered!:
     var owned_path: str = ""
-    var bytes: u8[]
     with memory.heap:
         owned_path = try strings.copy(path)
     defer strings.release(owned_path)
-    with memory.heap:
-        bytes = try files.read_limit((c_api.str)owned_path, max_bytes)
-    defer free(bytes) in memory.heap
-    let drawing = try svg.parse((str)bytes)
+    let bytes = try files.read((c_api.str)owned_path, limit = max_bytes)
+    defer bytes.release()
+    let drawing = try svg.parse((str)bytes.value)
     defer drawing.release()
     let view_width = drawing.value().view_width()
     let view_height = drawing.value().view_height()
