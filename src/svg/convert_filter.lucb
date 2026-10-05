@@ -16,7 +16,7 @@
 
 extend Converter:
     ## Give `group` the filters `node` asks for; false when they hide it.
-    mutating func filters(node: u32, state: const State*, object_box: Rect?, group: u32) -> bool!:
+    func filters(node: u32, state: const State*, object_box: Rect?, group: u32) -> bool!:
         let text = self.attribute(node, Attr.filter) else return true
         if strings.trim(text) == "none":
             return true
@@ -69,7 +69,7 @@ extend Converter:
 
     ## Read one filter function after its `(` and add it as a filter; false when it does
     ## not parse (the whole list is then ignored).
-    mutating func filter_function(node: u32, name: str, scanner: Scanner*, state: const State*, object_box: Rect?) -> bool!:
+    func filter_function(node: u32, name: str, scanner: Scanner*, state: const State*, object_box: Rect?) -> bool!:
         var primitive = Primitive(linear = false)
         var region = Rect(x = -0.1, y = -0.1, w = 1.2, h = 1.2)
         if name == "blur" or name == "drop-shadow":
@@ -162,7 +162,7 @@ extend Converter:
 
     ## brightness, contrast, grayscale, invert, opacity, saturate and sepia as
     ## primitives; false for an unknown name.
-    mutating func color_function(name: str, amount: f64, primitive: Primitive*) -> bool!:
+    func color_function(name: str, amount: f64, primitive: Primitive*) -> bool!:
         let a = math.min(amount, 1.0)
         if name == "brightness" or name == "contrast":
             primitive.kind = FilterKind.component_transfer

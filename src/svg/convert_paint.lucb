@@ -19,7 +19,7 @@ extend Converter:
     # mark: Shapes ==============================================================================
 
     ## The path a shape element describes, or none when it is invalid or empty.
-    mutating func shape_path(node: u32, tag: Tag, state: const State*) -> Path?!:
+    func shape_path(node: u32, tag: Tag, state: const State*) -> Path?!:
         let zero = Length()
         var path = Path()
         errdefer path.release()
@@ -76,7 +76,7 @@ extend Converter:
                 return try parse_points(text, tag == Tag.polygon)
             .path:
                 let text = self.attribute(node, Attr.d) else return none
-                discard(try parse_path_data(text, &path))
+                _ = try parse_path_data(text, &path)
             _:
                 return none
         if path.verb_count() < 2:
@@ -108,7 +108,7 @@ extend Converter:
         return (0.0, 0.0)
 
     ## Add the shape `node` with `path` to group `parent`, its paints resolved.
-    mutating func shape(node: u32, path: Path, state: const State*, parent: u32) -> !:
+    func shape(node: u32, path: Path, state: const State*, parent: u32) -> !:
         var owned = path
         let bounds = owned.bounds() else Rect()
         let has_box = bounds.w > 0.0 and bounds.h > 0.0
@@ -130,7 +130,7 @@ extend Converter:
     # mark: Fills and strokes ===================================================================
 
     ## The fill of `node`, or none.
-    mutating func fill_of(node: u32, has_box: bool, state: const State*) -> FillPaint?!:
+    func fill_of(node: u32, has_box: bool, state: const State*) -> FillPaint?!:
         let evenodd_name = Attr.clip_rule if state.clip_child else Attr.fill_rule
         let evenodd = strings.trim(self.find(node, evenodd_name) else "nonzero") == "evenodd"
         if state.clip_child:
@@ -143,7 +143,7 @@ extend Converter:
         return FillPaint(brush = brush, evenodd = evenodd)
 
     ## The stroke of `node`, or none.
-    mutating func stroke_of(node: u32, has_box: bool, state: const State*) -> StrokePaint?!:
+    func stroke_of(node: u32, has_box: bool, state: const State*) -> StrokePaint?!:
         if state.clip_child:
             return none
         let source = self.tree.source_of(node, Attr.stroke) else return none
@@ -181,7 +181,7 @@ extend Converter:
         return self.resolve_length(source, name, value, false, state)
 
     ## Fill in `stroke`'s dash pattern from the stroke-dasharray that applies to `node`.
-    mutating func dashes(node: u32, state: const State*, stroke: StrokePaint*) -> !:
+    func dashes(node: u32, state: const State*, stroke: StrokePaint*) -> !:
         let source = self.tree.source_of(node, Attr.stroke_dasharray) else return
         let text = self.attribute(source, Attr.stroke_dasharray) else return
         if strings.trim(text) == "none":
@@ -215,7 +215,7 @@ extend Converter:
     # mark: Paints ==============================================================================
 
     ## The brush a paint value gives `node`, or none for no paint.
-    mutating func paint(node: u32, raw: str, is_fill: bool, has_box: bool, state: const State*) -> Brush?!:
+    func paint(node: u32, raw: str, is_fill: bool, has_box: bool, state: const State*) -> Brush?!:
         let value = strings.trim(raw)
         if value == "none" or value == "inherit":
             return none

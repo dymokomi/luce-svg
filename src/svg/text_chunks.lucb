@@ -81,7 +81,7 @@ struct TextContent:
     ## axis scales, from the `<text>` out.
     var scale: f64 = 1.0
 
-    mutating func release():
+    func release():
         for index in 0..<self.paths.used:
             self.paths.items[index].release()
         self.scalars.release()
@@ -106,7 +106,7 @@ extend Converter:
         return count
 
     ## Read `<text>` element `node` into `content`.
-    mutating func read_text(node: u32, state: const State*, content: TextContent*) -> !:
+    func read_text(node: u32, state: const State*, content: TextContent*) -> !:
         let total = self.count_chars(node)
         for _ in 0..<total:
             try content.positions.push(CharPosition())
@@ -130,7 +130,7 @@ extend Converter:
 
     ## Every character below `node`, in order, whether it is drawn or not, so a
     ## character's index means the same in the scalars and the positions.
-    mutating func read_scalars(node: u32, content: TextContent*) -> !:
+    func read_scalars(node: u32, content: TextContent*) -> !:
         var child = self.tree.first_child(node)
         while child != 0:
             let item = self.tree.nodes.items[child]
@@ -142,7 +142,7 @@ extend Converter:
             child = item.next
 
     ## Apply the x, y, dx, dy and rotate lists of `node` and the elements below it.
-    mutating func read_positions(node: u32, state: const State*, content: TextContent*, offset: usize*) -> !:
+    func read_positions(node: u32, state: const State*, content: TextContent*, offset: usize*) -> !:
         let tag = self.tree.tag(node)
         if tag == Tag.text or tag == Tag.tspan:
             let count = self.count_chars(node)

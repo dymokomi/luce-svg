@@ -33,18 +33,18 @@ struct StrokeTarget:
     var scale: f64 = 1.0
     var scratch: List[Point] = List[Point]()
 
-    mutating func release():
+    func release():
         self.scratch.release()
 
     ## Accumulate the user-space polygon `points`.
-    mutating func polygon(points: const Point[]) -> !:
+    func polygon(points: const Point[]) -> !:
         self.scratch.used = 0
         for p in points:
             try self.scratch.push(apply(self.transform, p.x, p.y))
         self.coverage.polygon(self.scratch.view())
 
     ## A disc of radius `radius` round `centre`.
-    mutating func disc(centre: Point, radius: f64) -> !:
+    func disc(centre: Point, radius: f64) -> !:
         let device = radius * self.scale
         var sides: usize = 8
         if device > 0.5:

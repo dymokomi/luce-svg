@@ -16,7 +16,7 @@
 
 extend Converter:
     ## A `use` element: its referenced copy, the tree child, in a group of its own.
-    mutating func use_element(node: u32, state: const State*, parent: u32) -> !:
+    func use_element(node: u32, state: const State*, parent: u32) -> !:
         let child = self.tree.first_element_child(node)
         if child == 0:
             return
@@ -82,7 +82,7 @@ extend Converter:
 
     ## The children of `node` in a group of `node`'s with `transform` (a group even
     ## without other reasons when the transform is not the identity).
-    mutating func transformed_children(node: u32, transform: Matrix, state: const State*, parent: u32) -> !:
+    func transformed_children(node: u32, transform: Matrix, state: const State*, parent: u32) -> !:
         let group = try self.open_group(node, state, parent)
         if state.clip_child:
             try self.clip_children(node, state, group)
@@ -94,12 +94,12 @@ extend Converter:
         try self.close_group(node, state, parent, group, not is_identity(transform))
 
     ## Make `group` a context element: what context paints inside it are placed by.
-    mutating func mark_context(group: u32):
+    func mark_context(group: u32):
         self.picture.items.items[group].context = true
         self.picture.items.items[group].context_box = self.object_bounds(group)
 
     ## A nested `svg`: a viewport for its children.
-    mutating func nested_svg(node: u32, state: const State*, parent: u32) -> !:
+    func nested_svg(node: u32, state: const State*, parent: u32) -> !:
         let zero = Length()
         let transform = self.transform_of(node, Attr.transform, state)
         let x = self.user_length(node, Attr.x, state, zero)
@@ -122,14 +122,14 @@ extend Converter:
         try self.transformed_children(node, multiply(transform, inner), &inner_state, parent)
 
     ## A detached group with `transform`, clipped to `rect`.
-    mutating func clip_group(rect: Rect, transform: Matrix, parent: u32) -> u32!:
+    func clip_group(rect: Rect, transform: Matrix, parent: u32) -> u32!:
         let root = try self.picture.add_item(Item())
         var path = Path()
         errdefer path.release()
         try path.rect(rect.x, rect.y, rect.w, rect.h)
         let path_index = self.picture.paths.used
         try self.picture.paths.push(path)
-        discard(try self.picture.append(root, Item(kind = ItemKind.shape, path = path_index, fill = FillPaint())))
+        _ = try self.picture.append(root, Item(kind = ItemKind.shape, path = path_index, fill = FillPaint()))
         let clip = self.picture.clips.used
         try self.picture.clips.push(ClipServer(root = root))
         let group = try self.picture.add_item(Item(transform = transform, clip = clip + 1))
@@ -175,7 +175,7 @@ extend Converter:
         return Rect(x = x, y = y, w = w, h = h)
 
     ## A `switch`: its first child whose conditions pass, in a group of the switch's.
-    mutating func switch_element(node: u32, state: const State*, parent: u32) -> !:
+    func switch_element(node: u32, state: const State*, parent: u32) -> !:
         var child = self.tree.first_child(node)
         while child != 0:
             if self.tree.is_element(child) and self.condition_passed(child):

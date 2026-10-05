@@ -71,7 +71,7 @@ func collect_gradients(drawing: Drawing*, source: str) -> str[]!:
     var ids: str[]
     if count == 0:
         return ids
-    let definitions = try alloc Definition[count] in memory.heap
+    let definitions = try new Definition[count] --- in memory.heap
     defer free(definitions) in memory.heap
     var found: usize = 0
     var open = false
@@ -91,7 +91,7 @@ func collect_gradients(drawing: Drawing*, source: str) -> str[]!:
             let previous = drawing.stops[drawing.stop_used - 1].offset if latest.stop_count > 0 else 0.0
             try drawing.add_stop(read_stop(tag, previous))
             definitions[found - 1].stop_count += 1
-    ids = try alloc str[count] in memory.heap
+    ids = try new str[count] --- in memory.heap
     errdefer free(ids) in memory.heap
     for index in 0..<count:
         let gradient = resolve_gradient(definitions, index, box.w if box.w > 0.0 else 24.0, box.h if box.h > 0.0 else 24.0)

@@ -47,7 +47,7 @@ struct Coverage:
     var runs: f32[]
     var box: Box = Box()
 
-    static func make(width: usize, height: usize) -> Coverage!:
+    func make(width: usize, height: usize) -> Coverage!:
         let values = try new f32[width * height] in memory.heap
         errdefer free(values) in memory.heap
         let partial = try new f32[width + 2] in memory.heap
@@ -55,7 +55,7 @@ struct Coverage:
         let runs = try new f32[width + 2] in memory.heap
         return Coverage(width = width, height = height, values = values, partial = partial, runs = runs)
 
-    mutating func release():
+    func release():
         for buffer in [self.values, self.partial, self.runs]:
             if buffer.length > 0:
                 free(buffer) in memory.heap
@@ -67,7 +67,7 @@ struct Coverage:
         self.crossings.release()
 
     ## Add the edge from `a` to `b` (device pixels).
-    mutating func edge(a: Point, b: Point):
+    func edge(a: Point, b: Point):
         if a.y == b.y or not math.is_finite(a.x + a.y + b.x + b.y):
             return
         self.box.add(a)
@@ -80,7 +80,7 @@ struct Coverage:
             recover ()
 
     ## Add every run of `lines` as a closed outline.
-    mutating func outline(lines: const Polylines*):
+    func outline(lines: const Polylines*):
         for index in 0..<lines.runs.used:
             let run = lines.runs.items[index]
             if run.count < 2:
@@ -92,7 +92,7 @@ struct Coverage:
 
     ## Add a polygon wound positively whichever way it was given, for stroke pieces
     ## that must union under the nonzero rule.
-    mutating func polygon(points: const Point[]):
+    func polygon(points: const Point[]):
         if points.length < 3:
             return
         var area = 0.0
@@ -111,7 +111,7 @@ struct Coverage:
     ## Resolve the edges added since the last resolve into `values` by `evenodd` or
     ## nonzero, without anti-aliasing when `aliased`, and drop them. Answers whether any
     ## pixel was touched; the region is in `row0..<row1`, `col0..<col1`.
-    mutating func resolve(evenodd: bool, aliased: bool) -> bool:
+    func resolve(evenodd: bool, aliased: bool) -> bool:
         let found = self.box.rect() else return false
         self.box = Box()
         defer self.edges.used = 0
@@ -174,7 +174,7 @@ struct Coverage:
         return true
 
     ## Add the span from `xa` to `xb` of one sub-scanline at `weight`.
-    mutating func add_span(xa: f64, xb: f64, weight: f64, aliased: bool):
+    func add_span(xa: f64, xb: f64, weight: f64, aliased: bool):
         let low = (f64)self.col0
         let high = (f64)self.col1
         if aliased:

@@ -44,7 +44,7 @@ func stroke_half(contour: Contour, fit: Placement) -> f64:
 
 ## A regular polygon approximating a disc, for round caps and joins.
 func drawing_disc(acc: f32[], width: usize, height: usize, centre: Point, radius: f64) -> !:
-    let ring = try alloc Point[16] in memory.heap
+    let ring = try new Point[16] --- in memory.heap
     defer free(ring) in memory.heap
     for index in 0..<(usize)16:
         let angle = (f64)index / 16.0 * math.pi * 2.0
@@ -136,7 +136,7 @@ func cap_at(acc: f32[], width: usize, height: usize, scratch: Point[], path: con
 ## interior vertices and caps at the ends. A closed run repeats its first point at the
 ## end and gets joins everywhere, no caps.
 func stroke_run(acc: f32[], width: usize, height: usize, path: const Point[], closed: bool, half: f64, pen: Pen) -> !:
-    let scratch = try alloc Point[4] in memory.heap
+    let scratch = try new Point[4] --- in memory.heap
     defer free(scratch) in memory.heap
     let count = path.length
     for index in 0..<count - 1:
@@ -177,7 +177,7 @@ func stroke_dashed(acc: f32[], width: usize, height: usize, path: const Point[],
         remaining = pen.dashes[slot] * scale
     remaining -= phase
     var on = slot % 2 == 0
-    let run = try alloc Point[path.length + 2 * pen.dash_count + 8] in memory.heap
+    let run = try new Point[path.length + 2 * pen.dash_count + 8] --- in memory.heap
     defer free(run) in memory.heap
     var run_count: usize = 0
     if on:
@@ -222,7 +222,7 @@ func trace_stroke(acc: f32[], width: usize, height: usize, drawing: const Drawin
     let half = stroke_half(contour, fit)
     # The contour in pixel space, closed ones with their first point repeated.
     let extra: usize = 1 if contour.closed and count > 1 else 0
-    let path = try alloc Point[count + extra] in memory.heap
+    let path = try new Point[count + extra] --- in memory.heap
     defer free(path) in memory.heap
     for index in 0..<count + extra:
         let p = drawing.points[origin + index % count]

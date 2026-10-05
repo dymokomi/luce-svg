@@ -60,7 +60,7 @@ func paint_order(text: str) -> u8[3]:
 
 extend Converter:
     ## Append shape item `item` to `parent` with its markers, in paint order.
-    mutating func shape_with_markers(node: u32, item: Item, state: const State*, parent: u32) -> !:
+    func shape_with_markers(node: u32, item: Item, state: const State*, parent: u32) -> !:
         let order = paint_order(self.find(node, Attr.paint_order) else "normal")
         var markers: u32? = none
         let visible = (self.find(node, Attr.visibility) else "visible") == "visible"
@@ -68,21 +68,21 @@ extend Converter:
             markers = try self.markers(node, &item, state)
         let group = markers else 0
         if group == 0:
-            discard(try self.picture.append(parent, item))
+            _ = try self.picture.append(parent, item)
             return
         if order[0] == 2:
             self.picture.attach(parent, group)
-            discard(try self.picture.append(parent, item))
+            _ = try self.picture.append(parent, item)
         elif order[1] == 2:
             try self.single_paint(item, order[0], parent)
             self.picture.attach(parent, group)
             try self.single_paint(item, order[2], parent)
         else:
-            discard(try self.picture.append(parent, item))
+            _ = try self.picture.append(parent, item)
             self.picture.attach(parent, group)
 
     ## Append `item` with only its fill (`kind` 0) or only its stroke (1), if it has it.
-    mutating func single_paint(item: Item, kind: u8, parent: u32) -> !:
+    func single_paint(item: Item, kind: u8, parent: u32) -> !:
         var copy = item
         if kind == 0:
             if item.fill == none:
@@ -92,10 +92,10 @@ extend Converter:
             if item.stroke == none:
                 return
             copy.fill = none
-        discard(try self.picture.append(parent, copy))
+        _ = try self.picture.append(parent, copy)
 
     ## The group of markers shape `node` (as `item`) carries, detached, or none.
-    mutating func markers(node: u32, item: const Item*, state: const State*) -> u32?!:
+    func markers(node: u32, item: const Item*, state: const State*) -> u32?!:
         let names: Attr[3] = [Attr.marker_start, Attr.marker_mid, Attr.marker_end]
         var any = false
         for name in names:
@@ -138,7 +138,7 @@ extend Converter:
         return marker
 
     ## Place copies of `marker` at the vertices `kind` (0 start, 1 mid, 2 end) selects.
-    mutating func place_markers(shape: u32, marker: u32, kind: usize, segments: const Segment[], state: const State*, group: u32) -> !:
+    func place_markers(shape: u32, marker: u32, kind: usize, segments: const Segment[], state: const State*, group: u32) -> !:
         if segments.length == 0:
             return
         var stroke_scale = 1.0
@@ -202,14 +202,14 @@ extend Converter:
                 self.picture.attach(group, copy)
 
     ## A clip path of one rectangle; its index + 1.
-    mutating func rect_clip(rect: Rect) -> usize!:
+    func rect_clip(rect: Rect) -> usize!:
         let root = try self.picture.add_item(Item())
         var path = Path()
         errdefer path.release()
         try path.rect(rect.x, rect.y, rect.w, rect.h)
         let index = self.picture.paths.used
         try self.picture.paths.push(path)
-        discard(try self.picture.append(root, Item(kind = ItemKind.shape, path = index, fill = FillPaint())))
+        _ = try self.picture.append(root, Item(kind = ItemKind.shape, path = index, fill = FillPaint()))
         try self.picture.clips.push(ClipServer(root = root))
         return self.picture.clips.used
 

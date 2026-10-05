@@ -54,7 +54,7 @@ struct FilterImage:
 extend Renderer:
     ## A group with filters: drawn into a layer round its filter regions, filtered,
     ## clipped and masked there, then composited onto `canvas`.
-    mutating func filtered_group(index: u32, transform: Matrix, canvas: Canvas*) -> !:
+    func filtered_group(index: u32, transform: Matrix, canvas: Canvas*) -> !:
         let item = self.picture.items.items[index]
         var area = Bounds(x0 = (i64)1 << 40, y0 = (i64)1 << 40, x1 = -((i64)1 << 40), y1 = -((i64)1 << 40))
         for at in item.filter_start..<item.filter_start + item.filter_count:
@@ -84,7 +84,7 @@ extend Renderer:
         composite_at(canvas, &layer, area.x0, area.y0, item.opacity, item.blend)
 
     ## Run `filter` over `layer` (whose pixels `transform` maps user space into).
-    mutating func run_filter(filter: const FilterServer*, transform: Matrix, layer: Canvas*) -> !:
+    func run_filter(filter: const FilterServer*, transform: Matrix, layer: Canvas*) -> !:
         let whole = Bounds(x1 = (i64)layer.width, y1 = (i64)layer.height)
         let region = pixel_bounds(filter.rect, transform).clipped(whole)
         if region.empty():
@@ -110,13 +110,13 @@ extend Renderer:
                 clear_outside(&image.canvas, image.region)
             try results.push(image)
         let last = results.items[results.used - 1]
-        var final = try self.converted(&last, self.linear)
+        var final = try Renderer.converted(&last, self.linear)
         defer final.release()
         memory.copy(layer.pixels, final.pixels, layer.pixels.length)
 
     ## An input of `primitive`: the source graphic, its alpha, or an earlier result. The
     ## copy is the caller's to release.
-    mutating func input(which: FilterInput, region: Bounds, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
+    func input(which: FilterInput, region: Bounds, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
         if which.source == 2 and which.result < results.length:
             let found = results[which.result]
             var copy = try Canvas.make(0, 0, layer.width, layer.height)
@@ -141,7 +141,7 @@ extend Renderer:
         return copy
 
     ## An input already in the color space `linear` asks for.
-    mutating func input_in(which: FilterInput, linear: bool, region: Bounds, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
+    func input_in(which: FilterInput, linear: bool, region: Bounds, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
         var image = try self.input(which, region, layer, results)
         if image.linear != linear:
             convert_space(&image.canvas, linear)

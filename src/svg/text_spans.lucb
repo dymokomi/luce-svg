@@ -20,7 +20,7 @@ struct ChunkReader:
     var start_offset: f64 = 0.0
 
 extend Converter:
-    mutating func read_chunks(parent: u32, state: const State*, content: TextContent*, reader: ChunkReader*) -> !:
+    func read_chunks(parent: u32, state: const State*, content: TextContent*, reader: ChunkReader*) -> !:
         var child = self.tree.first_child(parent)
         while child != 0:
             let item = self.tree.nodes.items[child]
@@ -83,7 +83,7 @@ extend Converter:
 
     ## Start text path `node`: its shape's path (through the shape's transform) becomes the
     ## layout's; false when it names no shape.
-    mutating func text_path(node: u32, state: const State*, content: TextContent*, reader: ChunkReader*) -> bool!:
+    func text_path(node: u32, state: const State*, content: TextContent*, reader: ChunkReader*) -> bool!:
         let link = self.tree.linked(node, Attr.href) else return false
         let tag = self.tree.tag(link)
         if not is_shape_tag(tag):
@@ -106,7 +106,7 @@ extend Converter:
         return true
 
     ## The style of characters held by `node`, `size` pixels to the em.
-    mutating func text_span(node: u32, size: f64, state: const State*) -> TextSpan!:
+    func text_span(node: u32, size: f64, state: const State*) -> TextSpan!:
         var span = TextSpan(size = size)
         span.fill = try self.fill_of(node, true, state)
         span.stroke = try self.stroke_of(node, true, state)
@@ -154,7 +154,7 @@ extend Converter:
 
     ## The decoration `kind` of characters held by `node`: painted as the nearest
     ## element (from `node` out) that asks for it, or the `<text>`, paints.
-    mutating func decoration(node: u32, kind: str, state: const State*) -> Decoration!:
+    func decoration(node: u32, kind: str, state: const State*) -> Decoration!:
         var at = node
         var asked = false
         while at != 0:

@@ -37,7 +37,7 @@ pub struct FaceCache:
     var size: f64 = 0.0
 
     ## The face for `run` at `size` output pixels to the em.
-    pub mutating func face(run: const svg.TextRun*, size: f64) -> fonts.TypeFace*!:
+    pub func face(run: const svg.TextRun*, size: f64) -> fonts.TypeFace*!:
         if let kept = self.loaded:
             if self.families == run.families and self.weight == run.weight and self.italic == run.italic and self.size == size:
                 return kept
@@ -54,21 +54,21 @@ pub struct FaceCache:
         return boxed
 
     ## Free the kept face and the family list.
-    pub mutating func close():
+    pub func close():
         self.drop_face()
         if let names = self.installed:
             names.close()
             free(names) in memory.heap
             self.installed = none
 
-    mutating func drop_face():
+    func drop_face():
         if let kept = self.loaded:
             kept.close()
             free(kept) in memory.heap
             self.loaded = none
 
     ## The installed family `run` resolves to, spelled as installed.
-    mutating func family_for(run: const svg.TextRun*) -> str!:
+    func family_for(run: const svg.TextRun*) -> str!:
         if self.installed == none:
             let listed = try fonts.families()
             let boxed = try new fonts.Names in memory.heap

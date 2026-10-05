@@ -13,7 +13,7 @@ func pixel_at(pixels: const f32[], width: usize, x: usize, y: usize) -> f64[4]:
 func alpha_at(source: str, size: u32, x: usize, y: usize) -> f64!:
     let drawing = try parse(source)
     defer drawing.release()
-    let pixels = try alloc f32[(usize)size * (usize)size * 4] in memory.heap
+    let pixels = try new f32[(usize)size * (usize)size * 4] --- in memory.heap
     defer free(pixels) in memory.heap
     try rasterize_rgba(drawing.value(), size, size, pixels, Color())
     return pixel_at(pixels, (usize)size, x, y)[3]
@@ -118,13 +118,13 @@ test "joins: a miter up to its limit, else a bevel; round; bevel":
     let before = "<svg viewBox=\"0 0 24 24\"><polyline points=\"4,20 12,8 20,20\" fill=\"none\" stroke=\"red\" stroke-width=\"4\""
     var buffer: u8[256]
     # The vertex is at (48, 32) pixels; a miter's tip reaches row 16, a round join row 24, a bevel row 27.6.
-    let miter = try format(buffer, f"{before}/></svg>")
+    let miter = try strings.format(buffer, f"{before}/></svg>")
     assert((try alpha_at(miter, 96, 48, 19)) > 0.99)
-    let limited = try format(buffer, f"{before} stroke-miterlimit=\"1.5\"/></svg>")
+    let limited = try strings.format(buffer, f"{before} stroke-miterlimit=\"1.5\"/></svg>")
     assert((try alpha_at(limited, 96, 48, 19)) == 0.0 and (try alpha_at(limited, 96, 48, 25)) == 0.0)
-    let round = try format(buffer, f"{before} stroke-linejoin=\"round\"/></svg>")
+    let round = try strings.format(buffer, f"{before} stroke-linejoin=\"round\"/></svg>")
     assert((try alpha_at(round, 96, 48, 19)) == 0.0 and (try alpha_at(round, 96, 48, 25)) > 0.99)
-    let bevel = try format(buffer, f"{before} style=\"stroke-linejoin: bevel\"/></svg>")
+    let bevel = try strings.format(buffer, f"{before} style=\"stroke-linejoin: bevel\"/></svg>")
     assert((try alpha_at(bevel, 96, 48, 25)) == 0.0 and (try alpha_at(bevel, 96, 48, 28)) > 0.99)
 
 test "a square cap reaches half the width past the end, a butt cap stops at it":
@@ -176,7 +176,7 @@ test "a gradient inherits stops by href, in user space with its transform and st
 test "a radial gradient stretches over its box and honours its focal point":
     let stops = "<stop offset=\"0\" stop-color=\"white\"/><stop offset=\"1\" stop-color=\"black\"/>"
     var buffer: u8[512]
-    let wide = try parse(try format(buffer, f"<svg viewBox=\"0 0 20 10\"><radialGradient id=\"r\">{stops}</radialGradient><rect width=\"20\" height=\"10\" fill=\"url(#r)\"/></svg>"))
+    let wide = try parse(try strings.format(buffer, f"<svg viewBox=\"0 0 20 10\"><radialGradient id=\"r\">{stops}</radialGradient><rect width=\"20\" height=\"10\" fill=\"url(#r)\"/></svg>"))
     defer wide.release()
     var pixels: f32[20 * 10 * 4]
     try rasterize_rgba(wide.value(), 20, 10, pixels, Color())
@@ -184,7 +184,7 @@ test "a radial gradient stretches over its box and honours its focal point":
     let t = math.sqrt(0.95 * 0.95 + 0.1 * 0.1)
     assert(near(pixel_at(pixels, 20, 19, 4)[0], transfer.srgb_decode(1.0 - math.round(t * 255.0) / 255.0), 1e-6))
     assert(pixel_at(pixels, 20, 0, 0)[0] == 0.0 and near(pixel_at(pixels, 20, 0, 0)[3], 1.0, 1e-6))
-    let focal = try parse(try format(buffer, f"<svg viewBox=\"0 0 10 10\"><radialGradient id=\"r\" fx=\"0.1\">{stops}</radialGradient><rect width=\"10\" height=\"10\" fill=\"url(#r)\"/></svg>"))
+    let focal = try parse(try strings.format(buffer, f"<svg viewBox=\"0 0 10 10\"><radialGradient id=\"r\" fx=\"0.1\">{stops}</radialGradient><rect width=\"10\" height=\"10\" fill=\"url(#r)\"/></svg>"))
     defer focal.release()
     var square: f32[10 * 10 * 4]
     try rasterize_rgba(focal.value(), 10, 10, square, Color())

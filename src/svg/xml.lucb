@@ -69,7 +69,7 @@ struct Xml:
     var depth: usize = 0
     var expanded: usize = 0
 
-    mutating func release():
+    func release():
         self.nodes.release()
         self.attrs.release()
         self.arena.release()
@@ -78,7 +78,7 @@ struct Xml:
         self.text.release()
 
     ## Append `node` as the last child of the open element; answer its index.
-    mutating func append(node: XmlNode) -> u32!:
+    func append(node: XmlNode) -> u32!:
         var child = node
         child.parent = self.current
         let index = (u32)self.nodes.used
@@ -92,11 +92,11 @@ struct Xml:
         return index
 
     ## Turn the characters gathered so far into a text node.
-    mutating func flush_text() -> !:
+    func flush_text() -> !:
         if self.text.bytes.used == 0:
             return
         let text = try self.text.finish(&self.arena)
-        discard(try self.append(XmlNode(text = text)))
+        _ = try self.append(XmlNode(text = text))
 
 ## How deeply entities may expand inside one another, and how many bytes they may
 ## produce in all: enough for any honest document, too little for an entity bomb.
@@ -124,12 +124,12 @@ struct Cursor:
                 return false
         return true
 
-    mutating func skip_space():
+    func skip_space():
         while self.pos < self.data.length and is_space(self.data[self.pos]):
             self.pos += 1
 
     ## Move past the next `text`, answering whether it was found.
-    mutating func skip_past(text: str) -> bool:
+    func skip_past(text: str) -> bool:
         while self.pos < self.data.length:
             if self.looking_at(text):
                 self.pos += text.length
@@ -138,7 +138,7 @@ struct Cursor:
         return false
 
     ## A name: everything up to white space or one of `=/>?'"[`.
-    mutating func name() -> str:
+    func name() -> str:
         let start = self.pos
         while self.pos < self.data.length:
             let byte = self.data[self.pos]
@@ -292,7 +292,7 @@ func parse_doctype(xml: Xml*, cursor: Cursor*) -> !:
                 if not cursor.skip_past(">"):
                     error(invalid, "an unclosed entity declaration")
             elif cursor.looking_at("<!--"):
-                discard(cursor.skip_past("-->"))
+                _ = cursor.skip_past("-->")
             elif cursor.peek() == '<':
                 # Other declarations, with any quoted text in them.
                 while not cursor.at_end() and cursor.peek() != '>':

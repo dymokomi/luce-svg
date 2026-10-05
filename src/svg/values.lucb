@@ -36,18 +36,18 @@ struct Scanner:
                 return false
         return true
 
-    mutating func skip_spaces():
+    func skip_spaces():
         while self.pos < self.data.length and is_space(self.data[self.pos]):
             self.pos += 1
 
     ## Skip spaces, then one comma if there is one.
-    mutating func skip_separator():
+    func skip_separator():
         self.skip_spaces()
         if self.peek() == ',':
             self.pos += 1
 
     ## A number as SVG writes it: sign, digits, fraction, exponent.
-    mutating func number() -> f64?:
+    func number() -> f64?:
         self.skip_spaces()
         let start = self.pos
         var byte = self.peek()
@@ -93,13 +93,13 @@ struct Scanner:
         return value
 
     ## A number from a list: the number, then spaces and an optional comma.
-    mutating func list_number() -> f64?:
+    func list_number() -> f64?:
         let value = self.number() else return none
         self.skip_separator()
         return value
 
     ## A length: a number and its unit.
-    mutating func length() -> Length?:
+    func length() -> Length?:
         let value = self.number() else return none
         var found_unit = Unit.plain
         let units: str[9] = ["%", "em", "ex", "px", "in", "cm", "mm", "pt", "pc"]
@@ -112,7 +112,7 @@ struct Scanner:
         return Length(number = value, unit = found_unit)
 
     ## An identifier: letters, digits, `-` and `_`.
-    mutating func identifier() -> str:
+    func identifier() -> str:
         let start = self.pos
         while self.pos < self.data.length and (is_alpha(self.data[self.pos]) or is_digit(self.data[self.pos]) or self.data[self.pos] == '-' or self.data[self.pos] == '_'):
             self.pos += 1

@@ -7,7 +7,7 @@
 extend Converter:
     ## The pattern `node` converts to (see `server`): its attributes from it or the
     ## patterns it references, its content from the first of them with any.
-    mutating func pattern_server(node: u32) -> (u32, usize)!:
+    func pattern_server(node: u32) -> (u32, usize)!:
         let state = State(view_box = self.root_view())
         let holder = self.pattern_holder(node) else return (0, 0)
         let units = self.pattern_source(node, Attr.pattern_units)

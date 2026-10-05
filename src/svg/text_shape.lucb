@@ -40,7 +40,7 @@ struct ChunkText:
     var spans: List[usize] = List[usize]()
     var runs: List[BidiRun] = List[BidiRun]()
 
-    mutating func release():
+    func release():
         self.scalars.release()
         self.chars.release()
         self.spans.release()

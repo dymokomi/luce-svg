@@ -19,12 +19,12 @@ pub func main(arguments: str[]) -> i32!:
     let size = (u32)(try strings.parse_f64(arguments[2]))
     let drawing = try svg.parse((str)data)
     defer drawing.release()
-    let coverage = try alloc u8[(usize)size * (usize)size] in memory.heap
+    let coverage = try new u8[(usize)size * (usize)size] --- in memory.heap
     defer free(coverage) in memory.heap
     try svg.rasterize(drawing.value(), size, size, coverage)
     var header: u8[64]
-    let prefix = try format(header, f"P5\n{size} {size}\n255\n")
-    let output = try alloc u8[prefix.length + coverage.length] in memory.heap
+    let prefix = try strings.format(header, f"P5\n{size} {size}\n255\n")
+    let output = try new u8[prefix.length + coverage.length] --- in memory.heap
     defer free(output) in memory.heap
     memory.copy(output, prefix.bytes, prefix.length)
     memory.copy(output[prefix.length..], coverage, coverage.length)

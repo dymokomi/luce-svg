@@ -18,7 +18,7 @@
 extend Converter:
     ## The clip path `node` makes for an element with `object_box`: its index + 1, or 0
     ## when it is invalid and hides the element.
-    mutating func clip_path(node: u32, state: const State*, object_box: Rect?) -> usize!:
+    func clip_path(node: u32, state: const State*, object_box: Rect?) -> usize!:
         if self.tree.tag(node) != Tag.clip_path:
             return 0
         var transform = Matrix()
@@ -49,13 +49,13 @@ extend Converter:
         return self.picture.clips.used
 
     ## The content of a clip path (or of a group inside one) into `parent`.
-    mutating func clip_children(node: u32, state: const State*, parent: u32) -> !:
+    func clip_children(node: u32, state: const State*, parent: u32) -> !:
         var child = self.tree.first_child(node)
         while child != 0:
             try self.clip_child(child, state, parent)
             child = self.tree.next_sibling(child)
 
-    mutating func clip_child(node: u32, state: const State*, parent: u32) -> !:
+    func clip_child(node: u32, state: const State*, parent: u32) -> !:
         if not self.tree.is_element(node):
             return
         let tag = self.tree.tag(node)
@@ -74,7 +74,7 @@ extend Converter:
 
     ## The mask `node` makes for an element with `object_box`: its index + 1, or 0 when
     ## it is invalid and hides the element.
-    mutating func mask_element(node: u32, state: const State*, object_box: Rect?) -> usize!:
+    func mask_element(node: u32, state: const State*, object_box: Rect?) -> usize!:
         if self.tree.tag(node) != Tag.mask:
             return 0
         let bbox_units = strings.trim(self.attribute(node, Attr.mask_units) else "") != "userSpaceOnUse"

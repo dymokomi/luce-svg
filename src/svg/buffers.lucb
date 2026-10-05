@@ -19,14 +19,14 @@ struct List[T]:
     var used: usize = 0
 
     ## Append `value`.
-    mutating func push(value: T) -> !:
+    func push(value: T) -> !:
         if self.used >= self.items.length:
             self.items = try grown(self.items, self.used, 8)
         self.items[self.used] = value
         self.used += 1
 
     ## Insert `value` before item `at` (at most `used`).
-    mutating func insert(at: usize, value: T) -> !:
+    func insert(at: usize, value: T) -> !:
         try self.push(value)
         var index = self.used - 1
         while index > at:
@@ -35,7 +35,7 @@ struct List[T]:
         self.items[at] = value
 
     ## Remove item `at`, moving the ones after it down.
-    mutating func remove(at: usize):
+    func remove(at: usize):
         for index in at..<self.used - 1:
             self.items[index] = self.items[index + 1]
         self.used -= 1
@@ -45,12 +45,12 @@ struct List[T]:
         return self.items[..<self.used]
 
     ## Drop items past `length`.
-    mutating func truncate(length: usize):
+    func truncate(length: usize):
         if length < self.used:
             self.used = length
 
     ## Free the items; the list is empty afterwards.
-    mutating func release():
+    func release():
         if self.items.length > 0:
             free(self.items) in memory.heap
         var empty: T[]
@@ -65,13 +65,13 @@ struct Arena:
     var block_used: usize = 0
 
     ## A copy of `text` in the arena.
-    mutating func store(text: const u8[]) -> str!:
+    func store(text: const u8[]) -> str!:
         let target = try self.reserve(text.length)
         memory.copy(target, text, text.length)
         return (str)target
 
     ## `length` bytes of fresh arena storage, for the caller to fill.
-    mutating func reserve(length: usize) -> u8[]!:
+    func reserve(length: usize) -> u8[]!:
         if length == 0:
             var empty: u8[]
             return empty
@@ -80,7 +80,7 @@ struct Arena:
             room = self.blocks.items[self.blocks.used - 1].length - self.block_used
         if room < length:
             let size = length if length > 16384 else 16384
-            try self.blocks.push(try alloc u8[size] in memory.heap)
+            try self.blocks.push(try new u8[size] --- in memory.heap)
             self.block_used = 0
         let block = self.blocks.items[self.blocks.used - 1]
         let start = self.block_used
@@ -88,7 +88,7 @@ struct Arena:
         return block[start..<start + length]
 
     ## Free every block; every `str` the arena gave out is invalid afterwards.
-    mutating func release():
+    func release():
         for block in self.blocks.view():
             free(block) in memory.heap
         self.blocks.release()
@@ -98,18 +98,18 @@ struct Arena:
 struct TextBuilder:
     var bytes: List[u8] = List[u8]()
 
-    mutating func add(byte: u8) -> !:
+    func add(byte: u8) -> !:
         try self.bytes.push(byte)
 
-    mutating func add_all(text: const u8[]) -> !:
+    func add_all(text: const u8[]) -> !:
         for byte in text:
             try self.bytes.push(byte)
 
     ## The bytes so far, stored in `arena`; the builder is cleared.
-    mutating func finish(arena: Arena*) -> str!:
+    func finish(arena: Arena*) -> str!:
         let kept = try arena.store(self.bytes.view())
         self.bytes.used = 0
         return kept
 
-    mutating func release():
+    func release():
         self.bytes.release()

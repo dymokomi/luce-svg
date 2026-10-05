@@ -23,22 +23,22 @@ struct Canvas:
     var pixels: f32[]
 
     ## A cleared canvas.
-    static func make(x: i64, y: i64, width: usize, height: usize) -> Canvas!:
+    func make(x: i64, y: i64, width: usize, height: usize) -> Canvas!:
         let pixels = try new f32[width * height * 4] in memory.heap
         return Canvas(x = x, y = y, width = width, height = height, pixels = pixels)
 
-    mutating func release():
+    func release():
         if self.pixels.length > 0:
             free(self.pixels) in memory.heap
         var empty: f32[]
         self.pixels = empty
 
-    mutating func clear():
+    func clear():
         for index in 0..<self.pixels.length:
             self.pixels[index] = 0.0
 
     ## Scale every pixel by the matching value of `mask` (one float a pixel).
-    mutating func multiply(mask: const f32[]):
+    func multiply(mask: const f32[]):
         for index in 0..<self.width * self.height:
             let m = mask[index]
             if m >= 1.0:

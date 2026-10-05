@@ -149,52 +149,52 @@ pub struct Drawing:
     var style: Style = Style()
     var element: usize = 0
 
-    static func own(native: Drawing*) -> interop.Reference[Drawing]!:
+    func own(native: Drawing*) -> interop.Reference[Drawing]!:
         return try interop.Reference[Drawing].adopt(native, drawing_type)
 
-    mutating func add_point(value: Point) -> !:
+    func add_point(value: Point) -> !:
         if self.point_used >= self.points.length:
             self.points = try grown(self.points, self.point_used, 64)
         self.points[self.point_used] = value
         self.point_used += 1
 
-    mutating func add_contour(value: Contour) -> !:
+    func add_contour(value: Contour) -> !:
         if self.contour_used >= self.contours.length:
             self.contours = try grown(self.contours, self.contour_used, 16)
         self.contours[self.contour_used] = value
         self.contour_used += 1
 
-    mutating func add_gradient(value: Gradient) -> !:
+    func add_gradient(value: Gradient) -> !:
         if self.gradient_used >= self.gradients.length:
             self.gradients = try grown(self.gradients, self.gradient_used, 4)
         self.gradients[self.gradient_used] = value
         self.gradient_used += 1
 
-    mutating func add_stop(value: Stop) -> !:
+    func add_stop(value: Stop) -> !:
         if self.stop_used >= self.stops.length:
             self.stops = try grown(self.stops, self.stop_used, 8)
         self.stops[self.stop_used] = value
         self.stop_used += 1
 
-    mutating func add_run(value: Run) -> !:
+    func add_run(value: Run) -> !:
         if self.run_used >= self.runs.length:
             self.runs = try grown(self.runs, self.run_used, 8)
         self.runs[self.run_used] = value
         self.run_used += 1
 
-    mutating func add_text_byte(value: u8) -> !:
+    func add_text_byte(value: u8) -> !:
         if self.text_used >= self.text_bytes.length:
             self.text_bytes = try grown(self.text_bytes, self.text_used, 256)
         self.text_bytes[self.text_used] = value
         self.text_used += 1
 
-    mutating func add_text_bytes(values: const u8[]) -> !:
+    func add_text_bytes(values: const u8[]) -> !:
         for value in values:
             try self.add_text_byte(value)
 
     ## Close an outline that has at least one point, painted in the current style; a
     ## `line` passes `fillable` false, since only its stroke is ever drawn.
-    mutating func flush(start: usize, fillable: bool, closed: bool) -> !:
+    func flush(start: usize, fillable: bool, closed: bool) -> !:
         let length = self.point_used - start
         if length == 0:
             return
@@ -289,7 +289,7 @@ pub struct Drawing:
         return self.points[index]
 
     ## Free the drawing's buffers; it is empty afterwards.
-    pub mutating func close():
+    pub func close():
         if self.points.length > 0:
             free(self.points) in memory.heap
         if self.contours.length > 0:
@@ -324,7 +324,7 @@ pub struct Drawing:
 ## `items`, of which `used` are in use, moved into a heap array twice as long (or `first`
 ## long when empty); the old array is freed.
 func grown[T](items: T[], used: usize, first: usize) -> T[]!:
-    let larger = try alloc T[first if items.length == 0 else items.length * 2] in memory.heap
+    let larger = try new T[first if items.length == 0 else items.length * 2] --- in memory.heap
     memory.copy(larger, items, used)
     if items.length > 0:
         free(items) in memory.heap

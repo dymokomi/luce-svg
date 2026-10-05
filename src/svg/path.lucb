@@ -32,7 +32,7 @@ pub struct Path:
     var open: bool = false
 
     ## Free the path's storage; it is empty afterwards.
-    pub mutating func release():
+    pub func release():
         self.verbs.release()
         self.points.release()
         self.open = false
@@ -62,7 +62,7 @@ pub struct Path:
         return self.points.items[self.points.used - 1]
 
     ## Start a subpath at (`x`, `y`). A move right after a move replaces it.
-    pub mutating func move_to(x: f64, y: f64) -> !:
+    pub func move_to(x: f64, y: f64) -> !:
         if self.verbs.used > 0 and self.verbs.items[self.verbs.used - 1] == Verb.move:
             self.points.items[self.points.used - 1] = Point(x, y)
         else:
@@ -72,19 +72,19 @@ pub struct Path:
         self.open = true
 
     ## Make sure a subpath is open, starting one where the last ended.
-    mutating func ensure_open() -> !:
+    func ensure_open() -> !:
         if not self.open:
             let at = self.last_point() else Point()
             try self.move_to(at.x, at.y)
 
     ## A line to (`x`, `y`).
-    pub mutating func line_to(x: f64, y: f64) -> !:
+    pub func line_to(x: f64, y: f64) -> !:
         try self.ensure_open()
         try self.verbs.push(Verb.line)
         try self.points.push(Point(x, y))
 
     ## A cubic curve through (`x1`, `y1`) and (`x2`, `y2`) to (`x`, `y`).
-    pub mutating func cubic_to(x1: f64, y1: f64, x2: f64, y2: f64, x: f64, y: f64) -> !:
+    pub func cubic_to(x1: f64, y1: f64, x2: f64, y2: f64, x: f64, y: f64) -> !:
         try self.ensure_open()
         try self.verbs.push(Verb.cubic)
         try self.points.push(Point(x1, y1))
@@ -92,7 +92,7 @@ pub struct Path:
         try self.points.push(Point(x, y))
 
     ## A quadratic curve through (`x1`, `y1`) to (`x`, `y`), stored as the same cubic.
-    pub mutating func quad_to(x1: f64, y1: f64, x: f64, y: f64) -> !:
+    pub func quad_to(x1: f64, y1: f64, x: f64, y: f64) -> !:
         try self.ensure_open()
         let origin = self.last_point() else Point()
         try self.cubic_to(origin.x + (x1 - origin.x) * 2.0 / 3.0, origin.y + (y1 - origin.y) * 2.0 / 3.0,
@@ -101,19 +101,19 @@ pub struct Path:
     ## An SVG elliptical arc from the current point to (`x`, `y`): radii `rx` and `ry`, the
     ## x axis turned `rotation` degrees, the large or small arc, swept positively or not.
     ## Radii too small to reach are scaled up; zero radii or coincident ends draw a line.
-    pub mutating func arc_to(rx: f64, ry: f64, rotation: f64, large: bool, sweep: bool, x: f64, y: f64) -> !:
+    pub func arc_to(rx: f64, ry: f64, rotation: f64, large: bool, sweep: bool, x: f64, y: f64) -> !:
         let origin = self.last_point() else return
         try arc_segments(&self, origin, rx, ry, rotation, large, sweep, x, y)
 
     ## Close the current subpath; a close right after a close is dropped.
-    pub mutating func close() -> !:
+    pub func close() -> !:
         if self.verbs.used == 0 or self.verbs.items[self.verbs.used - 1] == Verb.close:
             return
         try self.verbs.push(Verb.close)
         self.open = false
 
     ## A rectangle as one closed subpath.
-    pub mutating func rect(x: f64, y: f64, width: f64, height: f64) -> !:
+    pub func rect(x: f64, y: f64, width: f64, height: f64) -> !:
         try self.move_to(x, y)
         try self.line_to(x + width, y)
         try self.line_to(x + width, y + height)
@@ -169,11 +169,11 @@ struct Box:
     var low: Point = Point(math.infinity, math.infinity)
     var high: Point = Point(-math.infinity, -math.infinity)
 
-    mutating func add(p: Point):
+    func add(p: Point):
         self.low = Point(math.min(self.low.x, p.x), math.min(self.low.y, p.y))
         self.high = Point(math.max(self.high.x, p.x), math.max(self.high.y, p.y))
 
-    mutating func add_rect(r: Rect):
+    func add_rect(r: Rect):
         self.add(Point(r.x, r.y))
         self.add(Point(r.x + r.w, r.y + r.h))
 

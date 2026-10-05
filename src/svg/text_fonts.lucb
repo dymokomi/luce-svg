@@ -52,22 +52,22 @@ pub struct GlyphRecord:
 ## source; outlines are in font units with y up.
 pub interface GlyphSource:
     ## The face that best matches `query`, or none.
-    mutating func select_face(query: FaceQuery) -> u32?
+    func select_face(query: FaceQuery) -> u32?
 
     ## A face with a glyph for `scalar`, to use where `face` has none; none to give up.
-    mutating func fallback_face(face: u32, scalar: u32) -> u32?
+    func fallback_face(face: u32, scalar: u32) -> u32?
 
     ## The face's metrics.
-    mutating func face_metrics(face: u32) -> FaceMetrics
+    func face_metrics(face: u32) -> FaceMetrics
 
     ## The glyph `face` maps `scalar` to; 0 when it has none.
-    mutating func glyph_index(face: u32, scalar: u32) -> u32
+    func glyph_index(face: u32, scalar: u32) -> u32
 
     ## How far a glyph advances the pen, in font units.
-    mutating func glyph_advance(face: u32, glyph: u32) -> f64
+    func glyph_advance(face: u32, glyph: u32) -> f64
 
     ## The kerning adjustment between two glyphs, in font units.
-    mutating func glyph_kerning(face: u32, left: u32, right: u32) -> f64
+    func glyph_kerning(face: u32, left: u32, right: u32) -> f64
 
     ## Shape `scalars`, one run of one direction in logical order, with `face` as a
     ## shaper such as HarfBuzz does (ligatures, marks, contextual forms; kerning when
@@ -75,10 +75,10 @@ pub interface GlyphSource:
     ## visual order and answer how many there are, even when `out` holds fewer (it is
     ## then called again with room for all). Glyph 0 marks a scalar the face lacks.
     ## None when the source does not shape: glyphs are then mapped a scalar at a time.
-    mutating func shape(face: u32, scalars: const u32[], rtl: bool, kerning: bool, small_caps: bool, out: GlyphRecord[]) -> usize?!
+    func shape(face: u32, scalars: const u32[], rtl: bool, kerning: bool, small_caps: bool, out: GlyphRecord[]) -> usize?!
 
     ## Append the glyph's outline to `path`; false when it has none.
-    mutating func glyph_outline(face: u32, glyph: u32, path: Path*) -> bool!
+    func glyph_outline(face: u32, glyph: u32, path: Path*) -> bool!
 
 ## Shape `scalars` without a shaper: a glyph per scalar, kerned against the next when
 ## `kerning`, reversed for right-to-left runs.

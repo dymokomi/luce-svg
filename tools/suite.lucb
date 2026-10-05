@@ -76,13 +76,13 @@ func render_one(path: str, outdir: str, index: usize, drawing: bool, fonts: svg.
     let size = drawn.size
     let bytes = drawn.bytes
     defer free(bytes) in memory.heap
-    let output = try alloc u8[8 + bytes.length] in memory.heap
+    let output = try new u8[8 + bytes.length] --- in memory.heap
     defer free(output) in memory.heap
     put_u32(output, 0, size.0)
     put_u32(output, 4, size.1)
     memory.copy(output[8..], bytes, bytes.length)
     var name: u8[1024]
-    let target = try format(name, f"{outdir}/{index}.rgba")
+    let target = try strings.format(name, f"{outdir}/{index}.rgba")
     try files.write((c.str)target, output)
 
 ## The bitmap's size for a picture `width` by `height`: 300 wide, the height in proportion.
@@ -102,7 +102,7 @@ func draw_full(source: str, directory: str, fonts: svg.FontFiles*?) -> Drawn!:
     let picture = try svg.load(source, options)
     defer picture.release()
     let size = fitted(picture.value().width_px(), picture.value().height_px())
-    let bytes = try alloc u8[(usize)size.0 * (usize)size.1 * 4] in memory.heap
+    let bytes = try new u8[(usize)size.0 * (usize)size.1 * 4] --- in memory.heap
     errdefer free(bytes) in memory.heap
     try svg.render(picture.value(), svg.fit_transform(picture.value(), size.0, size.1), size.0, size.1, bytes)
     return Drawn(size = size, bytes = bytes)
@@ -112,10 +112,10 @@ func draw_flattened(source: str) -> Drawn!:
     let drawing = try svg.parse(source)
     defer drawing.release()
     let size = fitted(drawing.value().view_width(), drawing.value().view_height())
-    let pixels = try alloc f32[(usize)size.0 * (usize)size.1 * 4] in memory.heap
+    let pixels = try new f32[(usize)size.0 * (usize)size.1 * 4] --- in memory.heap
     defer free(pixels) in memory.heap
     try svg.rasterize_rgba(drawing.value(), size.0, size.1, pixels, svg.Color())
-    let bytes = try alloc u8[pixels.length] in memory.heap
+    let bytes = try new u8[pixels.length] --- in memory.heap
     for at in 0..<pixels.length:
         var value = math.clamp((f64)pixels[at], 0.0, 1.0)
         if at % 4 != 3:

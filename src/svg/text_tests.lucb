@@ -63,9 +63,9 @@ test "drawing the elements in two ranges matches drawing them at once":
     defer drawing.release()
     let native = try drawing.get()
     assert(native.text_run(0).order == 1)
-    let whole = try alloc f32[16 * 16 * 4] in memory.heap
+    let whole = try new f32[16 * 16 * 4] --- in memory.heap
     defer free(whole) in memory.heap
-    let parts = try alloc f32[16 * 16 * 4] in memory.heap
+    let parts = try new f32[16 * 16 * 4] --- in memory.heap
     defer free(parts) in memory.heap
     try rasterize_rgba(native, 16, 16, whole, Color())
     for index in 0..<parts.length:

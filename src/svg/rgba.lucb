@@ -143,7 +143,7 @@ func rasterize_placed(drawing: const Drawing*, width: u32, height: u32, fit: Pla
     defer free(acc) in memory.heap
     if pixels.length != (usize)width * (usize)height * 4:
         error(invalid, "the pixel buffer must hold width * height * 4 floats")
-    let ramp = try alloc f32[ramp_size * 4] in memory.heap
+    let ramp = try new f32[ramp_size * 4] --- in memory.heap
     defer free(ramp) in memory.heap
     let w = (usize)width
     let h = (usize)height

@@ -203,7 +203,7 @@ func decode_entity(data: const u8[]) -> Entity?:
 ## `frame` after `order` shape elements. The position just past its `</text>`.
 func add_text(drawing: Drawing*, source: str, pos: usize, tag: str, frame: Frame, gradient_ids: const str[]) -> usize!:
     let data = source.bytes
-    let styles = try alloc Style[tspan_limit] in memory.heap
+    let styles = try new Style[tspan_limit] --- in memory.heap
     defer free(styles) in memory.heap
     var depth: usize = 0
     var ignored: usize = 0

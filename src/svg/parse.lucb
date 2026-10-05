@@ -260,7 +260,7 @@ pub func parse(source: str) -> interop.Reference[Drawing]!:
         if ids.length > 0:
             free(ids) in memory.heap
     var frame = Frame()
-    let saved = try alloc Frame[group_limit] in memory.heap
+    let saved = try new Frame[group_limit] --- in memory.heap
     defer free(saved) in memory.heap
     var depth: usize = 0
     var ignored: usize = 0

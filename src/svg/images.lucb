@@ -30,13 +30,13 @@ enum ImageFormat:
 
 extend Converter:
     ## An `image` element into `parent`.
-    mutating func image_element(node: u32, state: const State*, parent: u32) -> !:
+    func image_element(node: u32, state: const State*, parent: u32) -> !:
         let loaded = (try self.load_image(node)) else return
         try self.place_image(node, loaded.0, loaded.1, state, parent)
 
     ## The image `node`'s href names, as a detached group in its own pixels (a raster
     ## item, or a converted SVG), with its size; none when it cannot be loaded.
-    mutating func load_image(node: u32) -> (u32, Rect)?!:
+    func load_image(node: u32) -> (u32, Rect)?!:
         let href = strings.trim(self.attribute(node, Attr.href) else "")
         if href.length == 0:
             return none
@@ -58,16 +58,16 @@ extend Converter:
         let content = try self.picture.add_item(Item())
         let rendering = strings.trim(self.find(node, Attr.image_rendering) else "auto")
         let visible = (self.find(node, Attr.visibility) else "visible") == "visible"
-        discard(try self.picture.append(content, Item(kind = ItemKind.image, raster = index, view = size, visible = visible,
-                                                      pixelated = image_quality(rendering))))
+        _ = try self.picture.append(content, Item(kind = ItemKind.image, raster = index, view = size, visible = visible,
+                                                  pixelated = image_quality(rendering)))
         return (content, size)
 
     ## Read `href`, a path relative to the resources directory, into `bytes`.
-    mutating func image_file(href: str, bytes: List[u8]*) -> ImageFormat!:
+    func image_file(href: str, bytes: List[u8]*) -> ImageFormat!:
         if self.options.resources.length == 0:
             return ImageFormat.other
         var name: u8[4096]
-        let path = format(name, f"{self.options.resources}/{href}") catch _:
+        let path = strings.format(name, f"{self.options.resources}/{href}") catch _:
             recover ""
         if path.length == 0:
             return ImageFormat.other
@@ -82,7 +82,7 @@ extend Converter:
         return sniffed
 
     ## An SVG image converted into the picture: a detached group and its size.
-    mutating func svg_image(data: const u8[]) -> (u32, Rect)?!:
+    func svg_image(data: const u8[]) -> (u32, Rect)?!:
         var plain = List[u8]()
         defer plain.release()
         var text = data
@@ -98,7 +98,7 @@ extend Converter:
         return (content, Rect(w = nested.1.w, h = nested.1.h))
 
     ## Fit `content` (an image `size` in its own pixels) into the element's box.
-    mutating func place_image(node: u32, content: u32, size: Rect, state: const State*, parent: u32) -> !:
+    func place_image(node: u32, content: u32, size: Rect, state: const State*, parent: u32) -> !:
         if not (size.w > 0.0) or not (size.h > 0.0):
             return
         let zero = Length()
@@ -117,7 +117,7 @@ extend Converter:
         try self.fit_image(node, content, size, Rect(x = x, y = y, w = width, h = height), parent)
 
     ## Fit `content` of `size` into `box` by `node`'s preserveAspectRatio, under `parent`.
-    mutating func fit_image(node: u32, content: u32, size: Rect, box: Rect, parent: u32) -> !:
+    func fit_image(node: u32, content: u32, size: Rect, box: Rect, parent: u32) -> !:
         let x = box.x
         let y = box.y
         let width = box.w
@@ -243,11 +243,11 @@ func gunzip(data: const u8[], out: List[u8]*) -> bool!:
     let size = (usize)data[data.length - 4] | ((usize)data[data.length - 3] << 8) | ((usize)data[data.length - 2] << 16) | ((usize)data[data.length - 1] << 24)
     if size == 0 or size > 268435456:
         return false
-    let output = try alloc u8[size] in memory.heap
+    let output = try new u8[size] --- in memory.heap
     defer free(output) in memory.heap
     let used = flate.inflate_raw(data[at..<data.length - 8], output) catch _:
         return false
-    discard(used)
+    _ = used
     for byte in output:
         try out.push(byte)
     return true
@@ -268,7 +268,7 @@ func decode_raster(data: const u8[], kind: ImageFormat) -> Raster?!:
         height = found.height
     if width == 0 or height == 0 or width * height > 67108864:
         return none
-    let pixels = try alloc u8[width * height * 4] in memory.heap
+    let pixels = try new u8[width * height * 4] --- in memory.heap
     errdefer free(pixels) in memory.heap
     var decoded = true
     if kind == ImageFormat.png_image:

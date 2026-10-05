@@ -68,7 +68,7 @@ func sort_ids(ids: List[IdEntry]*, first: bool) -> !:
     let items = ids.view()
     if items.length < 2:
         return
-    let scratch = try alloc IdEntry[items.length] in memory.heap
+    let scratch = try new IdEntry[items.length] --- in memory.heap
     defer free(scratch) in memory.heap
     var width: usize = 1
     while width < items.length:
@@ -118,7 +118,7 @@ struct Builder:
     var xml_ids: const IdEntry[]
 
     ## Build the XML children of `xml_parent` under tree node `parent`.
-    mutating func children(xml_parent: u32, origin: u32, parent: u32, ignore_ids: bool, depth: usize) -> !:
+    func children(xml_parent: u32, origin: u32, parent: u32, ignore_ids: bool, depth: usize) -> !:
         var child = self.tree.xml.nodes.items[xml_parent].first
         while child != 0:
             try self.element(child, origin, parent, ignore_ids, depth)
@@ -126,7 +126,7 @@ struct Builder:
 
     ## Build XML element `index` under `parent`, with its content. `origin` is the `use`
     ## being expanded, if any.
-    mutating func element(index: u32, origin: u32, parent: u32, ignore_ids: bool, depth: usize) -> !:
+    func element(index: u32, origin: u32, parent: u32, ignore_ids: bool, depth: usize) -> !:
         if depth > depth_limit:
             error(invalid, "elements nest too deeply")
         var tag = svg_tag(&self.tree.xml, index) else return
@@ -143,7 +143,7 @@ struct Builder:
             try self.children(index, origin, node, ignore_ids, depth + 1)
 
     ## Append a tree node for XML element `index` with its cascaded attributes.
-    mutating func attributes(index: u32, parent: u32, tag: Tag, ignore_ids: bool) -> u32!:
+    func attributes(index: u32, parent: u32, tag: Tag, ignore_ids: bool) -> u32!:
         let tree = self.tree
         let xml = &tree.xml
         let start = tree.attrs.used
@@ -188,7 +188,7 @@ struct Builder:
         return try append_node(tree, parent, Node(kind = Kind.element, tag = tag, attr_start = (u32)start, attr_end = (u32)tree.attrs.used))
 
     ## Apply one CSS declaration to the element whose attributes start at `start`.
-    mutating func declare(declaration: Declaration, parent: u32, tag: Tag, start: usize) -> !:
+    func declare(declaration: Declaration, parent: u32, tag: Tag, start: usize) -> !:
         let important = declaration.important
         let value = declaration.value
         if declaration.name == "marker":
@@ -203,7 +203,7 @@ struct Builder:
 
     ## Set `name` from CSS: it replaces a value set earlier unless that one is important
     ## (important values are not replaced by later ones of any kind).
-    mutating func insert(name: Attr, value: str, important: bool, parent: u32, tag: Tag, start: usize) -> !:
+    func insert(name: Attr, value: str, important: bool, parent: u32, tag: Tag, start: usize) -> !:
         let tree = self.tree
         var existing: usize? = none
         for at in start..<tree.attrs.used:
@@ -220,7 +220,7 @@ struct Builder:
             tree.attrs.used -= 1
 
     ## Append an attribute unless it is one the tree does not keep; `inherit` resolves here.
-    mutating func append_attribute(parent: u32, tag: Tag, name: Attr, value: str, important: bool) -> bool!:
+    func append_attribute(parent: u32, tag: Tag, name: Attr, value: str, important: bool) -> bool!:
         if name == Attr.style or name == Attr.class_name:
             return false
         if tag == Tag.tspan and name == Attr.href:
@@ -232,7 +232,7 @@ struct Builder:
 
     ## `name: inherit` under `parent`: an inherited property takes the nearest ancestor's
     ## value, any other the parent's; failing that, the initial value.
-    mutating func inherit(parent: u32, name: Attr) -> bool!:
+    func inherit(parent: u32, name: Attr) -> bool!:
         let tree = self.tree
         var at = parent
         while at != 0:
@@ -249,7 +249,7 @@ struct Builder:
         return true
 
     ## Expand `<use>` (XML `index`, tree `node`): build what it references as its child.
-    mutating func expand_use(index: u32, origin: u32, node: u32, depth: usize) -> !:
+    func expand_use(index: u32, origin: u32, node: u32, depth: usize) -> !:
         let xml = &self.tree.xml
         let target_link = self.xml_link(index) else return
         if target_link == index or target_link == origin:
@@ -340,7 +340,7 @@ func break_cycles(tree: Tree*) -> !:
             continue
         let value = tree.attribute(target, Attr.filter) else continue
         var wanted: u8[256]
-        let reference = format(wanted, f"url(#{id})") catch _:
+        let reference = strings.format(wanted, f"url(#{id})") catch _:
             recover ""
         if reference.length > 0 and strings.contains(value, reference):
             set_none(tree, target, Attr.filter)

@@ -22,11 +22,11 @@ struct Polylines:
     var points: List[Point] = List[Point]()
     var runs: List[Strand] = List[Strand]()
 
-    mutating func clear():
+    func clear():
         self.points.used = 0
         self.runs.used = 0
 
-    mutating func release():
+    func release():
         self.points.release()
         self.runs.release()
 
@@ -35,11 +35,11 @@ struct Polylines:
         let run = self.runs.items[index]
         return self.points.items[run.start..<run.start + run.count]
 
-    mutating func begin(p: Point) -> !:
+    func begin(p: Point) -> !:
         try self.runs.push(Strand(start = self.points.used))
         try self.add(p)
 
-    mutating func add(p: Point) -> !:
+    func add(p: Point) -> !:
         try self.points.push(p)
         self.runs.items[self.runs.used - 1].count += 1
 

@@ -46,7 +46,7 @@ pub struct FontFiles: GlyphSource:
 
     ## The faces of the font files under `directories` (searched recursively; missing ones
     ## are skipped).
-    pub static func open(directories: const str[]) -> FontFiles!:
+    pub func open(directories: const str[]) -> FontFiles!:
         var source = FontFiles()
         errdefer source.close()
         try catalog_directories(directories, &source.faces)
@@ -55,7 +55,7 @@ pub struct FontFiles: GlyphSource:
     ## The faces of the platform's font directories: /System/Library/Fonts, /Library/Fonts
     ## and ~/Library/Fonts on macOS; %WINDIR%\Fonts and the user's on Windows;
     ## /usr/share/fonts, /usr/local/share/fonts and the user's on Linux.
-    pub static func system() -> FontFiles!:
+    pub func system() -> FontFiles!:
         var source = FontFiles()
         errdefer source.close()
         var directories = List[str]()
@@ -66,7 +66,7 @@ pub struct FontFiles: GlyphSource:
 
     ## Make the generic family `generic` (serif, sans-serif, monospace, cursive, fantasy or
     ## system-ui) stand for the installed `family`.
-    pub mutating func set_generic(generic: str, family: str) -> !:
+    pub func set_generic(generic: str, family: str) -> !:
         for (index, name) in generic_names.indexed():
             if name == generic:
                 self.generics[index] = try self.text.store(family.bytes)
@@ -82,7 +82,7 @@ pub struct FontFiles: GlyphSource:
         return self.faces.items[face - 1].probe.family_name
 
     ## Free every face and what the source holds.
-    pub mutating func close():
+    pub func close():
         for index in 0..<self.faces.used:
             self.faces.items[index].release()
         self.faces.release()
@@ -90,7 +90,7 @@ pub struct FontFiles: GlyphSource:
 
     # mark: Choosing faces =====================================================================
 
-    mutating func select_face(query: FaceQuery) -> u32?:
+    func select_face(query: FaceQuery) -> u32?:
         var rest = query.families
         while strings.trim(rest).length > 0:
             var piece = rest
@@ -101,7 +101,7 @@ pub struct FontFiles: GlyphSource:
             var name = strings.trim(piece)
             if name.length >= 2 and (name.bytes[0] == '"' or name.bytes[0] == '\''):
                 name = strings.trim((str)name.bytes[1..<name.length - 1])
-            if let generic = self.generic_index(name):
+            if let generic = FontFiles.generic_index(name):
                 if let found = self.generic_face(generic, query):
                     return found
             elif let found = self.best(name, query):
@@ -152,7 +152,7 @@ pub struct FontFiles: GlyphSource:
         let index = chosen else return none
         return (u32)(index + 1)
 
-    mutating func fallback_face(face: u32, scalar: u32) -> u32?:
+    func fallback_face(face: u32, scalar: u32) -> u32?:
         # A face already loaded first, then any.
         for pass in 0..<(usize)2:
             for at in 0..<self.faces.used:
@@ -165,7 +165,7 @@ pub struct FontFiles: GlyphSource:
 
     # mark: Metrics, glyphs and outlines ==========================================================
 
-    mutating func face_metrics(face: u32) -> FaceMetrics:
+    func face_metrics(face: u32) -> FaceMetrics:
         let f = self.faces.items[face - 1].probe
         let upem = (f64)f.units_per_em
         var metrics = FaceMetrics(units_per_em = upem, ascent = (f64)f.ascender, descent = (f64)f.descender,
@@ -187,18 +187,18 @@ pub struct FontFiles: GlyphSource:
             metrics.underline_thickness = upem / 12.0
         return metrics
 
-    mutating func glyph_index(face: u32, scalar: u32) -> u32:
+    func glyph_index(face: u32, scalar: u32) -> u32:
         let glyph = opentype.sfnt_face_glyph_for_code_point(self.faces.items[face - 1].probe, scalar)
         self.mapped[(usize)((glyph * 31 + face) % 1024)] = MappedGlyph(face = face, glyph = glyph, scalar = scalar)
         return glyph
 
-    mutating func glyph_advance(face: u32, glyph: u32) -> f64:
+    func glyph_advance(face: u32, glyph: u32) -> f64:
         if not self.faces.items[face - 1].load():
             return 0.0
         let loaded = self.faces.items[face - 1].face() else return 0.0
         return (f64)opentype.sfnt_face_advance(loaded, glyph)
 
-    mutating func glyph_kerning(face: u32, left: u32, right: u32) -> f64:
+    func glyph_kerning(face: u32, left: u32, right: u32) -> f64:
         # The pair's scalars, as glyph_index mapped them, shaped together.
         let a = self.mapped[(usize)((left * 31 + face) % 1024)]
         let b = self.mapped[(usize)((right * 31 + face) % 1024)]
@@ -212,7 +212,7 @@ pub struct FontFiles: GlyphSource:
             return 0.0
         return out[0].advance - self.glyph_advance(face, left)
 
-    mutating func shape(face: u32, scalars: const u32[], rtl: bool, kerning: bool, small_caps: bool, out: GlyphRecord[]) -> usize?!:
+    func shape(face: u32, scalars: const u32[], rtl: bool, kerning: bool, small_caps: bool, out: GlyphRecord[]) -> usize?!:
         if not self.faces.items[face - 1].load():
             return none
         let font = self.faces.items[face - 1].font else return none
@@ -256,7 +256,7 @@ pub struct FontFiles: GlyphSource:
                                       x_offset = (f64)positions[at].x_offset, y_offset = (f64)positions[at].y_offset)
             return infos.length
 
-    mutating func glyph_outline(face: u32, glyph: u32, path: Path*) -> bool!:
+    func glyph_outline(face: u32, glyph: u32, path: Path*) -> bool!:
         if not self.faces.items[face - 1].load():
             return false
         let loaded = self.faces.items[face - 1].face() else return false

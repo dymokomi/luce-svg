@@ -204,7 +204,7 @@ func trace_fill(acc: f32[], width: usize, height: usize, drawing: const Drawing*
 func accumulator(width: u32, height: u32) -> f32[]!:
     if width == 0 or height == 0 or width > 4096 or height > 4096:
         error(invalid, "a bitmap is 1..4096 pixels on a side")
-    let acc = try alloc f32[((usize)width + 1) * (usize)height] in memory.heap
+    let acc = try new f32[((usize)width + 1) * (usize)height] --- in memory.heap
     for index in 0..<acc.length:
         acc[index] = 0.0
     return acc

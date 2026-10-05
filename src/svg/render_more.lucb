@@ -6,7 +6,7 @@
 
 extend Renderer:
     ## An image: its raster's rectangle filled with the raster, edges padded.
-    mutating func image(item: const Item*, transform: Matrix, canvas: Canvas*) -> !:
+    func image(item: const Item*, transform: Matrix, canvas: Canvas*) -> !:
         if not item.visible:
             return
         let raster = self.picture.rasters.items[item.raster]
@@ -36,7 +36,7 @@ extend Renderer:
 
     ## The shader of pattern brush `brush` for `item` under `transform`: the tile drawn
     ## at the device's scale into `self.tile`, as resvg draws it, and repeated.
-    mutating func pattern_shader(brush: Brush, item: const Item*, transform: Matrix) -> Shader?!:
+    func pattern_shader(brush: Brush, item: const Item*, transform: Matrix) -> Shader?!:
         let pattern = self.picture.patterns.items[brush.server]
         var rect = pattern.rect
         var content = Matrix()

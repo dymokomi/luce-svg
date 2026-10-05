@@ -14,8 +14,8 @@
 
 extend Converter:
     ## Fill in `primitive` for element `fe` (`tag`); false when it is not a primitive.
-    mutating func primitive_kind(fe: u32, tag: Tag, sx: f64, sy: f64, state: const State*, names: const ResultName[], index: usize,
-                                 primitive: Primitive*) -> bool!:
+    func primitive_kind(fe: u32, tag: Tag, sx: f64, sy: f64, state: const State*, names: const ResultName[], index: usize,
+                        primitive: Primitive*) -> bool!:
         match tag:
             .fe_blend:
                 primitive.kind = FilterKind.blend
@@ -172,7 +172,7 @@ extend Converter:
         color.a *= self.opacity(fe, Attr.flood_opacity, 1.0)
         return color
 
-    mutating func color_matrix(fe: u32, primitive: Primitive*) -> !:
+    func color_matrix(fe: u32, primitive: Primitive*) -> !:
         primitive.kind = FilterKind.color_matrix
         let kind = strings.trim(self.attribute(fe, Attr.kind) else "matrix")
         var first: f64[1] = [0.0]
@@ -209,7 +209,7 @@ extend Converter:
         primitive.count = 20
 
     ## A feFuncX element's function, or none for an unknown type.
-    mutating func transfer_function(node: u32) -> TransferFn?!:
+    func transfer_function(node: u32) -> TransferFn?!:
         let kind = strings.trim(self.attribute(node, Attr.kind) else return none)
         if kind == "identity":
             return TransferFn()
@@ -229,7 +229,7 @@ extend Converter:
         return none
 
     ## feConvolveMatrix's kernel and options; false when they are invalid.
-    mutating func convolve(fe: u32, primitive: Primitive*) -> bool!:
+    func convolve(fe: u32, primitive: Primitive*) -> bool!:
         primitive.kind = FilterKind.convolve
         var columns = 3.0
         var rows = 3.0
@@ -333,7 +333,7 @@ extend Converter:
 extend Converter:
     ## feImage: an element of the document, or an image fitted into the subregion; its
     ## content is drawn at the subregion's corner.
-    mutating func fe_image(fe: u32, state: const State*, primitive: Primitive*) -> !:
+    func fe_image(fe: u32, state: const State*, primitive: Primitive*) -> !:
         primitive.kind = FilterKind.image
         let root = try self.picture.add_item(Item())
         primitive.root = root

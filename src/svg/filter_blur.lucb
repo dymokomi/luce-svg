@@ -14,7 +14,7 @@
 #==============================================================================================
 
 extend Renderer:
-    mutating func blur_family(p: const Primitive*, region: Bounds, transform: Matrix, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
+    func blur_family(p: const Primitive*, region: Bounds, transform: Matrix, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
         let linear = p.linear
         let (sx, sy) = axis_scales(transform)
         var image = try self.input_in(p.input1, linear, region, layer, results)

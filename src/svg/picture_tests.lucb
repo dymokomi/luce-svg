@@ -8,7 +8,7 @@
 func draw_test(source: str, width: u32, height: u32) -> u8[]!:
     let picture = try load(source)
     defer picture.release()
-    let pixels = try alloc u8[(usize)width * (usize)height * 4] in memory.heap
+    let pixels = try new u8[(usize)width * (usize)height * 4] --- in memory.heap
     errdefer free(pixels) in memory.heap
     try render(picture.value(), fit_transform(picture.value(), width, height), width, height, pixels)
     return pixels

@@ -62,7 +62,7 @@ struct Converter:
     ## Whether this conversion holds the system fonts (system_glyphs).
     var system_fonts_held: bool = false
 
-    mutating func release():
+    func release():
         if self.servers.length > 0:
             free(self.servers) in memory.heap
         self.server_colors.release()
@@ -73,7 +73,7 @@ struct Converter:
 
     ## Where text gets its glyphs: the caller's source, else the system's fonts, which the
     ## conversion holds (one at a time) until it is released.
-    mutating func glyph_source() -> GlyphSource?:
+    func glyph_source() -> GlyphSource?:
         if let source = self.options.glyphs:
             return source
         if not self.options.system_fonts:
@@ -344,7 +344,7 @@ func convert_tree(tree: const Tree*, options: Options, picture: Picture*) -> !:
 
 extend Converter:
     ## The root `svg`: its size, its viewBox, and its content under the root group.
-    mutating func document() -> !:
+    func document() -> !:
         let svg = self.tree.root_element()
         try self.picture.items.push(Item())
         let (size, view) = self.document_size(svg)
@@ -355,7 +355,7 @@ extend Converter:
 
     ## The root `svg` drawn at `size` with `view`: a detached group, or none when it is
     ## not displayed.
-    mutating func document_group(size: Rect, view: Rect) -> u32?!:
+    func document_group(size: Rect, view: Rect) -> u32?!:
         let svg = self.tree.root_element()
         if not self.visible_element(svg):
             return none
@@ -374,7 +374,7 @@ extend Converter:
                 let index = self.picture.paths.used
                 try self.picture.paths.push(background)
                 let fill = FillPaint(brush = Brush(color = color.rgb(), opacity = color.a))
-                discard(try self.picture.append(group, Item(kind = ItemKind.shape, path = index, fill = fill)))
+                _ = try self.picture.append(group, Item(kind = ItemKind.shape, path = index, fill = fill))
         try self.element(svg, &state, group)
         return group
 
@@ -415,14 +415,14 @@ extend Converter:
         return (Rect(w = w, h = h), Rect(w = w, h = h))
 
     ## Convert the element children of `node` into group `parent`.
-    mutating func children(node: u32, state: const State*, parent: u32) -> !:
+    func children(node: u32, state: const State*, parent: u32) -> !:
         var child = self.tree.first_child(node)
         while child != 0:
             try self.element(child, state, parent)
             child = self.tree.next_sibling(child)
 
     ## Convert one element into group `parent`.
-    mutating func element(node: u32, state: const State*, parent: u32) -> !:
+    func element(node: u32, state: const State*, parent: u32) -> !:
         if not self.tree.is_element(node):
             return
         let tag = self.tree.tag(node)
@@ -444,7 +444,7 @@ extend Converter:
         try self.close_group(node, state, parent, group, false)
 
     ## The content of `node` itself, into `group`.
-    mutating func content(node: u32, tag: Tag, state: const State*, group: u32) -> !:
+    func content(node: u32, tag: Tag, state: const State*, group: u32) -> !:
         if is_shape_tag(tag):
             if let path = try self.shape_path(node, tag, state):
                 try self.shape(node, path, state, group)
@@ -461,7 +461,7 @@ extend Converter:
     # mark: Groups ==============================================================================
 
     ## Start the group `node` would make, detached until close_group decides its fate.
-    mutating func open_group(node: u32, state: const State*, parent: u32) -> u32!:
+    func open_group(node: u32, state: const State*, parent: u32) -> u32!:
         var item = Item(transform = self.transform_of(node, Attr.transform, state))
         if not state.clip_child:
             item.opacity = self.opacity(node, Attr.opacity, 1.0)
@@ -474,7 +474,7 @@ extend Converter:
     ## Finish group `group` of `node`: give it the clip path, mask and filters its
     ## element asks for (which may hide it), then attach it to `parent` when it needs to
     ## be a group, else hand its children to `parent`. `force` keeps it a group.
-    mutating func close_group(node: u32, state: const State*, parent: u32, group: u32, force: bool) -> !:
+    func close_group(node: u32, state: const State*, parent: u32, group: u32, force: bool) -> !:
         let object_box = self.object_bounds(group)
         let tag = self.tree.tag(node)
         var clip: usize = 0

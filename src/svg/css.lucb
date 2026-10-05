@@ -68,7 +68,7 @@ struct Sheet:
     var simples: List[Simple] = List[Simple]()
     var declarations: List[Declaration] = List[Declaration]()
 
-    mutating func release():
+    func release():
         self.rules.release()
         self.compounds.release()
         self.simples.release()

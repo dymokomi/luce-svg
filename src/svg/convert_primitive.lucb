@@ -21,7 +21,7 @@ struct ResultName:
 extend Converter:
     ## Add the filter element `node` for an element with `object_box`; false when it is
     ## not a usable filter.
-    mutating func filter_element(node: u32, state: const State*, object_box: Rect?) -> bool!:
+    func filter_element(node: u32, state: const State*, object_box: Rect?) -> bool!:
         if self.tree.tag(node) != Tag.filter:
             return false
         let units_source = self.filter_source(node, Attr.filter_units)
@@ -75,7 +75,7 @@ extend Converter:
         return none
 
     ## Convert the primitives of filter `holder` into the picture.
-    mutating func primitives(holder: u32, bbox_units: bool, state: const State*, object_box: Rect?, region: Rect) -> !:
+    func primitives(holder: u32, bbox_units: bool, state: const State*, object_box: Rect?, region: Rect) -> !:
         var names = List[ResultName]()
         defer names.release()
         var sx = 1.0
@@ -173,7 +173,7 @@ extend Converter:
 
     ## Push a list attribute's numbers to the picture's filter values: (start, count),
     ## or none when it is unreadable.
-    mutating func value_list(fe: u32, name: Attr) -> (usize, usize)?!:
+    func value_list(fe: u32, name: Attr) -> (usize, usize)?!:
         let text = self.attribute(fe, name) else return none
         let start = self.picture.filter_values.used
         var scanner = Scanner(data = text.bytes)

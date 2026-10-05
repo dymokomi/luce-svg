@@ -14,7 +14,7 @@
 
 extend Builder:
     ## Build the content of `<text>` (XML `index`, tree `node`) and trim its spaces.
-    mutating func text(index: u32, node: u32) -> !:
+    func text(index: u32, node: u32) -> !:
         let preserve = self.space_preserved(node, false)
         try self.text_content(index, node, preserve)
         try trim_text_nodes(self.tree, node, preserve)
@@ -29,14 +29,14 @@ extend Builder:
             at = self.tree.nodes.items[at].parent
         return default
 
-    mutating func text_content(index: u32, parent: u32, preserve: bool) -> !:
+    func text_content(index: u32, parent: u32, preserve: bool) -> !:
         let parent_is_text = self.tree.tag(parent) == Tag.text
         var child = self.tree.xml.nodes.items[index].first
         while child != 0:
             let xml_node = self.tree.xml.nodes.items[child]
             if not xml_node.element:
                 let text = try collapse_text(self.tree, xml_node.text, preserve)
-                discard(try append_node(self.tree, parent, Node(kind = Kind.text, text = text)))
+                _ = try append_node(self.tree, parent, Node(kind = Kind.text, text = text))
             elif let found = svg_tag(&self.tree.xml, child):
                 var tag = found
                 if tag == Tag.a:
@@ -60,14 +60,14 @@ extend Builder:
                             if gathered.bytes.used > 0:
                                 let raw = try gathered.finish(&self.tree.arena)
                                 let text = try collapse_text(self.tree, raw, inner)
-                                discard(try append_node(self.tree, node, Node(kind = Kind.text, text = text)))
+                                _ = try append_node(self.tree, node, Node(kind = Kind.text, text = text))
                     else:
                         try self.text_content(child, node, inner)
             child = self.tree.xml.nodes.items[child].next
 
     ## `font: [style] [variant] [weight] [stretch] size[/line-height] family`, which first
     ## resets every font property, then sets the ones it names.
-    mutating func font_shorthand(value: str, important: bool, parent: u32, tag: Tag, start: usize) -> !:
+    func font_shorthand(value: str, important: bool, parent: u32, tag: Tag, start: usize) -> !:
         let data = value.bytes
         var pos: usize = 0
         var style = "normal"

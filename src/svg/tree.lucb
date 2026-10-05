@@ -53,7 +53,7 @@ struct Tree:
     var sheet: Sheet = Sheet()
     var arena: Arena = Arena()
 
-    mutating func release():
+    func release():
         self.nodes.release()
         self.attrs.release()
         self.ids.release()

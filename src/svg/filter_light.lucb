@@ -149,7 +149,7 @@ func turbulence(noise: const Noise*, channel: usize, x_in: f64, y_in: f64, tile_
 
 extend Renderer:
     ## feTurbulence and the lighting primitives.
-    mutating func generated(p: const Primitive*, region: Bounds, transform: Matrix, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
+    func generated(p: const Primitive*, region: Bounds, transform: Matrix, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
         var canvas = try Canvas.make(0, 0, layer.width, layer.height)
         let (sx, sy) = axis_scales(transform)
         if p.kind == FilterKind.turbulence:

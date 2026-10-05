@@ -9,29 +9,29 @@
 struct BoxFont: GlyphSource:
     var selected: u32 = 0
 
-    mutating func select_face(query: FaceQuery) -> u32?:
+    func select_face(query: FaceQuery) -> u32?:
         self.selected += 1
         return 1
 
-    mutating func fallback_face(face: u32, scalar: u32) -> u32?:
+    func fallback_face(face: u32, scalar: u32) -> u32?:
         return none
 
-    mutating func face_metrics(face: u32) -> FaceMetrics:
+    func face_metrics(face: u32) -> FaceMetrics:
         return FaceMetrics()
 
-    mutating func glyph_index(face: u32, scalar: u32) -> u32:
+    func glyph_index(face: u32, scalar: u32) -> u32:
         return scalar
 
-    mutating func glyph_advance(face: u32, glyph: u32) -> f64:
+    func glyph_advance(face: u32, glyph: u32) -> f64:
         return 600.0
 
-    mutating func glyph_kerning(face: u32, left: u32, right: u32) -> f64:
+    func glyph_kerning(face: u32, left: u32, right: u32) -> f64:
         return -100.0 if left == 65 and right == 86 else 0.0
 
-    mutating func shape(face: u32, scalars: const u32[], rtl: bool, kerning: bool, small_caps: bool, out: GlyphRecord[]) -> usize?!:
+    func shape(face: u32, scalars: const u32[], rtl: bool, kerning: bool, small_caps: bool, out: GlyphRecord[]) -> usize?!:
         return none
 
-    mutating func glyph_outline(face: u32, glyph: u32, path: Path*) -> bool!:
+    func glyph_outline(face: u32, glyph: u32, path: Path*) -> bool!:
         if glyph == 32:
             return false
         try path.rect(0.0, 0.0, 600.0, 700.0)
@@ -42,7 +42,7 @@ func draw_text_test(source: str, width: u32, height: u32) -> u8[]!:
     var font = BoxFont()
     let picture = try load(source, Options(glyphs = &font))
     defer picture.release()
-    let pixels = try alloc u8[(usize)width * (usize)height * 4] in memory.heap
+    let pixels = try new u8[(usize)width * (usize)height * 4] --- in memory.heap
     errdefer free(pixels) in memory.heap
     try render(picture.value(), fit_transform(picture.value(), width, height), width, height, pixels)
     return pixels
@@ -107,25 +107,25 @@ test "a filter on text measures the text box, and tref needs an SVG element":
 struct LigatureFont: GlyphSource:
     var boxes: BoxFont = BoxFont()
 
-    mutating func select_face(query: FaceQuery) -> u32?:
+    func select_face(query: FaceQuery) -> u32?:
         return self.boxes.select_face(query)
 
-    mutating func fallback_face(face: u32, scalar: u32) -> u32?:
+    func fallback_face(face: u32, scalar: u32) -> u32?:
         return none
 
-    mutating func face_metrics(face: u32) -> FaceMetrics:
+    func face_metrics(face: u32) -> FaceMetrics:
         return FaceMetrics()
 
-    mutating func glyph_index(face: u32, scalar: u32) -> u32:
+    func glyph_index(face: u32, scalar: u32) -> u32:
         return scalar
 
-    mutating func glyph_advance(face: u32, glyph: u32) -> f64:
+    func glyph_advance(face: u32, glyph: u32) -> f64:
         return 900.0 if glyph == 0xFB01 else 600.0
 
-    mutating func glyph_kerning(face: u32, left: u32, right: u32) -> f64:
+    func glyph_kerning(face: u32, left: u32, right: u32) -> f64:
         return 0.0
 
-    mutating func shape(face: u32, scalars: const u32[], rtl: bool, kerning: bool, small_caps: bool, out: GlyphRecord[]) -> usize?!:
+    func shape(face: u32, scalars: const u32[], rtl: bool, kerning: bool, small_caps: bool, out: GlyphRecord[]) -> usize?!:
         var count: usize = 0
         var at: usize = 0
         while at < scalars.length:
@@ -136,7 +136,7 @@ struct LigatureFont: GlyphSource:
             at += 2 if ligature else 1
         return count
 
-    mutating func glyph_outline(face: u32, glyph: u32, path: Path*) -> bool!:
+    func glyph_outline(face: u32, glyph: u32, path: Path*) -> bool!:
         try path.rect(0.0, 0.0, 900.0 if glyph == 0xFB01 else 600.0, 700.0)
         return true
 
@@ -156,7 +156,7 @@ test "a shaping source's ligature is one cluster":
     var font = LigatureFont()
     let picture = try load("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"30\" height=\"20\"><text x=\"0\" y=\"10\" font-size=\"10\">fix</text></svg>", Options(glyphs = &font))
     defer picture.release()
-    let pixels = try alloc u8[30 * 20 * 4] in memory.heap
+    let pixels = try new u8[30 * 20 * 4] --- in memory.heap
     defer free(pixels) in memory.heap
     try render(picture.value(), fit_transform(picture.value(), 30, 20), 30, 20, pixels)
     # "fi" 9 px then "x" 6 px: ink ends at 15, not 18.

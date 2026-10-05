@@ -17,7 +17,7 @@ func axis_scales(m: Matrix) -> (f64, f64):
 
 extend Renderer:
     ## Run one primitive; the result's region is set by the caller.
-    mutating func primitive(p: const Primitive*, region: Bounds, transform: Matrix, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
+    func primitive(p: const Primitive*, region: Bounds, transform: Matrix, layer: const Canvas*, results: const FilterImage[]) -> FilterImage!:
         let linear = p.linear
         match p.kind:
             .flood:

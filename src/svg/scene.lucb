@@ -202,7 +202,7 @@ pub struct Picture:
         return self.height
 
     ## Free everything the picture holds.
-    pub mutating func close():
+    pub func close():
         for index in 0..<self.paths.used:
             self.paths.items[index].release()
         for raster in self.rasters.view():
@@ -223,19 +223,19 @@ pub struct Picture:
         self.filter_inputs.release()
 
     ## Add a detached item; answer its index.
-    mutating func add_item(item: Item) -> u32!:
+    func add_item(item: Item) -> u32!:
         let index = (u32)self.items.used
         try self.items.push(item)
         return index
 
     ## Add `item` as the last child of group `parent`; answer its index.
-    mutating func append(parent: u32, item: Item) -> u32!:
+    func append(parent: u32, item: Item) -> u32!:
         let index = try self.add_item(item)
         self.attach(parent, index)
         return index
 
     ## Make detached item `index` the last child of `parent`.
-    mutating func attach(parent: u32, index: u32):
+    func attach(parent: u32, index: u32):
         self.items.items[index].parent = parent
         self.items.items[index].next = 0
         let last = self.items.items[parent].last
@@ -246,7 +246,7 @@ pub struct Picture:
         self.items.items[parent].last = index
 
     ## Move every child of `from_group` to the end of `to_group`'s children.
-    mutating func adopt_children(from_group: u32, to_group: u32):
+    func adopt_children(from_group: u32, to_group: u32):
         var child = self.items.items[from_group].first
         while child != 0:
             let next = self.items.items[child].next

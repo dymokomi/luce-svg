@@ -35,7 +35,7 @@ struct CatalogFace:
         return font.face.face
 
     ## Free what the face holds.
-    mutating func release():
+    func release():
         if let font = self.font:
             if let face = font.face.face:
                 opentype.sfnt_face_destroy(face)
@@ -48,7 +48,7 @@ struct CatalogFace:
         free(self.path_storage) in memory.heap
 
     ## Read the whole file and make its HarfBuzz font; false when that fails.
-    mutating func load() -> bool:
+    func load() -> bool:
         if self.font != none:
             return true
         if self.failed:
@@ -81,7 +81,7 @@ func catalog_tag(name: str) -> u32:
 
 ## Fill `out` from `offset` of `file`; false when the file is shorter.
 func read_exactly(file: files.File*, offset: u64, out: u8[]) -> bool!:
-    discard(try file.seek((i64)offset))
+    _ = try file.seek((i64)offset)
     var filled: usize = 0
     while filled < out.length:
         let count = try file.read(out[filled..])
@@ -207,7 +207,7 @@ func is_font_file(name: str) -> bool:
 struct CatalogWalk: files.WalkVisitor:
     var faces: List[CatalogFace]*
 
-    mutating func visit(path: str, info: files.Metadata, depth: usize) -> bool!:
+    func visit(path: str, info: files.Metadata, depth: usize) -> bool!:
         if info.kind == files.FileKind.directory:
             return true
         if info.kind == files.FileKind.regular and is_font_file(path):
@@ -220,7 +220,7 @@ struct CatalogWalk: files.WalkVisitor:
 func catalog_directories(directories: const str[], faces: List[CatalogFace]*) -> !:
     for directory in directories:
         var buffer: u8[1024]
-        let root = format(buffer, f"{directory}") else continue
+        let root = strings.format(buffer, f"{directory}") else continue
         if not files.exists((c_api.str)root):
             continue
         var walk = CatalogWalk(faces = faces)
@@ -242,19 +242,19 @@ func system_font_directories(arena: Arena*, out: List[str]*) -> !:
         try out.push("/System/Library/Fonts")
         try out.push("/Library/Fonts")
         if let home = os.env("HOME"):
-            try out.push(try store_c(arena, try format(buffer, f"{home}/Library/Fonts")))
+            try out.push(try store_c(arena, try strings.format(buffer, f"{home}/Library/Fonts")))
     elif os.windows:
         if let windows = os.env("WINDIR"):
-            try out.push(try store_c(arena, try format(buffer, f"{windows}\\Fonts")))
+            try out.push(try store_c(arena, try strings.format(buffer, f"{windows}\\Fonts")))
         else:
             try out.push("C:\\Windows\\Fonts")
         if let app_data = os.env("LOCALAPPDATA"):
-            try out.push(try store_c(arena, try format(buffer, f"{app_data}\\Microsoft\\Windows\\Fonts")))
+            try out.push(try store_c(arena, try strings.format(buffer, f"{app_data}\\Microsoft\\Windows\\Fonts")))
     else:
         try out.push("/usr/share/fonts")
         try out.push("/usr/local/share/fonts")
         if let data = os.env("XDG_DATA_HOME"):
-            try out.push(try store_c(arena, try format(buffer, f"{data}/fonts")))
+            try out.push(try store_c(arena, try strings.format(buffer, f"{data}/fonts")))
         if let home = os.env("HOME"):
-            try out.push(try store_c(arena, try format(buffer, f"{home}/.local/share/fonts")))
-            try out.push(try store_c(arena, try format(buffer, f"{home}/.fonts")))
+            try out.push(try store_c(arena, try strings.format(buffer, f"{home}/.local/share/fonts")))
+            try out.push(try store_c(arena, try strings.format(buffer, f"{home}/.fonts")))

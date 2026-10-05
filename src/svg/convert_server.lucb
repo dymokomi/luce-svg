@@ -20,7 +20,7 @@ let no_server: u32 = 0xFFFFFFFF
 extend Converter:
     ## The paint server `node` converts to: kind 1 (gradient), 2 (pattern) or 3 (a plain
     ## color, an index into server_colors) and its index; kind 0 when it cannot paint.
-    mutating func server(node: u32) -> (u32, usize)!:
+    func server(node: u32) -> (u32, usize)!:
         let cached = self.servers[node]
         if cached == no_server:
             return (0, 0)
@@ -37,7 +37,7 @@ extend Converter:
         return result
 
     ## The gradient `node` converts to (see `server`).
-    mutating func gradient_server(node: u32) -> (u32, usize)!:
+    func gradient_server(node: u32) -> (u32, usize)!:
         let state = State(view_box = self.root_view())
         let holder = self.stops_holder(node) else return (0, 0)
         let start = self.picture.stops.used
@@ -80,7 +80,7 @@ extend Converter:
         return (1, index)
 
     ## Remember a plain color a server became; answer its index.
-    mutating func plain_color(color: Rgba) -> usize!:
+    func plain_color(color: Rgba) -> usize!:
         let index = self.server_colors.used
         try self.server_colors.push(color)
         return index
@@ -138,7 +138,7 @@ extend Converter:
         return none
 
     ## Add the stops of gradient `holder` to the picture, offsets made increasing.
-    mutating func stops(holder: u32) -> !:
+    func stops(holder: u32) -> !:
         let start = self.picture.stops.used
         var previous = 0.0
         var child = self.tree.first_child(holder)
