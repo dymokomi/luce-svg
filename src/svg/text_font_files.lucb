@@ -46,7 +46,7 @@ pub struct FontFiles: GlyphSource:
 
     ## The faces of the font files under `directories` (searched recursively; missing ones
     ## are skipped).
-    pub func open(directories: const str[]) -> FontFiles!:
+    pub static func open(directories: const str[]) -> FontFiles!:
         var source = FontFiles()
         errdefer source.close()
         try catalog_directories(directories, &source.faces)
@@ -55,7 +55,7 @@ pub struct FontFiles: GlyphSource:
     ## The faces of the platform's font directories: /System/Library/Fonts, /Library/Fonts
     ## and ~/Library/Fonts on macOS; %WINDIR%\Fonts and the user's on Windows;
     ## /usr/share/fonts, /usr/local/share/fonts and the user's on Linux.
-    pub func system() -> FontFiles!:
+    pub static func system() -> FontFiles!:
         var source = FontFiles()
         errdefer source.close()
         var directories = List[str]()
@@ -112,7 +112,7 @@ pub struct FontFiles: GlyphSource:
         return 1 if self.faces.used > 0 else none
 
     ## The index of generic family `name`, if it is one.
-    func generic_index(name: str) -> usize?:
+    static func generic_index(name: str) -> usize?:
         for (index, generic) in generic_names.indexed():
             if same_name(name, generic):
                 return index

@@ -141,8 +141,8 @@ extend Converter:
                                                  visible = span.visible, paint_box = text_box, aliased = span.aliased))
 
     ## Append the outlines of `span_index`'s visible clusters, through `span_ts`, to `out`.
-    func span_outlines(fonts: GlyphSource, glyphs: const ClusterGlyph[], span_index: usize, clusters: const Cluster[], span_ts: Matrix,
-                       out: Path*, box: Box*) -> !:
+    static func span_outlines(fonts: GlyphSource, glyphs: const ClusterGlyph[], span_index: usize, clusters: const Cluster[], span_ts: Matrix,
+                              out: Path*, box: Box*) -> !:
         var source = fonts
         var glyph_path = Path()
         defer glyph_path.release()

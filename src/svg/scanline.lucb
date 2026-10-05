@@ -47,7 +47,7 @@ struct Coverage:
     var runs: f32[]
     var box: Box = Box()
 
-    func make(width: usize, height: usize) -> Coverage!:
+    static func make(width: usize, height: usize) -> Coverage!:
         let values = try new f32[width * height] in memory.heap
         errdefer free(values) in memory.heap
         let partial = try new f32[width + 2] in memory.heap

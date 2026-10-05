@@ -23,7 +23,7 @@ struct Canvas:
     var pixels: f32[]
 
     ## A cleared canvas.
-    func make(x: i64, y: i64, width: usize, height: usize) -> Canvas!:
+    static func make(x: i64, y: i64, width: usize, height: usize) -> Canvas!:
         let pixels = try new f32[width * height * 4] in memory.heap
         return Canvas(x = x, y = y, width = width, height = height, pixels = pixels)
 

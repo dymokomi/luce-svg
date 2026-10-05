@@ -133,7 +133,7 @@ extend Renderer:
         return FilterImage(canvas = copy, region = region, linear = self.linear)
 
     ## A copy of `image` with its values in linear light (`linear`) or sRGB.
-    func converted(image: const FilterImage*, linear: bool) -> Canvas!:
+    static func converted(image: const FilterImage*, linear: bool) -> Canvas!:
         var copy = try Canvas.make(0, 0, image.canvas.width, image.canvas.height)
         memory.copy(copy.pixels, image.canvas.pixels, copy.pixels.length)
         if image.linear != linear:

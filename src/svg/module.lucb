@@ -149,7 +149,7 @@ pub struct Drawing:
     var style: Style = Style()
     var element: usize = 0
 
-    func own(native: Drawing*) -> interop.Reference[Drawing]!:
+    static func own(native: Drawing*) -> interop.Reference[Drawing]!:
         return try interop.Reference[Drawing].adopt(native, drawing_type)
 
     func add_point(value: Point) -> !:

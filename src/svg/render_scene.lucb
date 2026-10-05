@@ -25,7 +25,7 @@ struct Renderer:
     var context_transform: Matrix = Matrix()
     var context_box: Rect? = none
 
-    func make(picture: const Picture*, width: usize, height: usize, linear: bool) -> Renderer!:
+    static func make(picture: const Picture*, width: usize, height: usize, linear: bool) -> Renderer!:
         return Renderer(picture = picture, cover = try Coverage.make(width, height), linear = linear)
 
     func release():
