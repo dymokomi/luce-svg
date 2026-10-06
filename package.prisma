@@ -10,37 +10,31 @@ def package "luce-svg" {
 
     def dependency "luce-std" {
         str owner = "dymokomi"
-        str version = "^0.6.0"
         str path = "../luce-std"
     }
 
     def dependency "luce-fonts" {
         str owner = "dymokomi"
-        str version = "^0.7.0"
         str path = "../luce-fonts"
     }
 
     def dependency "luce-png" {
         str owner = "dymokomi"
-        str version = "^0.9.0"
         str path = "../luce-png"
     }
 
     def dependency "luce-jpeg" {
         str owner = "dymokomi"
-        str version = "^0.9.0"
         str path = "../luce-jpeg"
     }
 
     def dependency "luce-compress" {
         str owner = "dymokomi"
-        str version = "^0.8.0"
         str path = "../luce-compress"
     }
 
     def dependency "luce-color" {
         str owner = "dymokomi"
-        str version = "^0.7.0"
         str path = "../luce-color"
     }
 }
