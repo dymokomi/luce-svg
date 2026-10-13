@@ -11,7 +11,7 @@
 #
 #==============================================================================================
 
-from luce_std import files, math
+from luce_std import files, math, paths
 import memory
 import c as c_api
 import strings
@@ -34,9 +34,7 @@ pub func is_svg(path: str) -> bool:
 
 ## The SVG at `path` drawn as pixels, refusing more than `max_pixels`.
 pub func render_svg(path: str, max_bytes: usize, max_pixels: usize) -> Rendered!:
-    var owned_path: str = ""
-    with memory.heap:
-        owned_path = try strings.copy(path)
+    let owned_path = try strings.copy(path)
     defer strings.release(owned_path)
     let bytes = try files.read((c_api.str)owned_path, limit = max_bytes)
     defer bytes.release()
@@ -59,7 +57,11 @@ pub func render_svg(path: str, max_bytes: usize, max_pixels: usize) -> Rendered!
     return Rendered(width = width, height = height, pixels = pixels)
 
 test "an SVG opens drawn in color, a small one scaled up":
-    let path = "/tmp/luce-svg-render-test.svg"
+    var folder = try files.TemporaryDirectory()
+    defer folder.destroy()
+    let joined = try paths.join(folder.path(), "render-test.svg")
+    defer joined.release()
+    let path = joined.value
     try files.write_text(path, "<svg viewBox=\"0 0 32 16\"><rect width=\"16\" height=\"16\" fill=\"#ff0000\"/><circle cx=\"24\" cy=\"8\" r=\"8\" fill=\"blue\"/></svg>")
     let rendered = try render_svg(path, 1048576, 16777216)
     defer free(rendered.pixels) in memory.heap
@@ -94,7 +96,11 @@ func ink_of(rendered: const Rendered*, r: f32, g: f32, b: f32) -> Ink:
     return found
 
 test "SVG text is set in its color where it stands, in paint order":
-    let path = "/tmp/luce-svg-text-test.svg"
+    var folder = try files.TemporaryDirectory()
+    defer folder.destroy()
+    let joined = try paths.join(folder.path(), "text-test.svg")
+    defer joined.release()
+    let path = joined.value
     # 1024 by 512 pixels: 5.12 pixels a unit. Red text on blue, a green bar over its end,
     # and centred text in a group scaled by two.
     try files.write_text(path, "<svg viewBox=\"0 0 200 100\"><rect width=\"200\" height=\"100\" fill=\"blue\"/><text x=\"20\" y=\"40\" font-family=\"NoSuchFont, sans-serif\" font-size=\"30\" fill=\"#ff0000\">HHHH</text><rect x=\"60\" y=\"0\" width=\"10\" height=\"50\" fill=\"lime\"/><g transform=\"scale(2)\"><text x=\"50\" y=\"45\" text-anchor=\"middle\" font-family=\"serif\" font-size=\"10\" font-weight=\"bold\" fill=\"white\">MMM</text></g></svg>")

@@ -134,10 +134,8 @@ func style_for(family: str, weight: u32, italic: bool) -> str!:
         if score < best_score:
             best = name
             best_score = score
-    var copied = ""
-    with memory.heap:
-        copied = try strings.copy(best)
-    return copied
+    # in the caller's allocator, which releases it
+    return try strings.copy(best)
 
 ## The weight a style's name suggests (400 when it names none).
 func weight_named(name: str) -> u32:

@@ -27,7 +27,7 @@ pub func load(source: str, options: Options = Options()) -> interop.Reference[Pi
         native.close()
         free(native) in memory.heap
     try convert_tree(&tree, options, native)
-    return try interop.Reference[Picture].adopt(native, picture_type)
+    return try interop.Reference[Picture].adopt(native, picture_type, memory.heap)
 
 ## The transform that stretches the picture's own size over a `width` by `height` bitmap.
 pub func fit_transform(picture: const Picture*, width: u32, height: u32) -> Matrix:
