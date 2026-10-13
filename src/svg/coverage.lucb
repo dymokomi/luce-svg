@@ -7,7 +7,8 @@
 #       row-major buffer (one spare cell per row), and a prefix sum along each row turns it
 #       into per-pixel coverage, which is exact for polygons. Fills trace an element's
 #       outlines as they are (strokes are traced in stroke.lucb). `rasterize` resolves each
-#       contour into an 8-bit mask, the higher value winning where shapes overlap.
+#       element's fill, then its stroke, into an 8-bit mask, composited source-over as
+#       rgba.lucb composites colors, so a mask is the alpha a full renderer draws.
 #
 #==============================================================================================
 
@@ -175,20 +176,31 @@ func accumulate_polygon(acc: f32[], width: usize, height: usize, polygon: const 
             b = swap
         accumulate(acc, width, height, a.x, a.y, b.x, b.y)
 
-## Resolve the accumulator into `coverage` at `opacity`, taking the higher value
-## where shapes overlap, then clear it for the next shape.
-func resolve_coverage(acc: f32[], width: usize, height: usize, opacity: f64, coverage: u8[]):
+## The coverage of a pixel whose accumulated winding is `sum`: nonzero clamps it to
+## one; even-odd folds it, so a pixel covered twice is empty (exact for whole windings,
+## the usual approximation along edges).
+func covered(sum: f32, evenodd: bool) -> f64:
+    let winding = math.abs((f64)sum)
+    if not evenodd:
+        return math.min(1.0, winding)
+    let folded = winding - 2.0 * math.floor(winding * 0.5)
+    return 2.0 - folded if folded > 1.0 else folded
+
+## Resolve the accumulated outlines into coverage at `opacity` and composite them over
+## `coverage` (source-over: a pixel at a gets c(1 - a) more), clearing `acc`.
+func resolve_coverage(acc: f32[], width: usize, height: usize, opacity: f64, evenodd: bool, coverage: u8[]):
     let stride = width + 1
     for row in 0..<height:
         var sum: f32 = 0.0
         for column in 0..<width:
             sum += acc[row * stride + column]
             acc[row * stride + column] = 0.0
-            let value = math.min(1.0, math.abs((f64)sum)) * opacity
-            let byte = (u8)(value * 255.0 + 0.5)
+            let value = covered(sum, evenodd) * opacity
+            if value < 1.0 / 512.0:
+                continue
             let slot = row * width + column
-            if byte > coverage[slot]:
-                coverage[slot] = byte
+            let below = (f64)coverage[slot] / 255.0
+            coverage[slot] = (u8)((value + below * (1.0 - value)) * 255.0 + 0.5)
         acc[row * stride + width] = 0.0
 
 ## Accumulate a contour's outline for filling; its winding is the author's.
@@ -211,7 +223,9 @@ func accumulator(width: u32, height: u32) -> f32[]!:
 
 ## Rasterise `drawing` into `coverage`, `width * height` bytes, top-down: 255 where
 ## a fill or stroke covers a pixel fully, less along edges and under partial opacity.
-## Strokes get their width, caps, joins and dashes; fills use the nonzero rule.
+## Element by element, all of its fill outlines accumulate together by its fill rule
+## (so holes stay open), then its strokes, each composited source-over onto the mask.
+## Strokes get their width, caps, joins and dashes.
 ## Colors are ignored: this is the mask a caller tints, as luce-ui does for icons.
 pub func rasterize(drawing: const Drawing*, width: u32, height: u32, coverage: u8[]) -> !:
     let acc = try accumulator(width, height)
@@ -223,13 +237,24 @@ pub func rasterize(drawing: const Drawing*, width: u32, height: u32, coverage: u
     let w = (usize)width
     let h = (usize)height
     let fit = placement(drawing, width, height)
-    for contour_index in 0..<drawing.contour_used:
-        let contour = drawing.contours[contour_index]
-        if contour.length < 1:
-            continue
-        if contour.fill.painted and contour.length >= 3:
-            trace_fill(acc, w, h, drawing, contour, fit)
-            resolve_coverage(acc, w, h, contour.fill_opacity, coverage)
-        if contour.stroke.painted:
-            try trace_stroke(acc, w, h, drawing, contour, fit)
-            resolve_coverage(acc, w, h, contour.stroke_opacity, coverage)
+    var start: usize = 0
+    while start < drawing.contour_used:
+        # The element's contours run from `start` to `end`, sharing one style.
+        let head = drawing.contours[start]
+        var end = start + 1
+        while end < drawing.contour_used and drawing.contours[end].element == head.element:
+            end += 1
+        if head.fill.painted:
+            var traced = false
+            for index in start..<end:
+                if drawing.contours[index].length >= 3:
+                    trace_fill(acc, w, h, drawing, drawing.contours[index], fit)
+                    traced = true
+            if traced:
+                resolve_coverage(acc, w, h, head.fill_opacity, head.evenodd, coverage)
+        if head.stroke.painted:
+            for index in start..<end:
+                if drawing.contours[index].length >= 1:
+                    try trace_stroke(acc, w, h, drawing, drawing.contours[index], fit)
+            resolve_coverage(acc, w, h, head.stroke_opacity, false, coverage)
+        start = end

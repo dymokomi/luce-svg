@@ -40,6 +40,43 @@ test "the rasteriser covers a stroked circle's ring and its filled disc with sof
     try rasterize(filled.value(), 24, 24, coverage[..<24 * 24])
     assert(coverage[12 * 24 + 12] > 120 and coverage[12 * 24 + 12] < 135 and coverage[1 * 24 + 1] == 0)
 
+test "an element's subpaths fill as one shape by its fill rule, so holes stay open":
+    var coverage: u8[24 * 24]
+    # The inner square winds the same way as the outer: even-odd cuts a hole, nonzero does not.
+    let evenodd = try parse("<svg viewBox=\"0 0 24 24\"><path d=\"M2 2h20v20H2ZM8 8h8v8H8Z\" fill-rule=\"evenodd\"/></svg>")
+    defer evenodd.release()
+    try rasterize(evenodd.value(), 24, 24, coverage)
+    assert(coverage[12 * 24 + 12] == 0 and coverage[4 * 24 + 4] == 255)
+    let nonzero = try parse("<svg viewBox=\"0 0 24 24\"><path d=\"M2 2h20v20H2ZM8 8h8v8H8Z\"/></svg>")
+    defer nonzero.release()
+    try rasterize(nonzero.value(), 24, 24, coverage)
+    assert(coverage[12 * 24 + 12] == 255)
+    # Wound the other way the inner square is a hole by nonzero too, and the rule is inherited.
+    let opposite = try parse("<svg viewBox=\"0 0 24 24\"><g fill-rule=\"evenodd\"><path d=\"M2 2h20v20H2ZM8 8v8h8V8Z\" fill-opacity=\"0.45\"/></g></svg>")
+    defer opposite.release()
+    try rasterize(opposite.value(), 24, 24, coverage)
+    assert(coverage[12 * 24 + 12] == 0 and coverage[4 * 24 + 4] == 115)
+    var pixels: f32[24 * 24 * 4]
+    try rasterize_rgba(evenodd.value(), 24, 24, pixels, Color())
+    assert(pixel_at(pixels, 24, 12, 12)[3] == 0.0 and near(pixel_at(pixels, 24, 4, 4)[3], 1.0, 1e-6))
+
+test "translucent fills and strokes build up source-over in the mask, as in color":
+    # Two half-opaque squares overlap: 0.5 + 0.5 * 0.5 = 0.75 where both lie.
+    let source = "<svg viewBox=\"0 0 24 24\"><rect x=\"2\" y=\"2\" width=\"12\" height=\"12\" fill-opacity=\"0.5\"/><rect x=\"8\" y=\"8\" width=\"12\" height=\"12\" fill-opacity=\"0.5\"/></svg>"
+    let drawing = try parse(source)
+    defer drawing.release()
+    var coverage: u8[24 * 24]
+    try rasterize(drawing.value(), 24, 24, coverage)
+    assert(coverage[4 * 24 + 4] == 128 and coverage[11 * 24 + 11] >= 191 and coverage[11 * 24 + 11] <= 192 and coverage[18 * 24 + 18] == 128)
+    var pixels: f32[24 * 24 * 4]
+    try rasterize_rgba(drawing.value(), 24, 24, pixels, Color())
+    assert(near(pixel_at(pixels, 24, 11, 11)[3] * 255.0, (f64)coverage[11 * 24 + 11], 1.0))
+    # An icon's tiers: a 0.6 stroke over a 0.45 fill reads 0.78, darker than either.
+    let icon = try parse("<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\"><rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" fill=\"currentColor\" fill-opacity=\"0.45\" stroke=\"none\"/><path d=\"M2 12h20\" stroke-width=\"4\" opacity=\".6\"/></svg>")
+    defer icon.release()
+    try rasterize(icon.value(), 24, 24, coverage)
+    assert(coverage[6 * 24 + 6] == 115 and coverage[12 * 24 + 12] > 196 and coverage[12 * 24 + 12] < 202 and coverage[12 * 24 + 3] == 153)
+
 test "a red circle over a blue rect composites in linear light with the coverage rasteriser's edges":
     let drawing = try parse("<svg viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\" fill=\"blue\"/><circle cx=\"5\" cy=\"5\" r=\"2.5\" fill=\"#ff0000\"/></svg>")
     defer drawing.release()

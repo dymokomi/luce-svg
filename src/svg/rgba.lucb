@@ -4,7 +4,7 @@
 #
 #   DESCRIPTION:
 #       Draws a Drawing in color. Element by element in document order, all of its fill
-#       outlines accumulate together (so holes cut by the nonzero rule stay open), then
+#       outlines accumulate together (so holes cut by its fill rule stay open), then
 #       composite source-over in the fill's paint; its stroke follows the same way. The
 #       anti-aliasing is the coverage rasteriser's, unquantised. Flat paints are decoded
 #       from sRGB to linear light before they blend, and gradients look up a 256-entry
@@ -68,7 +68,7 @@ func shade_of(drawing: const Drawing*, source: Paint, alpha: f64, current: Color
 
 ## Resolve the accumulator over `span` as coverage, blend `shade` over the straight-alpha
 ## `pixels` by it, and clear what was read.
-func composite(acc: f32[], width: usize, span: Span, shade: const Shade*, ramp: const f32[], pixels: f32[]):
+func composite(acc: f32[], width: usize, span: Span, shade: const Shade*, evenodd: bool, ramp: const f32[], pixels: f32[]):
     let stride = width + 1
     for row in span.row0..<span.row1:
         var sum: f32 = 0.0
@@ -76,7 +76,7 @@ func composite(acc: f32[], width: usize, span: Span, shade: const Shade*, ramp: 
             let cell = row * stride + column
             sum += acc[cell]
             acc[cell] = 0.0
-            var cover = math.min(1.0, math.abs((f64)sum)) * shade.alpha
+            var cover = covered(sum, evenodd) * shade.alpha
             # The running sum leaves float residue (about 1e-7) past a shape's right
             # edge; under half a 16-bit level it is no coverage, not a faint pixel.
             if column >= width or cover < 1.0 / 131072.0:
@@ -103,8 +103,8 @@ func composite(acc: f32[], width: usize, span: Span, shade: const Shade*, ramp: 
 ## as parse_color returns it), is decoded before blending, and gradients blend their
 ## stops in sRGB first. The drawing is placed as `rasterize` places it, scaled uniformly
 ## from the viewBox and centred. Each element's fill, then its stroke, composites
-## source-over in document order onto a transparent start, each as one shape by the
-## nonzero rule, anti-aliased by exact area coverage. Text is not drawn; see
+## source-over in document order onto a transparent start, each as one shape by its
+## fill rule (strokes nonzero), anti-aliased by exact area coverage. Text is not drawn; see
 ## rasterize_rgba_elements.
 pub func rasterize_rgba(drawing: const Drawing*, width: u32, height: u32, pixels: f32[], current: Color) -> !:
     if pixels.length != (usize)width * (usize)height * 4:
@@ -168,7 +168,7 @@ func composite_element(drawing: const Drawing*, acc: f32[], w: usize, h: usize, 
             if drawing.contours[index].length >= 3:
                 trace_fill(acc, w, h, drawing, drawing.contours[index], fit)
         let shade = shade_of(drawing, head.fill, head.fill_opacity, current_linear, fit, ramp)
-        composite(acc, w, element_span(drawing, first, last, fit, 0.0, w, h), &shade, ramp, pixels)
+        composite(acc, w, element_span(drawing, first, last, fit, 0.0, w, h), &shade, head.evenodd, ramp, pixels)
     if head.stroke.painted:
         for index in first..<last:
             if drawing.contours[index].length >= 1:
@@ -177,7 +177,7 @@ func composite_element(drawing: const Drawing*, acc: f32[], w: usize, h: usize, 
         let reach = math.max(1.5, head.pen.miter_limit if head.pen.join == Join.miter else 1.0)
         let span = element_span(drawing, first, last, fit, stroke_half(head, fit) * reach, w, h)
         let shade = shade_of(drawing, head.stroke, head.stroke_opacity, current_linear, fit, ramp)
-        composite(acc, w, span, &shade, ramp, pixels)
+        composite(acc, w, span, &shade, false, ramp, pixels)
 
 ## The transform from viewBox coordinates to the pixels of a `width` by `height`
 ## bitmap, as both rasterisers place the drawing.

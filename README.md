@@ -4,7 +4,7 @@ A small SVG parser, flattener and rasteriser for Luce/Base. It reads an SVG
 string (path, rect, circle, ellipse, line, polyline, polygon and nested `g`),
 flattens curves and arcs to polylines, and produces a `Drawing`: a viewBox size
 plus contours over a flat point buffer, in viewBox coordinates. Each contour
-records its element (an element's subpaths fill together by the nonzero rule)
+records its element (an element's subpaths fill together by its `fill-rule`)
 and its paints: fill and stroke as sRGB colors, currentColor or gradients,
 opacities, and its pen (width, caps, joins, miter limit, dashes). The parser
 depends on luce-std and luce-color (sRGB decoding); the picture renderer adds
@@ -201,9 +201,11 @@ Assets: rounded icons by Dy Mokomi (luciaos-assets), CC BY 4.0.
 
 `rasterize(drawing, width, height, coverage)` fills an 8-bit coverage bitmap with
 exact-area anti-aliasing (the signed-area accumulation font rasterisers use):
-fills by the nonzero rule, strokes with their width, caps, joins and dash
-patterns, and fill/stroke opacity; it ignores colors and gradients. luce-ui draws icons through
-it as tinted masks.
+each element's subpaths filled together by its `fill-rule` (so holes stay open),
+strokes with their width, caps, joins and dash patterns, and fill/stroke opacity;
+elements composite source-over, so the mask is the alpha `rasterize_rgba` draws
+and translucent layers build up as in a browser. It ignores colors and gradients.
+luce-ui draws icons through it as tinted masks.
 
 `tools/conformance.py` renders every luciaos-assets icon with resvg and with
 `tools/render.lucb` at 256 px, ranks the differences and writes a side-by-side

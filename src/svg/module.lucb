@@ -111,7 +111,7 @@ func multiply(outer: Matrix, inner: Matrix) -> Matrix:
                   f = outer.b * inner.e + outer.d * inner.f + outer.f)
 
 ## One flattened outline: a run of points plus how it should be drawn. The contours of one
-## element share `element` and its paints, and are filled together by the nonzero rule.
+## element share `element` and its paints, and are filled together by its fill rule.
 struct Contour:
     var start: usize = 0
     var length: usize = 0
@@ -123,6 +123,8 @@ struct Contour:
     ## The paints' opacities, each already multiplied by the element's and its groups' `opacity`.
     var fill_opacity: f64 = 1.0
     var stroke_opacity: f64 = 1.0
+    ## The element's fill rule: even-odd, else nonzero.
+    var evenodd: bool = false
 
 # mark: The drawing ===========================================================================
 
@@ -202,7 +204,7 @@ pub struct Drawing:
         try self.add_contour(Contour(start = start, length = length, closed = closed, element = self.element,
                                      fill = style.fill if fillable else Paint(), stroke = style.stroke,
                                      pen = style.pen, fill_opacity = style.fill_opacity * style.opacity,
-                                     stroke_opacity = style.stroke_opacity * style.opacity))
+                                     stroke_opacity = style.stroke_opacity * style.opacity, evenodd = style.evenodd))
 
     ## The viewBox width (or the `width` attribute, else 24).
     pub func view_width() -> f64:
